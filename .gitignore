@@ -1,0 +1,5 @@
+datasets/
+docs/
+.DS_Store
+.claude/
+.idea/
