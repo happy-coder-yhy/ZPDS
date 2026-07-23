@@ -28,6 +28,8 @@ from zpds_prepare.readers.guida_reader import (
 from zpds_prepare.detectors.black_frame import detect_black_frames
 from zpds_prepare.detectors.timestamp_gap import detect_timestamp_gaps
 from zpds_prepare.detectors.imu_gap import detect_imu_gaps
+from zpds_prepare.detectors.frame_count import detect_frame_count_mismatch
+from zpds_prepare.detectors.bad_frame import detect_bad_frames
 from zpds_prepare.decisions.segment_planner import (
     plan_segments,
     get_issue_summary,
@@ -156,9 +158,36 @@ def main():
 
     all_issues = []
 
-    # 2a. 黑屏检测
-    print("\n  [2a] 黑屏检测...")
+    # 2a. 帧数一致性检查
+    print("\n  [2a] 帧数一致性检查...")
+    fc_issues = detect_frame_count_mismatch(
+        index_frame_count=len(timestamps_ns),
+        meta_frame_count=meta["frame_count"],
+        timestamps_ns=timestamps_ns,
+        stream_id="ego_rgb",
+    )
+    all_issues.extend(fc_issues)
+    print(f"    发现 {len(fc_issues)} 个不一致")
+    for iss in fc_issues:
+        print(f"      [{iss.decision}] Index={iss.details.get('index_frame_count')} vs "
+              f"Meta={iss.details.get('meta_frame_count')}, diff={iss.details.get('difference')}")
+
+    # 2b. 坏帧检测
+    print("\n  [2b] 坏帧检测...")
     color_mkv = get_color_mkv(dataset_path)
+    bad_issues = detect_bad_frames(
+        video_path=color_mkv,
+        timestamps_ns=timestamps_ns,
+        stream_id="ego_rgb",
+    )
+    all_issues.extend(bad_issues)
+    print(f"    发现 {len(bad_issues)} 个坏帧区间")
+    for iss in bad_issues:
+        print(f"      [{iss.decision}] {iss.details.get('bad_frame_count')} 帧 "
+              f"({iss.details.get('bad_ratio', 0)*100:.1f}%)")
+
+    # 2c. 黑屏检测
+    print("\n  [2c] 黑屏检测...")
     min_black_duration_ns = int(min_black_duration_s * 1_000_000_000)
     edge_tolerance_ns = int(edge_tolerance_s * 1_000_000_000)
 
@@ -175,8 +204,8 @@ def main():
         print(f"      [{iss.decision}] {iss.start_ns:,} → {iss.end_ns:,} "
               f"({(iss.end_ns - iss.start_ns)/1e9:.2f}s, {iss.details.get('frame_count', '?')} 帧)")
 
-    # 2b. 视频时间戳缺口检测
-    print("\n  [2b] 视频时间戳缺口检测...")
+    # 2d. 视频时间戳缺口检测
+    print("\n  [2d] 视频时间戳缺口检测...")
     expected_video_interval_ns = int(1_000_000_000 / EXPECTED_VIDEO_FPS)
     video_split_gap_ns = int(video_split_gap_s * 1_000_000_000)
 
@@ -194,8 +223,8 @@ def main():
               f"gap={iss.details.get('gap_ms', '?')}ms, "
               f"est. missing={iss.details.get('estimated_missing_frames', '?')} 帧")
 
-    # 2c. IMU 时间戳缺口检测
-    print("\n  [2c] IMU 时间戳缺口检测...")
+    # 2e. IMU 时间戳缺口检测
+    print("\n  [2e] IMU 时间戳缺口检测...")
     expected_imu_interval_ns = int(1_000_000_000 / EXPECTED_IMU_HZ)
     imu_split_gap_ns = int(imu_split_gap_s * 1_000_000_000)
 

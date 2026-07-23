@@ -32,8 +32,8 @@ from segment.calibration import extract_calibration, write_calibration
 from segment.segment_writer import build_segment_json, write_segment_json
 from segment.validator import validate_segment, write_validation_report
 
-# ---- 已有 QC 模块 ----
-from video_checker import check_black_frames
+# ---- QC 模块（使用新版统一检测器） ----
+from zpds_prepare.detectors.black_frame import detect_black_frames
 
 # ============================================================
 # 配置
@@ -64,13 +64,28 @@ def main():
     # ================================================================
     step_header(1, "确定有效时间区间 (Span)")
 
-    # 运行已有的黑屏检测获取黑帧列表
-    color_path = str(Path(DATASET) / "color.mp4")
-    black_result = check_black_frames(color_path)
+    # 运行黑屏检测（使用新版统一检测器）
+    color_mkv = str(Path(DATASET) / "color_000000.mkv")
+    index_frames_all = load_index(DATASET)
+    timestamps_all = [f["timestamp_ns"] for f in index_frames_all]
+    black_issues = detect_black_frames(
+        video_path=color_mkv,
+        timestamps_ns=timestamps_all,
+        mean_intensity_threshold=cfg["video"].get("black_detection", {}).get(
+            "mean_intensity_threshold", cfg["video"].get("black_threshold", 5.0)
+        ),
+        min_duration_ns=int(cfg["video"].get("black_detection", {}).get(
+            "min_duration_s", cfg["video"].get("min_black_duration_s", 0.5)
+        ) * 1_000_000_000),
+        edge_tolerance_ns=int(cfg["video"].get("black_detection", {}).get(
+            "edge_tolerance_s", 1.0
+        ) * 1_000_000_000),
+    )
 
     span = determine_span(
         dataset_path=DATASET,
-        black_frame_indices=black_result["black_list"] if black_result["black_count"] > 0 else None,
+        black_frame_indices=None,
+        black_issues=black_issues if black_issues else None,
         imu_gap_samples=None,   # 当前样本无 IMU 中断
         timestamp_gaps=None,    # 当前样本无时间戳跳变
         config_path=CONFIG_PATH,

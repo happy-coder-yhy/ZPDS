@@ -59,6 +59,7 @@ def determine_span(
     imu_gap_samples: list[tuple] | None = None,
     timestamp_gaps: list[tuple] | None = None,
     config_path: str = "config.yaml",
+    black_issues: list | None = None,  # list[QualityIssue], 新版统一格式
 ) -> dict:
     """确定一个 Session 的有效时间区间。
 
@@ -88,6 +89,23 @@ def determine_span(
 
     timestamps = [f["timestamp_ns"] for f in frames]
     min_black_duration_ns = int(cfg["video"]["min_black_duration_s"] * 1_000_000_000)
+
+    # 若传入了新版 QualityIssue 列表，从中提取头部 trim 信息
+    if black_issues and not black_frame_indices:
+        head_trim_issues = [
+            iss for iss in black_issues
+            if iss.issue_type == "continuous_black_frames" and iss.decision == "trim"
+        ]
+        if head_trim_issues:
+            # 取最晚的头部 trim 结束点
+            latest_trim_end = max(iss.end_ns for iss in head_trim_issues)
+            # 计算对应的帧索引（第一个时间戳 > latest_trim_end 的帧）
+            for i, ts in enumerate(timestamps):
+                if ts >= latest_trim_end:
+                    black_frame_indices = list(range(0, i))
+                    break
+            if black_frame_indices is None:
+                black_frame_indices = []
 
     # ---- 计算头部裁剪 ----
     head_trim_ns = 0
