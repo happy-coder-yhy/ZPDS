@@ -1,19 +1,35 @@
 # ZPDS Prepared Segment 配置
 # 墨现 Guida Ego 默认阈值
 
+# ---- 视频质量检测 ----
 video:
-  black_threshold: 5          # 黑屏灰度阈值 (0-255)
-  min_black_duration_s: 0.5   # 连续黑屏超过此秒数才裁切
+  black_threshold: 5          # 黑屏灰度阈值 (0-255)，向下兼容旧代码
+  min_black_duration_s: 0.5   # 连续黑屏超过此秒数才裁切，向下兼容
+  # 新版黑屏检测参数
+  black_detection:
+    mean_intensity_threshold: 5.0    # 灰度均值低于此值视为黑屏
+    min_duration_s: 0.5              # 连续黑屏最短持续时长
+    edge_tolerance_s: 1.0            # 距首尾距离在此之内视为边缘 trim
 
+# ---- 时间戳异常检测 ----
 timestamp:
-  video_gap_factor: 2.0       # 帧间隔超过 normal* N 倍视为缺口
-  imu_gap_factor: 3.0         # IMU 间隔超过 normal* N 倍视为缺口
+  video_gap_factor: 2.0       # 帧间隔超过 normal* N 倍视为缺口，向下兼容
+  imu_gap_factor: 3.0         # IMU 间隔超过 normal* N 倍视为缺口，向下兼容
+  # 新版分级阈值
+  video:
+    gap_factor: 2.0                 # 视频帧间隔倍数阈值
+    split_gap_s: 0.5                # 缺口超过此秒数建议切分
+  imu:
+    gap_factor: 3.0                 # IMU 采样间隔倍数阈值
+    split_gap_s: 1.0                # 缺口超过此秒数建议切分或隔离
 
+# ---- 输出 ----
 output:
   target_fps: 30.0            # 输出 CFR 帧率
   rgb_codec: "avc1"           # H.264 fourcc (fallback: mp4v)
   rgb_pix_fmt: "yuv420p"      # 兼容性像素格式（OpenCV 尽力）
 
+# ---- Segment 约束 ----
 segment:
   min_duration_s: 1.0         # 最小 segment 时长
   max_duration_s: 120.0       # 最大 segment 时长
