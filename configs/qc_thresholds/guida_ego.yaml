@@ -1,0 +1,16 @@
+# Guida Ego (墨现) — QC 阈值
+profile: guida_ego
+
+stage2_time:
+  max_gap_ms: 40           # 时间戳最大允许间隔 (ms)
+
+stage3_visual:
+  black_threshold: 5        # 黑屏灰度阈值
+  overexposure_ratio: 0.95  # 过曝像素比例
+
+stage6_imu:
+  max_gap_s: 0.06           # IMU 最大允许中断 (s)
+  sample_rate_hz: 50
+
+stage4_video_timing:
+  vfr_tolerance: 0.01       # VFR 容忍度

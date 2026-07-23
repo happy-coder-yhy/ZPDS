@@ -1,0 +1,18 @@
+# ZPDS 默认流水线配置
+pipeline:
+  version: "0.1.0"
+  stages: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  stop_on_fatal: true
+  parallel_stages: false
+
+segmentation:
+  min_segment_duration_s: 2.0
+  idle_trim_seconds: 0.5
+
+prepared:
+  target_fps: 30
+  depth_format: "zarr"
+  rgb_codec: "h264"
+
+export:
+  lerobot_version: "v3"

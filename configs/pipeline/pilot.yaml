@@ -1,0 +1,13 @@
+# ZPDS Pilot 阶段流水线配置
+pipeline:
+  version: "0.1.0"
+  stages: [0, 1, 2, 3, 6]  # pilot 阶段只跑基础检查
+  stop_on_fatal: true
+  parallel_stages: false
+
+segmentation:
+  min_segment_duration_s: 1.0
+
+prepared:
+  target_fps: 30
+  depth_format: "zarr"

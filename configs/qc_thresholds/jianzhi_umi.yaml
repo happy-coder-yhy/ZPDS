@@ -1,0 +1,16 @@
+# Jianzhi UMI (简智新创) — QC 阈值
+profile: jianzhi_umi
+
+stage2_time:
+  max_gap_ms: 50
+
+stage3_visual:
+  black_threshold: 5
+  overexposure_ratio: 0.95
+
+stage6_imu:
+  max_gap_s: 0.03
+  sample_rate_hz: 200
+
+stage7_robot:
+  joint_limit_margin: 0.01   # 关节限位裕度 (rad)

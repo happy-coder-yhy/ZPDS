@@ -1,0 +1,16 @@
+# Dunjia Ego (遁甲) — QC 阈值
+profile: dunjia_ego
+
+stage2_time:
+  max_gap_ms: 50
+
+stage3_visual:
+  black_threshold: 5
+  overexposure_ratio: 0.95
+
+stage6_imu:
+  max_gap_s: 0.03
+  sample_rate_hz: 196
+
+stage4_video_timing:
+  vfr_tolerance: 0.01

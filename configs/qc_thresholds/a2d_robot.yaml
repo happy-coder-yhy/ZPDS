@@ -1,0 +1,16 @@
+# A2D Robot (真机) — QC 阈值
+profile: a2d_robot
+
+stage2_time:
+  max_gap_ms: 100
+
+stage3_visual:
+  black_threshold: 5
+  overexposure_ratio: 0.95
+
+stage7_robot:
+  joint_limit_margin: 0.05
+  command_timeout_ms: 500
+
+stage8_calibration:
+  reprojection_error_max: 2.0  # 最大重投影误差 (px)

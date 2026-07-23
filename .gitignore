@@ -1,5 +1,6 @@
 datasets/
-docs/
 .DS_Store
 .claude/
 .idea/
+__pycache__/
+clean_report.txt

@@ -1,0 +1,8 @@
+# EPIC-KITCHENS-100 — QC 阈值
+profile: epic100
+
+stage1_structure:
+  check_pkl_integrity: true
+
+stage10_semantic:
+  vlm_model: "claude-sonnet-5"
