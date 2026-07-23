@@ -27,6 +27,9 @@ def build_segment_json(
     imu_rows: int,
     calibration_id: str = "calib_guida_001",
     revision: str = "r0001",
+    segment_id: str = "seg_000001",
+    session_id: str = "guida_session_001",
+    quality_issues: list[dict] | None = None,
 ) -> dict:
     """构建 segment.json 内容。
 
@@ -38,6 +41,9 @@ def build_segment_json(
         imu_rows: 规范化后的 IMU 行数
         calibration_id: 标定 ID
         revision: 修订版本号
+        segment_id: Segment 唯一 ID
+        session_id: 来源 Session ID
+        quality_issues: 落在此 Segment 内的 QualityIssue 列表
 
     Returns:
         segment JSON dict
@@ -53,11 +59,11 @@ def build_segment_json(
     segment = {
         "zrds_version": "0.1.0",
         "record_revision": revision,
-        "segment_id": "seg_000001",
+        "segment_id": segment_id,
         "source_type": "ego",
 
         "source_session": {
-            "session_id": "guida_session_001",
+            "session_id": session_id,
             "session_uri": str(data_dir.resolve()),
         },
 
@@ -159,8 +165,8 @@ def build_segment_json(
         "calibration_uri": "calibration/calibration.json",
 
         "quality": {
-            "status": "pass",
-            "issues": [],
+            "status": "warn" if (quality_issues and len(quality_issues) > 0) else "pass",
+            "issues": quality_issues or [],
         },
     }
 

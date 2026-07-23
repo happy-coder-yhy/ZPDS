@@ -5,3 +5,8 @@ datasets/
 __pycache__/
 clean_report.txt
 prepared_segments/
+output/
+batch_summary.json
+zpds_prepare/__pycache__/
+Prepared_Segment_详解.md
+功能实现说明.md
