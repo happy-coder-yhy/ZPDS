@@ -5,3 +5,4 @@ docs/
 .idea/
 __pycache__/
 clean_report.txt
+prepared_segments/
