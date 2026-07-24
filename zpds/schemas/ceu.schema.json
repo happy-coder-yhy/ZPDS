@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zpds.dev/schemas/ceu.schema.json",
+  "title": "ZPDS Canonical Experience Unit",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "zpds_version",
+    "ceu_id",
+    "segment_id",
+    "time_range",
+    "boundary_source",
+    "task",
+    "agents",
+    "signals",
+    "outcome",
+    "quality",
+    "origin"
+  ],
+  "properties": {
+    "zpds_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "ceu_id": {
+      "type": "string",
+      "pattern": "^ceu_[a-z0-9_-]+$"
+    },
+    "segment_id": {
+      "type": "string",
+      "pattern": "^seg_[a-z0-9_-]+$"
+    },
+    "time_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start_ns",
+        "end_ns"
+      ],
+      "properties": {
+        "start_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_ns": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "boundary_source": {
+      "enum": [
+        "source_recorded",
+        "deterministic_transform",
+        "model_estimated",
+        "human_annotated",
+        "simulation_ground_truth",
+        "unknown"
+      ]
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instruction",
+        "origin"
+      ],
+      "properties": {
+        "instruction": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_type": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "agent_id",
+          "type"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "enum": [
+              "human",
+              "robot",
+              "simulation_agent"
+            ]
+          },
+          "role": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "signals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observations"
+      ],
+      "properties": {
+        "observations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "success",
+            "failure",
+            "partial",
+            "unknown"
+          ]
+        },
+        "failure_reason": {
+          "type": "string"
+        },
+        "recovery": {
+          "type": "boolean"
+        }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "training_usable",
+        "issues"
+      ],
+      "properties": {
+        "training_usable": {
+          "type": "boolean"
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "producer_id",
+        "source_refs"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "source_recorded",
+            "deterministic_transform",
+            "model_estimated",
+            "human_annotated",
+            "simulation_ground_truth",
+            "unknown"
+          ]
+        },
+        "producer_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

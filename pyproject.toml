@@ -23,10 +23,14 @@ classifiers = [
 
 dependencies = [
     "opencv-python>=4.8",
+    "jsonschema>=4.22",
     "numpy>=1.24",
     "pandas>=2.0",
     "pyyaml>=6.0",
 ]
+
+[project.scripts]
+zpds = "zpds.cli:main"
 
 [project.optional-dependencies]
 mcap = [
@@ -42,10 +46,15 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.1",
     "mypy>=1.0",
+    "types-jsonschema>=4.22",
+    "types-PyYAML>=6.0",
 ]
 
 [tool.setuptools.packages.find]
 include = ["zpds*"]
+
+[tool.setuptools.package-data]
+zpds = ["schemas/*.json"]
 
 [tool.ruff]
 line-length = 100
@@ -54,3 +63,15 @@ target-version = "py310"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = ["-p", "no:cacheprovider", "--basetemp=.pytest-tmp"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["zpds"]
+check_untyped_defs = true
+no_implicit_optional = true
+show_error_codes = true
+pretty = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unused_ignores = true

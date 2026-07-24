@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zpds.dev/schemas/revision.schema.json",
+  "title": "ZPDS Prepared Revision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "zpds_version",
+    "prep_revision",
+    "parent_revision",
+    "created_at",
+    "pipeline",
+    "conventions",
+    "changes"
+  ],
+  "properties": {
+    "zpds_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "prep_revision": {
+      "type": "string",
+      "pattern": "^r\\d{4,}$"
+    },
+    "parent_revision": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^r\\d{4,}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "code_commit",
+        "config_version",
+        "config_uri",
+        "config_hash"
+      ],
+      "properties": {
+        "name": {
+          "const": "zpds"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "code_commit": {
+          "type": "string",
+          "minLength": 7
+        },
+        "config_version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "config_uri": {
+          "type": "string",
+          "pattern": "^(?![A-Za-z]:)(?!/)(?!.*\\.\\.).+"
+        },
+        "config_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "conventions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "time_unit",
+        "time_interval",
+        "segment_time_origin_ns",
+        "length_unit",
+        "angle_unit",
+        "quaternion_order",
+        "pose_notation",
+        "coordinate_system"
+      ],
+      "properties": {
+        "time_unit": {
+          "const": "ns"
+        },
+        "time_interval": {
+          "const": "[start_ns,end_ns)"
+        },
+        "segment_time_origin_ns": {
+          "const": 0
+        },
+        "length_unit": {
+          "const": "m"
+        },
+        "angle_unit": {
+          "const": "rad"
+        },
+        "quaternion_order": {
+          "const": "xyzw"
+        },
+        "pose_notation": {
+          "const": "T_parent_child"
+        },
+        "coordinate_system": {
+          "const": "right-handed"
+        }
+      }
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "zpds_version": "0.1.0",
+  "prep_revision": "r0001",
+  "segment_id": "seg_wp0_quarantine_0001",
+  "source_profile": "jianzhi_umi",
+  "source_session": {
+    "session_id": "session_quarantine_0001",
+    "session_uri": "dataset://umi/jianzhi/session_quarantine_0001"
+  },
+  "source_assets": [
+    {
+      "source_asset_id": "umi_mcap",
+      "uri": "raw://umi/jianzhi/session_quarantine_0001/session.mcap",
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    }
+  ],
+  "timeline": {
+    "start_ns": 0,
+    "end_ns": 8000000000,
+    "continuous": true
+  },
+  "source_span": {
+    "source_clock_id": "umi_message_clock",
+    "start_ns": 1720000000000000000,
+    "end_ns": 1720000008000000000
+  },
+  "streams": [
+    {
+      "stream_id": "vio_pose",
+      "role": "state",
+      "modality": "pose",
+      "uri": "data/vio_pose.parquet",
+      "format": "parquet",
+      "time": {
+        "clock_id": "segment_time",
+        "sampling": "irregular",
+        "timestamp_column": "timestamp_ns",
+        "start_ns": 0,
+        "end_ns": 8000000000
+      },
+      "fields": [
+        {
+          "name": "translation",
+          "shape": [3],
+          "dtype": "float32",
+          "unit": "m",
+          "frame_id": "T_world_device"
+        },
+        {
+          "name": "quaternion_xyzw",
+          "shape": [4],
+          "dtype": "float32",
+          "unit": "1",
+          "frame_id": "T_world_device"
+        }
+      ],
+      "origin": {
+        "kind": "source_recorded",
+        "producer_id": "source_jianzhi_umi",
+        "source_refs": ["asset://umi_mcap"]
+      }
+    }
+  ],
+  "calibration_uri": null,
+  "quality": {
+    "status": "quarantine",
+    "decision": "quarantine",
+    "issues": [
+      {
+        "stage": 2,
+        "reason_code": "vio_reset",
+        "severity": "error",
+        "decision": "quarantine",
+        "message": "VIO pose 疑似发生坐标原点复位，等待人工确认边界。",
+        "evidence": [
+          {
+            "uri": "evidence/vio_reset_timeline.json",
+            "kind": "timeline",
+            "description": "复位点前后的平移和旋转跳变。",
+            "start_ns": 3900000000,
+            "end_ns": 4100000000
+          }
+        ]
+      }
+    ]
+  },
+  "producer": {
+    "producer_id": "zpds_prepare_wp0",
+    "name": "zpds",
+    "version": "0.1.0",
+    "code_commit": "0000000",
+    "config_version": "0.1.0",
+    "config_uri": "configs/pipeline/default.yaml",
+    "config_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

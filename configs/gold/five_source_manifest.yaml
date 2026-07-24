@@ -1,0 +1,285 @@
+manifest_version: 0.1.0
+zpds_version: 0.1.0
+status: draft
+data_root_env: ZPDS_DATA_ROOT
+designated_reviewer: xiandongfu123-droid
+samples:
+- sample_id: guida_authoritative_index
+  source_profile: guida_ego
+  relative_path: egos/墨现/index.jsonl
+  source_assets:
+  - asset_id: guida_index
+    role: index
+    relative_path: egos/墨现/index.jsonl
+    sha256: 2cecaf7714cb920949c6b0dddf2870e7a0ce4d7de07198ab85cffa7612cabea9
+    size_bytes: 73040
+  - asset_id: guida_color_preview
+    role: rgb
+    relative_path: egos/墨现/color.mp4
+    sha256: bfe8bfe3d513f70179d080c7a16f8105b68d98ec1baba6717c11b5042eef5fb1
+    size_bytes: 12889944
+  - asset_id: guida_depth_preview
+    role: depth
+    relative_path: egos/墨现/depth.mp4
+    sha256: ec5e10f8457ec67f8559eb1d6bb8f60f85b9daa494f509bee052b632cba0e9ad
+    size_bytes: 68434480
+  - asset_id: guida_imu_split
+    role: imu
+    relative_path: egos/墨现/imu/imu_000000.csv
+    sha256: 41ba946282054b18fdfe0d4c9224d8ff102bd707f8f63e293e890c678207baff
+    size_bytes: 152572
+  case_type: positive
+  expected_decision: keep
+  reason_codes: []
+  expected_boundary:
+    kind: none
+    rule: index.jsonl timestamp_ns 是权威时间轴，预览 MP4 仅用于 QA。
+  evidence: 已绑定 985 行 index、RGB/Depth 预览和 IMU 分片；待负责人复核逐帧关系。
+  review:
+    status: pending
+    reviewers: []
+    reviewed_at: null
+    notes: 资产哈希已收集，等待指定负责人确认。
+- sample_id: guida_meta_imu_mismatch
+  source_profile: guida_ego
+  relative_path: egos/墨现/meta.json
+  source_assets:
+  - asset_id: guida_meta
+    role: metadata
+    relative_path: egos/墨现/meta.json
+    sha256: 05a1e0e81e7baba8152eb32631dd6586ec77f614d44e764e5d9da648caf924c0
+    size_bytes: 3645
+  - asset_id: guida_imu_split_for_mismatch
+    role: imu
+    relative_path: egos/墨现/imu/imu_000000.csv
+    sha256: 41ba946282054b18fdfe0d4c9224d8ff102bd707f8f63e293e890c678207baff
+    size_bytes: 152572
+  case_type: negative
+  expected_decision: keep_with_flag
+  reason_codes:
+  - file_missing
+  expected_boundary:
+    kind: none
+    rule: meta 固定路径缺失时扫描 imu/imu_*.csv，不因元数据错误切段。
+  evidence: meta 声明 imu/imu.csv，但该文件不存在；imu/imu_000000.csv 存在。
+  review:
+    status: approved
+    reviewers:
+    - xiandongfu123-droid
+    reviewed_at: '2026-07-24T09:37:53+08:00'
+    notes: 确认 meta 指向的 imu/imu.csv 不存在，实际 imu_000000.csv 存在；同意 keep_with_flag，不产生物理边界。
+- sample_id: dunjia_h264_timing
+  source_profile: dunjia_ego
+  relative_path: egos/遁甲/20260618_084650_00.mcap
+  source_assets:
+  - asset_id: dunjia_mcap_for_h264
+    role: container
+    relative_path: egos/遁甲/20260618_084650_00.mcap
+    sha256: 19809ada38bc5c4a313693e6057b52455832bc8cc4afad99d3109255748cb865
+    size_bytes: 224430887
+  case_type: positive
+  expected_decision: keep
+  reason_codes: []
+  expected_boundary:
+    kind: none
+    rule: 重建 H264 时保留消息时间、关键帧/GOP 与 topic 映射。
+  evidence: MCAP 文件已绑定；消息索引、GOP 与 sample map 待 Adapter 实现后复核。
+  review:
+    status: pending
+    reviewers: []
+    reviewed_at: null
+    notes: 等待确定消息窗口并生成解码证据。
+- sample_id: dunjia_dual_clock
+  source_profile: dunjia_ego
+  relative_path: egos/遁甲/20260618_084650_00.mcap
+  source_assets:
+  - asset_id: dunjia_mcap_for_clock
+    role: container
+    relative_path: egos/遁甲/20260618_084650_00.mcap
+    sha256: 19809ada38bc5c4a313693e6057b52455832bc8cc4afad99d3109255748cb865
+    size_bytes: 224430887
+  case_type: uncertain
+  expected_decision: quarantine
+  reason_codes:
+  - clock_misalign
+  expected_boundary:
+    kind: physical
+    rule: log time 与消息内时间偏差超阈值且无法校正时形成硬边界。
+  evidence: MCAP 文件已绑定；log time、message time 和拟合残差待 Stage 2 生成。
+  review:
+    status: pending
+    reviewers: []
+    reviewed_at: null
+    notes: 阈值和真实异常窗口尚未确认。
+- sample_id: umi_dual_robot_groups
+  source_profile: jianzhi_umi
+  relative_path: umi/简智新创/01767.mcap
+  source_assets:
+  - asset_id: umi_mcap_for_groups
+    role: container
+    relative_path: umi/简智新创/01767.mcap
+    sha256: f1d3165e64a9444f6e30b93a0657dfbf5853e2a5c4b33f906cb07a997f3cee25
+    size_bytes: 53718300
+  case_type: positive
+  expected_decision: keep
+  reason_codes: []
+  expected_boundary:
+    kind: none
+    rule: robot0 与 robot1 分组始终显式保留。
+  evidence: MCAP 文件已绑定；topic 与 robot group 清单待 Adapter 实现后生成。
+  review:
+    status: pending
+    reviewers: []
+    reviewed_at: null
+    notes: 等待负责人确认左右端业务含义。
+- sample_id: umi_vio_reset
+  source_profile: jianzhi_umi
+  relative_path: umi/简智新创/01767.mcap
+  source_assets:
+  - asset_id: umi_mcap_for_vio
+    role: container
+    relative_path: umi/简智新创/01767.mcap
+    sha256: f1d3165e64a9444f6e30b93a0657dfbf5853e2a5c4b33f906cb07a997f3cee25
+    size_bytes: 53718300
+  case_type: boundary
+  expected_decision: split
+  reason_codes:
+  - vio_reset
+  expected_boundary:
+    kind: physical
+    rule: VIO 坐标原点复位处禁止插值并拆分 Prepared Segment。
+  evidence: MCAP 文件已绑定；VIO reset 时间窗和 pose 跳变图待 Stage 2 生成。
+  review:
+    status: pending
+    reviewers: []
+    reviewed_at: null
+    notes: 尚未确认真实 reset 窗口，不得提前批准。
+- sample_id: a2d_complete_camera_tuple
+  source_profile: a2d_robot
+  relative_path: 真机/A2D/camera/0
+  source_assets:
+  - asset_id: a2d_0_hand_left_color
+    role: hand_left_color
+    relative_path: 真机/A2D/camera/0/hand_left_color.jpg
+    sha256: 6506fa9230096c7fa4317caaac39c718109cb822a86d000bb2b53357342c7a9d
+    size_bytes: 103320
+  - asset_id: a2d_0_hand_left_depth
+    role: hand_left_depth
+    relative_path: 真机/A2D/camera/0/hand_left_depth.png
+    sha256: 61c5834f1ebdc68dbc0a0fbd611df4235751bfd38c0e52bd5f3ef4824ab8a08f
+    size_bytes: 214648
+  - asset_id: a2d_0_hand_right_color
+    role: hand_right_color
+    relative_path: 真机/A2D/camera/0/hand_right_color.jpg
+    sha256: 906173a987fbb43d60cfa458ebe4205f6d89cd2af8fc73795c83d6ca0b1a5800
+    size_bytes: 107971
+  - asset_id: a2d_0_hand_right_depth
+    role: hand_right_depth
+    relative_path: 真机/A2D/camera/0/hand_right_depth.png
+    sha256: 1ba06145401d7d12231ca1e8b59fc4e3cbd14f64357d85b9c695fdb1c5401ec0
+    size_bytes: 216855
+  - asset_id: a2d_0_head_color
+    role: head_color
+    relative_path: 真机/A2D/camera/0/head_color.jpg
+    sha256: d0a265e934c67396a5d1d108fe47c102727872eb12632cccc796dbf4b40f67ec
+    size_bytes: 76955
+  - asset_id: a2d_0_head_depth
+    role: head_depth
+    relative_path: 真机/A2D/camera/0/head_depth.png
+    sha256: 84417db7cced2608d1434fb2155fecf68af065dce79cb5f0465485f796dd27c2
+    size_bytes: 160970
+  case_type: positive
+  expected_decision: keep
+  reason_codes: []
+  expected_boundary:
+    kind: none
+    rule: head/left/right 的 color/depth 六元组完整。
+  evidence: camera/0 的 head/left/right × color/depth 六个文件均存在并已绑定哈希。
+  review:
+    status: pending
+    reviewers: []
+    reviewed_at: null
+    notes: 文件完整性已确认；可解码性和内容语义等待负责人复核。
+- sample_id: a2d_incomplete_camera_tuple
+  source_profile: a2d_robot
+  relative_path: 真机/A2D/camera/1147
+  source_assets:
+  - asset_id: a2d_1147_hand_left_color
+    role: hand_left_color
+    relative_path: 真机/A2D/camera/1147/hand_left_color.jpg
+    sha256: 917b0a360d849eb7250184d216caf3993b9ac84146444807e8f97cbdf73b6abf
+    size_bytes: 100704
+  - asset_id: a2d_1147_hand_left_depth
+    role: hand_left_depth
+    relative_path: 真机/A2D/camera/1147/hand_left_depth.png
+    sha256: 166f3b74f4dfce5abbfb4adfd21a33d12332f4bd9a2e2cba09912e68721387a2
+    size_bytes: 223889
+  - asset_id: a2d_1147_hand_right_color
+    role: hand_right_color
+    relative_path: 真机/A2D/camera/1147/hand_right_color.jpg
+    sha256: 4f8be103dfc3e0a5d5cbce303de4cff8a9977ec43a44d39c1bf253e24088e6bf
+    size_bytes: 81654
+  case_type: negative
+  expected_decision: quarantine
+  reason_codes:
+  - required_stream_missing
+  - frame_mapping_unproven
+  expected_boundary:
+    kind: physical
+    rule: 关键视角缺失且不能证明与 HDF5 行映射时不得伪造同步。
+  evidence: camera/1147 仅有六项中的三项，缺 hand_right_depth、head_color、head_depth。
+  review:
+    status: pending
+    reviewers: []
+    reviewed_at: null
+    notes: 文件缺失已确认；与 HDF5/ROS 的映射结论等待负责人复核。
+- sample_id: epic_annotation_linked
+  source_profile: epic100
+  relative_path: epic-kitchens-100/masks/P01/P01_01.pkl
+  source_assets:
+  - asset_id: epic_mask_p01_01
+    role: mask_annotation
+    relative_path: epic-kitchens-100/masks/P01/P01_01.pkl
+    sha256: d11a387840a54cbd492a962ee5e6fc2fadcccbfcf9f6d3d0e6ec1597ee7af49a
+    size_bytes: 32959543
+  - asset_id: epic_hand_object_p01_01
+    role: hand_object_annotation
+    relative_path: epic-kitchens-100/hand-objects/P01/P01_01.pkl
+    sha256: 8b5e607ab5773668551f08f988fe1f463ce01f809f45442eb0699611b9ac46c7
+    size_bytes: 13709834
+  case_type: positive
+  expected_decision: keep_with_flag
+  reason_codes:
+  - untrusted_input
+  expected_boundary:
+    kind: none
+    rule: pickle 在隔离进程解析，模型标注 origin 为 model_estimated。
+  evidence: 两个 Pickle 资产已做字节级哈希，未在主进程执行反序列化。
+  review:
+    status: pending
+    reviewers: []
+    reviewed_at: null
+    notes: 隔离解析器和原视频版本关联尚未实现，不能批准为 linked。
+- sample_id: epic_annotation_orphaned
+  source_profile: epic100
+  relative_path: epic-kitchens-100/masks/P01/P01_02.pkl
+  source_assets:
+  - asset_id: epic_mask_p01_02
+    role: mask_annotation
+    relative_path: epic-kitchens-100/masks/P01/P01_02.pkl
+    sha256: 97f079c33e49e81ba04584635c93d171d77203e13db06b8bc707d68d9b8db74d
+    size_bytes: 11619110
+  case_type: negative
+  expected_decision: quarantine
+  reason_codes:
+  - annotation_orphaned
+  - untrusted_input
+  expected_boundary:
+    kind: none
+    rule: 原视频或版本不匹配时不生成伪时间映射。
+  evidence: Pickle 资产已做字节级哈希；当前受控根中没有对应原视频资产。
+  review:
+    status: pending
+    reviewers: []
+    reviewed_at: null
+    notes: 等待负责人确认 orphaned 定义和许可处理。

@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zpds.dev/schemas/run_metrics.schema.json",
+  "title": "ZPDS Pipeline Run Metrics",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "zpds_version",
+    "run_id",
+    "session_id",
+    "status",
+    "config_hash",
+    "code_version",
+    "generated_at",
+    "stages",
+    "attempts",
+    "retries",
+    "duration_seconds",
+    "decisions_by_type",
+    "reason_codes",
+    "severities"
+  ],
+  "properties": {
+    "zpds_version": {
+      "const": "0.1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "running",
+        "succeeded",
+        "failed"
+      ]
+    },
+    "config_hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "code_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "stages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pending": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "running": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "succeeded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "retries": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "duration_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "decisions_by_type": {
+      "$ref": "#/$defs/counts"
+    },
+    "reason_codes": {
+      "$ref": "#/$defs/counts"
+    },
+    "severities": {
+      "$ref": "#/$defs/counts"
+    }
+  },
+  "$defs": {
+    "counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    }
+  }
+}

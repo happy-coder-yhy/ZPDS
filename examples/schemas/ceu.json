@@ -1,0 +1,42 @@
+{
+  "zpds_version": "0.1.0",
+  "ceu_id": "ceu_wp0_demo_0001",
+  "segment_id": "seg_wp0_demo_0001",
+  "time_range": {
+    "start_ns": 1000000000,
+    "end_ns": 7000000000
+  },
+  "boundary_source": "human_annotated",
+  "task": {
+    "instruction": "拿起杯子并放到托盘上",
+    "task_type": "pick_and_place",
+    "origin": "annotation://human_review_wp0/task_0001"
+  },
+  "agents": [
+    {
+      "agent_id": "operator",
+      "type": "human",
+      "role": "demonstrator"
+    }
+  ],
+  "signals": {
+    "observations": ["stream://seg_wp0_demo_0001/rgb"],
+    "states": ["stream://seg_wp0_demo_0001/imu"],
+    "actions": []
+  },
+  "outcome": {
+    "status": "success",
+    "recovery": false
+  },
+  "quality": {
+    "training_usable": true,
+    "issues": []
+  },
+  "origin": {
+    "kind": "human_annotated",
+    "producer_id": "human_review_wp0",
+    "source_refs": [
+      "segment://seg_wp0_demo_0001"
+    ]
+  }
+}

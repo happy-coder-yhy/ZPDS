@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zpds.dev/schemas/governance_config.schema.json",
+  "title": "ZPDS Governance Version Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "zpds_version",
+    "reason_code_registry_version",
+    "quality_view_registry_version",
+    "canonical_fields",
+    "legacy_aliases",
+    "conventions"
+  ],
+  "properties": {
+    "zpds_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "reason_code_registry_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "quality_view_registry_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "canonical_fields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["specification", "prepared_revision"],
+      "properties": {
+        "specification": {
+          "const": "zpds_version"
+        },
+        "prepared_revision": {
+          "const": "prep_revision"
+        }
+      }
+    },
+    "legacy_aliases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["zrds_version", "record_revision"],
+      "properties": {
+        "zrds_version": {
+          "const": "zpds_version"
+        },
+        "record_revision": {
+          "const": "prep_revision"
+        }
+      }
+    },
+    "conventions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "time_unit",
+        "interval",
+        "length_unit",
+        "angle_unit",
+        "quaternion_order",
+        "pose_notation",
+        "coordinate_system"
+      ],
+      "properties": {
+        "time_unit": {
+          "const": "ns"
+        },
+        "interval": {
+          "const": "[start_ns,end_ns)"
+        },
+        "length_unit": {
+          "const": "m"
+        },
+        "angle_unit": {
+          "const": "rad"
+        },
+        "quaternion_order": {
+          "const": "xyzw"
+        },
+        "pose_notation": {
+          "const": "T_parent_child"
+        },
+        "coordinate_system": {
+          "const": "right-handed:x-forward,y-left,z-up"
+        }
+      }
+    }
+  }
+}

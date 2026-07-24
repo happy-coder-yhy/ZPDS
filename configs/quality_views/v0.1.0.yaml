@@ -1,0 +1,101 @@
+registry_version: 0.1.0
+zpds_version: 0.1.0
+
+metrics:
+  - name: structure_readable
+    unit: ratio
+    direction: higher_is_better
+    description: 容器、索引和必需字段可读比例。
+  - name: source_traceability
+    unit: ratio
+    direction: higher_is_better
+    description: Prepared 样本可回溯到 Raw 资产的比例。
+  - name: schema_valid
+    unit: ratio
+    direction: higher_is_better
+    description: 产物通过当前 Schema 的比例。
+  - name: temporal_continuity
+    unit: ratio
+    direction: higher_is_better
+    description: 不含不可跨越 gap 或时钟回退的时间覆盖率。
+  - name: visual_clarity
+    unit: ratio
+    direction: higher_is_better
+    description: 满足清晰度阈值的有效画面比例。
+  - name: motion_quality
+    unit: ratio
+    direction: higher_is_better
+    description: 无冻结、异常跳变或明显丢帧的运动比例。
+  - name: depth_validity
+    unit: ratio
+    direction: higher_is_better
+    description: 单位已知且数值有效的深度像素比例。
+  - name: observation_completeness
+    unit: ratio
+    direction: higher_is_better
+    description: 行为学习所需 observation 的完整比例。
+  - name: state_completeness
+    unit: ratio
+    direction: higher_is_better
+    description: 行为学习所需 state 的完整比例。
+  - name: action_completeness
+    unit: ratio
+    direction: higher_is_better
+    description: 行为学习所需 action 的完整比例。
+  - name: action_observation_sync
+    unit: ns
+    direction: lower_is_better
+    description: action 与 observation 的时间对齐误差。
+  - name: robot_signal_validity
+    unit: ratio
+    direction: higher_is_better
+    description: 关节、夹爪和控制信号处于合法范围的比例。
+  - name: hand_presence_ratio
+    unit: ratio
+    direction: higher_is_better
+    description: 目标区间内检测到有效手部的比例。
+  - name: hand_track_continuity
+    unit: ratio
+    direction: higher_is_better
+    description: 手部轨迹连续覆盖率。
+  - name: hand_pose_confidence
+    unit: ratio
+    direction: higher_is_better
+    description: 手部姿态估计的聚合置信度。
+  - name: calibration_quality
+    unit: px
+    direction: lower_is_better
+    description: 相机或多传感器标定的重投影误差。
+
+views:
+  - view_id: technical_integrity
+    version: 0.1.0
+    description: 所有数据交付前必须满足的可读、连续、可追溯基线。
+    required_metrics:
+      [structure_readable, source_traceability, schema_valid, temporal_continuity]
+    optional_metrics: []
+    blocking_decisions: [quarantine, reject]
+  - view_id: world_model
+    version: 0.1.0
+    description: 世界模型训练关注视觉、运动、时间和可选深度质量。
+    required_metrics: [visual_clarity, motion_quality, temporal_continuity]
+    optional_metrics: [depth_validity]
+    blocking_decisions: [quarantine, reject]
+  - view_id: behavior_cloning
+    version: 0.1.0
+    description: 行为克隆关注观测、状态、动作和机器人信号的完整同步。
+    required_metrics:
+      - observation_completeness
+      - state_completeness
+      - action_completeness
+      - action_observation_sync
+      - robot_signal_validity
+    optional_metrics: [visual_clarity, calibration_quality]
+    blocking_decisions: [quarantine, reject]
+  - view_id: hand_pose
+    version: 0.1.0
+    description: 手部姿态任务关注手部存在、轨迹连续性和姿态可信度。
+    required_metrics:
+      [hand_presence_ratio, hand_track_continuity, hand_pose_confidence, visual_clarity]
+    optional_metrics: [calibration_quality, depth_validity]
+    blocking_decisions: [quarantine, reject]

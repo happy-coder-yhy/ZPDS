@@ -3,4 +3,14 @@ datasets/
 .claude/
 .idea/
 __pycache__/
+*.egg-info/
+.venv/
+.uv-cache/
+.mypy_cache/
+.pytest_cache/
+.pytest-tmp*/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 clean_report.txt

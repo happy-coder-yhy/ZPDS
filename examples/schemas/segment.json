@@ -1,0 +1,120 @@
+{
+  "zpds_version": "0.1.0",
+  "prep_revision": "r0001",
+  "segment_id": "seg_wp0_demo_0001",
+  "source_profile": "guida_ego",
+  "source_session": {
+    "session_id": "session_demo_0001",
+    "session_uri": "dataset://egos/guida/session_demo_0001"
+  },
+  "source_assets": [
+    {
+      "source_asset_id": "guida_index",
+      "uri": "raw://egos/guida/session_demo_0001/index.jsonl",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "source_asset_id": "guida_rgb",
+      "uri": "raw://egos/guida/session_demo_0001/color.mp4",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "source_asset_id": "guida_imu",
+      "uri": "raw://egos/guida/session_demo_0001/imu/imu_000000.csv",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "timeline": {
+    "start_ns": 0,
+    "end_ns": 10000000000,
+    "continuous": true
+  },
+  "source_span": {
+    "source_clock_id": "guida_device_clock",
+    "start_ns": 1710000000000000000,
+    "end_ns": 1710000010000000000
+  },
+  "streams": [
+    {
+      "stream_id": "rgb",
+      "role": "observation",
+      "modality": "color",
+      "uri": "data/rgb.mp4",
+      "format": "mp4",
+      "encoding": "h264",
+      "time": {
+        "clock_id": "segment_time",
+        "sampling": "cfr",
+        "rate_hz": 30.0,
+        "start_ns": 0,
+        "end_ns": 10000000000
+      },
+      "shape": [1080, 1920, 3],
+      "dtype": "uint8",
+      "frame_id": "camera_optical",
+      "origin": {
+        "kind": "source_recorded",
+        "producer_id": "source_guida",
+        "source_refs": [
+          "asset://guida_rgb",
+          "asset://guida_index"
+        ]
+      }
+    },
+    {
+      "stream_id": "imu",
+      "role": "state",
+      "modality": "imu",
+      "uri": "data/imu.parquet",
+      "format": "parquet",
+      "time": {
+        "clock_id": "segment_time",
+        "sampling": "irregular",
+        "timestamp_column": "timestamp_ns",
+        "start_ns": 0,
+        "end_ns": 10000000000
+      },
+      "fields": [
+        {
+          "name": "angular_velocity",
+          "shape": [3],
+          "dtype": "float32",
+          "unit": "rad/s",
+          "frame_id": "imu"
+        },
+        {
+          "name": "linear_acceleration",
+          "shape": [3],
+          "dtype": "float32",
+          "unit": "m/s^2",
+          "frame_id": "imu"
+        }
+      ],
+      "origin": {
+        "kind": "deterministic_transform",
+        "producer_id": "zpds_prepare_wp0",
+        "source_refs": [
+          "asset://guida_imu",
+          "asset://guida_index"
+        ],
+        "operation": "normalize_timestamp_and_units",
+        "sample_map_uri": "alignments/imu_source_map.parquet"
+      }
+    }
+  ],
+  "calibration_uri": "calibration/cameras.json",
+  "quality": {
+    "status": "pass",
+    "decision": "keep",
+    "issues": []
+  },
+  "producer": {
+    "producer_id": "zpds_prepare_wp0",
+    "name": "zpds",
+    "version": "0.1.0",
+    "code_commit": "0000000",
+    "config_version": "0.1.0",
+    "config_uri": "configs/pipeline/default.yaml",
+    "config_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

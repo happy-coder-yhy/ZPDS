@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zpds.dev/schemas/validation_report.schema.json",
+  "title": "ZPDS Adapter Validation Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "passed",
+    "checked_assets",
+    "checked_records",
+    "decoded_records",
+    "issues",
+    "metadata"
+  ],
+  "properties": {
+    "passed": {"type": "boolean"},
+    "checked_assets": {"type": "integer", "minimum": 0},
+    "checked_records": {"type": "integer", "minimum": 0},
+    "decoded_records": {"type": "integer", "minimum": 0},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "level", "message", "path", "stream_id", "details"],
+        "properties": {
+          "code": {"type": "string", "minLength": 1},
+          "level": {"enum": ["info", "warn", "error", "fatal"]},
+          "message": {"type": "string", "minLength": 1},
+          "path": {"type": "string"},
+          "stream_id": {"type": "string"},
+          "details": {"type": "object"}
+        }
+      }
+    },
+    "metadata": {"type": "object"}
+  }
+}

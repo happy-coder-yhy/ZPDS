@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zpds.dev/schemas/source_inventory.schema.json",
+  "title": "ZPDS Source Inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "session_id",
+    "source_profile",
+    "session_uri",
+    "assets",
+    "streams",
+    "clocks",
+    "calibrations",
+    "total_frames",
+    "duration_s",
+    "clock_domain",
+    "metadata"
+  ],
+  "properties": {
+    "session_id": {"type": "string", "minLength": 1},
+    "source_profile": {"type": "string", "minLength": 1},
+    "session_uri": {"type": "string", "minLength": 1},
+    "assets": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/asset"}
+    },
+    "streams": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/stream"}
+    },
+    "clocks": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/clock"}
+    },
+    "calibrations": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/calibration"}
+    },
+    "total_frames": {"type": "integer", "minimum": 0},
+    "duration_s": {"type": "number", "minimum": 0},
+    "clock_domain": {
+      "enum": ["device_monotonic", "ros_time", "unix_utc", "custom_epoch"]
+    },
+    "metadata": {"type": "object"}
+  },
+  "$defs": {
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "uri",
+        "relative_path",
+        "size_bytes",
+        "sha256",
+        "media_type",
+        "required"
+      ],
+      "properties": {
+        "asset_id": {"type": "string", "minLength": 1},
+        "uri": {"type": "string", "minLength": 1},
+        "relative_path": {"type": "string", "minLength": 1},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "sha256": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+          ]
+        },
+        "media_type": {"type": "string", "minLength": 1},
+        "required": {"type": "boolean"}
+      }
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stream_id",
+        "kind",
+        "role",
+        "clock_id",
+        "width",
+        "height",
+        "fps",
+        "sample_rate_hz",
+        "codec",
+        "container",
+        "topic",
+        "encoding",
+        "dtype",
+        "frame_id",
+        "metadata"
+      ],
+      "properties": {
+        "stream_id": {"type": "string", "minLength": 1},
+        "kind": {
+          "enum": [
+            "color",
+            "depth",
+            "imu",
+            "robot_state",
+            "robot_command",
+            "magnetic_encoder",
+            "vio_pose"
+          ]
+        },
+        "role": {"type": "string", "minLength": 1},
+        "clock_id": {"type": "string", "minLength": 1},
+        "width": {"type": ["integer", "null"], "minimum": 1},
+        "height": {"type": ["integer", "null"], "minimum": 1},
+        "fps": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "sample_rate_hz": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "codec": {"type": ["string", "null"]},
+        "container": {"type": ["string", "null"]},
+        "topic": {"type": ["string", "null"]},
+        "encoding": {"type": ["string", "null"]},
+        "dtype": {"type": ["string", "null"]},
+        "frame_id": {"type": ["string", "null"]},
+        "metadata": {"type": "object"}
+      }
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clock_id",
+        "domain",
+        "source",
+        "unit",
+        "authoritative",
+        "notes"
+      ],
+      "properties": {
+        "clock_id": {"type": "string", "minLength": 1},
+        "domain": {
+          "enum": ["device_monotonic", "ros_time", "unix_utc", "custom_epoch"]
+        },
+        "source": {"type": "string", "minLength": 1},
+        "unit": {"const": "ns"},
+        "authoritative": {"type": "boolean"},
+        "notes": {"type": "string"}
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calibration_id",
+        "kind",
+        "uri",
+        "parent_frame",
+        "child_frame",
+        "format",
+        "source_recorded",
+        "metadata"
+      ],
+      "properties": {
+        "calibration_id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "uri": {"type": "string", "minLength": 1},
+        "parent_frame": {"type": "string"},
+        "child_frame": {"type": "string"},
+        "format": {"type": "string"},
+        "source_recorded": {"type": "boolean"},
+        "metadata": {"type": "object"}
+      }
+    }
+  }
+}

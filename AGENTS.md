@@ -8,7 +8,7 @@
 
 - 项目名：`ZPDS`（Ziki Physical AI Data Specification）。
 - 目标：作为原始采集数据与训练格式之间的“规范化经验中间层”，清洗、质检、切分并标准化多来源具身智能数据，最终形成可追溯、可发布、可导出的训练数据。
-- ZPDS 不替代 MP4、MCAP、Parquet、LeRobot 或 RLDS；它定义经验的来源、处理过程、标注、置信度、资产引用和训练视图。+
+- ZPDS 不替代 MP4、MCAP、Parquet、LeRobot 或 RLDS；它定义经验的来源、处理过程、标注、置信度、资产引用和训练视图。
 - 语言与版本：Python 3.10+。
 - 构建系统：setuptools，配置入口为 `pyproject.toml`。
 - 主包：`zpds/`。
@@ -80,8 +80,9 @@
 - `SessionInventory` 描述一次采集会话及其数据流；新增字段时必须提供清晰默认值并保持旧数据兼容。
 - `SourceStream.kind` 使用 `StreamKind`，不要散落自定义字符串。
 - 时间戳统一使用整数纳秒；跨时钟域的数据必须明确 `ClockDomain` 和对齐方式。
-- 角度使用弧度，坐标系使用右手系（x-forward、y-left、z-up）。
-- 长度规范当前存在待解决冲突：`prepared/conventions.py` 使用毫米，调研计划中的通用规范写为米。修改相关代码前必须核对目标 Schema；在冲突解决前保留原值、显式记录单位和转换来源，不得静默假设。
+- 长度使用米，角度使用弧度，坐标系使用右手系（x-forward、y-left、z-up）。
+- 四元数顺序使用 `xyzw`，Pose 记法使用 `T_parent_child`。
+- 原始数据使用其他单位时必须保留原值、原始单位和确定性转换来源，不得静默假设。
 - 统一约定以 `zpds/prepared/conventions.py` 为准；配置与常量冲突时不得静默选择其中一个。
 - QC 结果使用 `Decision`、`Severity`、`ReasonCode`、`QualityMetric` 和 `QualityReport`。
 - 比较严重等级和原因码时使用枚举成员，不要依赖裸字符串。
@@ -230,6 +231,9 @@
 ## 测试策略
 
 - 测试目录尽量镜像源码结构，例如 Adapter 测试放在 `tests/test_adapters/`。
+- 在本地 Windows 共享工作区中，自动化助手运行 pytest 时必须显式追加
+  `--basetemp=.pytest-tmp-codex`；用户默认使用 `.pytest-tmp`，避免不同账号创建的
+  临时目录 ACL 相互阻塞。
 - 每次实现新行为至少覆盖：
   - 正常输入。
   - 缺失、损坏或空输入。

@@ -1,0 +1,18 @@
+{
+  "zpds_version": "0.1.0",
+  "release_id": "wp0_demo_release",
+  "dataset_id": "zpds_wp0_demo",
+  "dataset_version": "0.1.0",
+  "prep_revision": "r0001",
+  "annotation_version": "v0.1.0",
+  "created_at": "2026-07-23T00:00:00Z",
+  "selection": {
+    "only_training_usable": true,
+    "allowed_outcomes": ["success", "failure", "partial"]
+  },
+  "splits": {
+    "train": "splits/train.jsonl",
+    "validation": "splits/validation.jsonl",
+    "test": "splits/test.jsonl"
+  }
+}

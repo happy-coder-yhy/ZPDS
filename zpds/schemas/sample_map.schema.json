@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zpds.dev/schemas/sample_map.schema.json",
+  "title": "ZPDS Source Sample Map",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "zpds_version",
+    "map_type",
+    "source_clock_id",
+    "target_clock_id",
+    "method",
+    "rows"
+  ],
+  "properties": {
+    "zpds_version": {"const": "0.1.0"},
+    "map_type": {
+      "enum": [
+        "video_source_map",
+        "imu_source_map",
+        "video_imu_alignment"
+      ]
+    },
+    "source_clock_id": {"type": "string", "minLength": 1},
+    "target_clock_id": {"const": "segment_time"},
+    "method": {"enum": ["identity", "nearest"]},
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "output_index",
+          "segment_time_ns",
+          "source_timestamp_ns",
+          "source_row",
+          "error_ns"
+        ],
+        "properties": {
+          "output_index": {"type": "integer", "minimum": 0},
+          "segment_time_ns": {"type": "integer", "minimum": 0},
+          "source_timestamp_ns": {"type": "integer", "minimum": 0},
+          "source_row": {"type": "integer", "minimum": 0},
+          "source_seq": {"type": "integer", "minimum": 0},
+          "source_segment": {"type": "integer", "minimum": 0},
+          "source_asset_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"}
+          },
+          "error_ns": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}

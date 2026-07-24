@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zpds.dev/schemas/dataset.schema.json",
+  "title": "ZPDS Dataset",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "zpds_version",
+    "dataset_id",
+    "dataset_version",
+    "name",
+    "created_at",
+    "source_types",
+    "default_prep_revision",
+    "default_experience_version"
+  ],
+  "properties": {
+    "zpds_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "dataset_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{2,63}$"
+    },
+    "dataset_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_types": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "default_prep_revision": {
+      "type": "string",
+      "pattern": "^r\\d{4,}$"
+    },
+    "default_experience_version": {
+      "type": "string",
+      "pattern": "^v\\d+\\.\\d+\\.\\d+$"
+    }
+  }
+}

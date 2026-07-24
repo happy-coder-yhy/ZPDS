@@ -1,0 +1,20 @@
+zpds_version: 0.1.0
+reason_code_registry_version: 0.1.0
+quality_view_registry_version: 0.1.0
+
+canonical_fields:
+  specification: zpds_version
+  prepared_revision: prep_revision
+
+legacy_aliases:
+  zrds_version: zpds_version
+  record_revision: prep_revision
+
+conventions:
+  time_unit: ns
+  interval: "[start_ns,end_ns)"
+  length_unit: m
+  angle_unit: rad
+  quaternion_order: xyzw
+  pose_notation: T_parent_child
+  coordinate_system: "right-handed:x-forward,y-left,z-up"

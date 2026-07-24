@@ -1,0 +1,19 @@
+{
+  "zpds_version": "0.1.0",
+  "prep_revision": "r0001",
+  "experience_version": "v0.1.0",
+  "created_at": "2026-07-23T00:00:00Z",
+  "status": "draft",
+  "producers": [
+    {
+      "producer_id": "human_review_wp0",
+      "kind": "human",
+      "name": "WP0 reviewer",
+      "version": "0.1.0",
+      "config_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "asset_roots": [
+    "assets/"
+  ]
+}

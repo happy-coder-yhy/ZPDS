@@ -1,16 +1,26 @@
-# Guida Ego (墨现) — QC 阈值
+# Guida Ego 基础清洗阈值；只用于可解释的硬质量检查。
 profile: guida_ego
 
 stage2_time:
-  max_gap_ms: 40           # 时间戳最大允许间隔 (ms)
+  max_gap_ms: 40
 
 stage3_visual:
-  black_threshold: 5        # 黑屏灰度阈值
-  overexposure_ratio: 0.95  # 过曝像素比例
-
-stage6_imu:
-  max_gap_s: 0.06           # IMU 最大允许中断 (s)
-  sample_rate_hz: 50
+  black_threshold: 5
+  overexposure_ratio: 0.95
+  pure_stddev_threshold: 1.0
+  sustained_frames: 15
+  freeze_frames: 30
 
 stage4_video_timing:
-  vfr_tolerance: 0.01       # VFR 容忍度
+  vfr_tolerance: 0.01
+
+stage5_depth:
+  max_invalid_ratio: 0.95
+  invalid_values: [0, 65535]
+
+stage6_imu:
+  max_gap_s: 0.06
+  sample_rate_hz: 50
+
+alignment:
+  max_nearest_imu_error_ms: 20

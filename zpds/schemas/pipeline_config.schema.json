@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zpds.dev/schemas/pipeline_config.schema.json",
+  "title": "ZPDS Pipeline Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pipeline",
+    "segmentation",
+    "prepared",
+    "alignment",
+    "runner",
+    "export"
+  ],
+  "properties": {
+    "pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "stages",
+        "stop_on_fatal",
+        "parallel_stages"
+      ],
+      "properties": {
+        "version": {
+          "const": "0.1.0"
+        },
+        "stages": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 12
+          }
+        },
+        "stop_on_fatal": {
+          "type": "boolean"
+        },
+        "parallel_stages": {
+          "type": "boolean"
+        }
+      }
+    },
+    "segmentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_segment_duration_s",
+        "idle_trim_seconds"
+      ],
+      "properties": {
+        "min_segment_duration_s": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "idle_trim_seconds": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "prepared": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preserve_source_rate",
+        "depth_format",
+        "rgb_codec"
+      ],
+      "properties": {
+        "preserve_source_rate": {
+          "const": true
+        },
+        "depth_format": {
+          "enum": [
+            "zarr",
+            "parquet",
+            "png"
+          ]
+        },
+        "rgb_codec": {
+          "enum": [
+            "source",
+            "h264",
+            "h265",
+            "av1"
+          ]
+        }
+      }
+    },
+    "alignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "target_fps",
+        "method"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "target_fps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "method": {
+          "enum": [
+            "nearest",
+            "linear",
+            "slerp",
+            "zoh"
+          ]
+        }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_retries",
+        "retry_backoff_seconds"
+      ],
+      "properties": {
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "retry_backoff_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 300
+        }
+      }
+    },
+    "export": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lerobot_version"
+      ],
+      "properties": {
+        "lerobot_version": {
+          "const": "v3"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zpds.dev/schemas/reason_code_registry.schema.json",
+  "title": "ZPDS Reason Code Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registry_version", "zpds_version", "codes"],
+  "properties": {
+    "registry_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "zpds_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "codes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "stage",
+          "title",
+          "description",
+          "default_severity",
+          "allowed_decisions",
+          "auto_reject_allowed",
+          "evidence_required"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "stage": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 12
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default_severity": {
+            "enum": ["info", "warn", "error", "fatal"]
+          },
+          "allowed_decisions": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "keep",
+                "keep_with_flag",
+                "quarantine",
+                "trim",
+                "split",
+                "reject"
+              ]
+            }
+          },
+          "auto_reject_allowed": {
+            "type": "boolean"
+          },
+          "evidence_required": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

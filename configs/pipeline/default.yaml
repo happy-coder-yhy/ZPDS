@@ -10,9 +10,19 @@ segmentation:
   idle_trim_seconds: 0.5
 
 prepared:
-  target_fps: 30
+  preserve_source_rate: true
   depth_format: "zarr"
   rgb_codec: "h264"
+
+# Alignment 是派生视图，不改写 Prepared 中各流的原始频率。
+alignment:
+  enabled: true
+  target_fps: 30
+  method: "nearest"
+
+runner:
+  max_retries: 1
+  retry_backoff_seconds: 0
 
 export:
   lerobot_version: "v3"

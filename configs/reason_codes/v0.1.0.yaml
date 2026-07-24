@@ -1,0 +1,339 @@
+registry_version: 0.1.0
+zpds_version: 0.1.0
+codes:
+  - code: file_missing
+    stage: 0
+    title: 必需文件缺失
+    description: 清单声明或 Profile 要求的文件不存在。
+    default_severity: fatal
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
+  - code: hash_mismatch
+    stage: 0
+    title: 哈希不匹配
+    description: 实际内容哈希与登记值不一致。
+    default_severity: fatal
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
+  - code: license_restricted
+    stage: 0
+    title: 许可限制
+    description: 许可条款不允许目标用途或再分发。
+    default_severity: fatal
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
+  - code: privacy_review_required
+    stage: 0
+    title: 需要隐私复核
+    description: 数据包含需要人工确认的个人或敏感信息。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: untrusted_input
+    stage: 0
+    title: 不可信输入
+    description: 输入格式可能执行代码或必须在隔离环境解析。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: container_corrupt
+    stage: 1
+    title: 容器损坏
+    description: 容器头、索引或数据块无法可靠读取。
+    default_severity: fatal
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
+  - code: index_missing
+    stage: 1
+    title: 权威索引缺失
+    description: 来源需要的权威索引不存在。
+    default_severity: error
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
+  - code: schema_unknown
+    stage: 1
+    title: Schema 未知
+    description: 容器字段或消息类型无法映射到已知版本。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: required_stream_missing
+    stage: 1
+    title: 必需数据流缺失
+    description: Profile 定义的最低关键流不完整。
+    default_severity: fatal
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
+  - code: annotation_orphaned
+    stage: 1
+    title: 标注失去原始资产
+    description: 标注无法关联到匹配版本和哈希的原始数据。
+    default_severity: error
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
+  - code: timestamp_gap
+    stage: 2
+    title: 时间戳间隔异常
+    description: 相邻样本间隔超过 Profile 阈值。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, trim, split, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: timestamp_regression
+    stage: 2
+    title: 时间戳回退
+    description: 同一时钟域内时间戳不再单调递增。
+    default_severity: fatal
+    allowed_decisions: [split, quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
+  - code: clock_misalign
+    stage: 2
+    title: 时钟未对齐
+    description: 多时钟域偏差超过 Profile 阈值。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: clock_reset
+    stage: 2
+    title: 时钟复位
+    description: 设备或消息时钟发生不连续复位。
+    default_severity: fatal
+    allowed_decisions: [split, quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
+  - code: frame_mapping_unproven
+    stage: 2
+    title: 帧映射无法证明
+    description: 不同频率或索引之间没有可信 sample map。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: vio_reset
+    stage: 2
+    title: VIO 复位
+    description: VIO 轨迹出现重定位或坐标原点复位。
+    default_severity: error
+    allowed_decisions: [split, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: black_frame
+    stage: 3
+    title: 黑帧
+    description: 图像亮度分布符合黑帧判据。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, trim, split, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: overexposed
+    stage: 3
+    title: 过曝
+    description: 高亮饱和像素比例超过阈值。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, trim, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: blur_detected
+    stage: 3
+    title: 模糊
+    description: 清晰度指标低于当前 Profile 阈值。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, trim, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: frozen_frame
+    stage: 3
+    title: 冻结画面
+    description: 连续图像内容不变且超过允许时长。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, trim, split, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: dropped_frame
+    stage: 4
+    title: 丢帧
+    description: 时间轴或编码序列显示帧缺失。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, trim, split, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: duplicate_frame
+    stage: 4
+    title: 重复帧
+    description: 多个样本映射到相同或重复的画面。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, trim, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: vfr_detected
+    stage: 4
+    title: 可变帧率
+    description: 视频采样不是固定帧率，需保留原时间戳。
+    default_severity: info
+    allowed_decisions: [keep, keep_with_flag, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: motion_anomaly
+    stage: 4
+    title: 运动异常
+    description: 画面运动与相邻时序不一致。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, trim, split, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: depth_invalid_ratio
+    stage: 5
+    title: 深度无效比例过高
+    description: 深度无效值比例超过 Profile 阈值。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, trim, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: depth_unit_unknown
+    stage: 5
+    title: 深度单位未知
+    description: 无法证明深度标度对应的物理单位。
+    default_severity: error
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: imu_gap
+    stage: 6
+    title: IMU 间隔异常
+    description: IMU 样本存在超阈值的时间空洞。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, split, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: imu_bias_drift
+    stage: 6
+    title: IMU 偏置漂移
+    description: 静止或参考区间内偏置漂移异常。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: imu_saturation
+    stage: 6
+    title: IMU 饱和
+    description: 加速度计或陀螺仪达到量程边界。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, trim, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: joint_limit_violation
+    stage: 7
+    title: 关节限位异常
+    description: 关节值超出设备定义的合法范围。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, trim, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: command_timeout
+    stage: 7
+    title: 指令超时
+    description: 指令与状态响应延迟超过阈值。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, trim, split, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: gripper_stall
+    stage: 7
+    title: 夹爪堵转
+    description: 夹爪指令变化但状态长期无响应。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, trim, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: action_semantics_unknown
+    stage: 7
+    title: 动作语义未知
+    description: 原始控制量含义或方向尚未被设备资料证明。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: intrinsics_missing
+    stage: 8
+    title: 相机内参缺失
+    description: 需要几何任务的相机没有匹配内参。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: extrinsics_invalid
+    stage: 8
+    title: 外参无效
+    description: 外参矩阵不可逆、非刚体或验证失败。
+    default_severity: error
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
+  - code: reprojection_error_high
+    stage: 8
+    title: 重投影误差过高
+    description: 标定重投影误差超过 Profile 阈值。
+    default_severity: error
+    allowed_decisions: [keep_with_flag, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: calibration_frame_unknown
+    stage: 8
+    title: 标定坐标系未知
+    description: 标定数据的 parent/child frame 无法确认。
+    default_severity: error
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: hand_absent
+    stage: 9
+    title: 手部缺失
+    description: 目标任务需要手部但有效区间内未检测到。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, trim, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: hand_track_lost
+    stage: 9
+    title: 手部跟踪丢失
+    description: 手部轨迹出现超过阈值的中断。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, trim, split, quarantine]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: semantic_inconsistency
+    stage: 10
+    title: 语义不一致
+    description: 任务、动作、状态或结果之间存在冲突。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: near_duplicate
+    stage: 11
+    title: 近重复
+    description: 内容与已有样本高度相似并可能造成泄漏。
+    default_severity: warn
+    allowed_decisions: [keep_with_flag, quarantine, reject]
+    auto_reject_allowed: false
+    evidence_required: true
+  - code: delivery_check_fail
+    stage: 12
+    title: 交付检查失败
+    description: Release 引用、资产、split 或产物完整性校验失败。
+    default_severity: fatal
+    allowed_decisions: [quarantine, reject]
+    auto_reject_allowed: true
+    evidence_required: true
