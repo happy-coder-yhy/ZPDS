@@ -67,6 +67,56 @@ def normalize_imu(
     return imu
 
 
+def normalize_imu_df(
+    imu: pd.DataFrame,
+    source_start_ns: int,
+    source_end_ns: int,
+) -> pd.DataFrame:
+    """规范化 IMU 数据 — 直接接受 DataFrame。
+
+    用于 IMU 数据已从非 CSV 来源（如 MCAP）加载的场景。
+
+    Args:
+        imu: 原始 IMU DataFrame，列: timestamp_ns, ax, ay, az, gx, gy, gz
+        source_start_ns: 源时间戳起始
+        source_end_ns: 源时间戳结束
+
+    Returns:
+        规范化后的 DataFrame
+    """
+    imu = imu[
+        (imu["timestamp_ns"] >= source_start_ns)
+        & (imu["timestamp_ns"] < source_end_ns)
+    ].copy()
+
+    if len(imu) == 0:
+        raise ValueError("Segment 范围内没有 IMU 数据")
+
+    imu["source_timestamp_ns"] = imu["timestamp_ns"].astype("int64")
+    imu["timestamp_ns"] = imu["source_timestamp_ns"] - source_start_ns
+
+    imu = imu.rename(columns={
+        "ax": "linear_acceleration_x",
+        "ay": "linear_acceleration_y",
+        "az": "linear_acceleration_z",
+        "gx": "angular_velocity_x",
+        "gy": "angular_velocity_y",
+        "gz": "angular_velocity_z",
+    })
+
+    cols = [
+        "timestamp_ns",
+        "source_timestamp_ns",
+        "linear_acceleration_x",
+        "linear_acceleration_y",
+        "linear_acceleration_z",
+        "angular_velocity_x",
+        "angular_velocity_y",
+        "angular_velocity_z",
+    ]
+    return imu[cols]
+
+
 def write_imu(imu: pd.DataFrame, output_dir: str) -> str:
     """写出规范化 IMU 为 Parquet。
 

@@ -73,6 +73,61 @@ def extract_calibration(
     return calib
 
 
+def extract_calibration_from_mcap(
+    calib_data: dict,
+    calibration_id: str = "calib_dunjia_001",
+) -> dict:
+    """从 MCAP foxglove.CameraCalibration 消息构建标定 JSON。
+
+    Args:
+        calib_data: dunjia_reader.read_calibration() 返回的字典
+            {width, height, frame_id, K, D, R, P, distortion_model}
+        calibration_id: 标定 ID
+
+    Returns:
+        与 extract_calibration() 兼容的 calibration dict
+    """
+    k = calib_data["K"]
+    return {
+        "calibration_id": calibration_id,
+        "source": {
+            "uri": "MCAP /robot0/sensor/camera0/camera_info",
+            "kind": "source_recorded",
+            "format": "foxglove.CameraCalibration",
+        },
+        "frames": [
+            {
+                "frame_id": calib_data.get("frame_id", "headcam_center_optical_frame"),
+                "parent_frame_id": None,
+            },
+            {
+                "frame_id": "imu",
+                "parent_frame_id": calib_data.get("frame_id", "headcam_center_optical_frame"),
+            },
+        ],
+        "cameras": [
+            {
+                "stream_id": "ego_rgb",
+                "frame_id": calib_data.get("frame_id", "headcam_center_optical_frame"),
+                "model": "pinhole",
+                "resolution": [calib_data["width"], calib_data["height"]],
+                "intrinsics": {
+                    "fx": k[0],
+                    "fy": k[4],
+                    "cx": k[2],
+                    "cy": k[5],
+                },
+            }
+        ],
+        "depth_to_color": {
+            "status": "unavailable",
+        },
+        "imu_extrinsics": {
+            "status": "unavailable",
+        },
+    }
+
+
 def write_calibration(calib: dict, output_dir: str) -> str:
     """写出 calibration.json。
 

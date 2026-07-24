@@ -2,10 +2,16 @@ datasets/
 .DS_Store
 .claude/
 .idea/
+.venv/
 __pycache__/
+*.egg-info/
 clean_report.txt
 prepared_segments/
 output/
 batch_summary.json
 zpds_prepare/__pycache__/
 Prepared_Segment_详解.md
+docs/
+CLAUDE.md
+AGENTS.md
+*.txt

@@ -10,8 +10,14 @@ ZPDS 批量 Prepared Segment 生成。
   ⑥ 写出后验证
 
 用法:
+    # 墨现 (默认)
     python batch_prepare.py
     python batch_prepare.py --candidates output/segment_candidates.json
+
+    # 遁甲
+    python batch_prepare.py --profile dunjia --dataset session.mcap \
+        --candidates output_dunjia/segment_candidates.json \
+        --output prepared_segments_dunjia/
 """
 
 import argparse
@@ -23,10 +29,19 @@ from pathlib import Path
 import yaml
 
 from segment.video_transcoder import transcode_rgb
-from segment.sample_map import generate_sample_map, write_sample_map
-from segment.imu_normalizer import normalize_imu, write_imu
-from segment.calibration import extract_calibration, write_calibration
+from segment.sample_map import (
+    generate_sample_map,
+    generate_sample_map_from_timestamps,
+    write_sample_map,
+)
+from segment.imu_normalizer import normalize_imu, normalize_imu_df, write_imu
+from segment.calibration import (
+    extract_calibration,
+    extract_calibration_from_mcap,
+    write_calibration,
+)
 from segment.segment_writer import build_segment_json, write_segment_json
+from segment.segment_writer import sha256_hex
 from segment.validator import validate_segment, write_validation_report
 from segment.span_determiner import load_index
 
@@ -57,28 +72,41 @@ def generate_segment(
     session_id: str = "guida_session_001",
     revision: str = "r0001",
     quality_issues: list[dict] | None = None,
+    profile: str = "guida",
+    source_video: str | None = None,
+    imu_df: "pd.DataFrame | None" = None,
+    timestamps_ns: list[int] | None = None,
+    source_assets: list[dict] | None = None,
 ) -> dict:
     """为单个候选区间生成完整 Prepared Segment。
 
     Args:
-        dataset_path: 原始数据集根目录
+        dataset_path: 原始数据集路径
         source_start_ns: 源设备时间戳起始
         source_end_ns: 源设备时间戳结束
         segment_id: Segment ID (如 seg_000001)
         output_dir: 输出目录
-        index_frames: index.jsonl 全部帧列表（共享，避免重复读取）
+        index_frames: 全部帧列表（共享）
         calibration: 标定 dict（共享）
         cfg: 完整配置 dict
         session_id: 来源 Session ID
         revision: 修订版本号
         quality_issues: 落在此 Segment 内的 QualityIssue
+        profile: 数据源 profile (guida / dunjia)
+        source_video: 源视频路径 (dunjia 模式: .h264; guida 模式: 自动推导)
+        imu_df: IMU DataFrame (dunjia 模式: 预加载; guida 模式: 自动读取)
+        timestamps_ns: 源帧时间戳列表 (dunjia 模式使用)
+        source_assets: 自定义 source_assets 列表
 
     Returns:
         {"segment_id": str, "status": str, "duration_s": float, ...}
     """
+    import pandas as pd
+
     target_fps = cfg["output"]["target_fps"]
-    source_mkv = str(Path(dataset_path) / "color_000000.mkv")
-    imu_path = str(Path(dataset_path) / "imu" / "imu_000000.csv")
+
+    if source_video is None:
+        source_video = str(Path(dataset_path) / "color_000000.mkv")
 
     duration_ns = source_end_ns - source_start_ns
 
@@ -99,7 +127,7 @@ def generate_segment(
     # ---- ① 裁剪转码 RGB 视频 ----
     output_mp4 = str(Path(output_dir) / "data" / "ego_rgb.mp4")
     video_result = transcode_rgb(
-        source_mkv=source_mkv,
+        source_video=source_video,
         output_mp4=output_mp4,
         source_start_ns=source_start_ns,
         source_end_ns=source_end_ns,
@@ -108,23 +136,39 @@ def generate_segment(
     )
 
     # ---- ② 生成采样映射表 ----
-    sample_map = generate_sample_map(
-        index_frames=index_frames,
-        source_start_ns=source_start_ns,
-        source_end_ns=source_end_ns,
-        target_fps=target_fps,
-    )
+    if profile == "dunjia" and timestamps_ns is not None:
+        sample_map = generate_sample_map_from_timestamps(
+            timestamps_ns=timestamps_ns,
+            source_start_ns=source_start_ns,
+            source_end_ns=source_end_ns,
+            target_fps=target_fps,
+        )
+    else:
+        sample_map = generate_sample_map(
+            index_frames=index_frames,
+            source_start_ns=source_start_ns,
+            source_end_ns=source_end_ns,
+            target_fps=target_fps,
+        )
     write_sample_map(sample_map, output_dir)
 
     # ---- ③ 规范化 IMU ----
-    imu = normalize_imu(
-        imu_path=imu_path,
-        source_start_ns=source_start_ns,
-        source_end_ns=source_end_ns,
-    )
+    if profile == "dunjia" and imu_df is not None:
+        imu = normalize_imu_df(
+            imu=imu_df,
+            source_start_ns=source_start_ns,
+            source_end_ns=source_end_ns,
+        )
+    else:
+        imu_path = str(Path(dataset_path) / "imu" / "imu_000000.csv")
+        imu = normalize_imu(
+            imu_path=imu_path,
+            source_start_ns=source_start_ns,
+            source_end_ns=source_end_ns,
+        )
     write_imu(imu, output_dir)
 
-    # ---- ④ 写出 calibration（共享，只写一次由调用方处理） ----
+    # ---- ④ 写出 calibration ----
     write_calibration(calibration, output_dir)
 
     # ---- ⑤ 生成 segment.json ----
@@ -139,6 +183,7 @@ def generate_segment(
         segment_id=segment_id,
         session_id=session_id,
         quality_issues=quality_issues,
+        source_assets=source_assets,
     )
     write_segment_json(segment, output_dir)
 
@@ -169,49 +214,73 @@ def main():
     )
     parser.add_argument(
         "--candidates", "-c",
-        default=CANDIDATES_PATH,
-        help="segment_candidates.json 路径",
+        default=None,
+        help="segment_candidates.json 路径 (默认: output/moxian/ 或 output/dunjia/)",
     )
     parser.add_argument(
         "--dataset", "-d",
         default=DATASET,
-        help="数据集根目录",
+        help="数据集路径 (墨现: 目录; 遁甲: .mcap 文件)",
     )
     parser.add_argument(
         "--output", "-o",
-        default=OUTPUT_ROOT,
-        help="输出根目录 (默认 prepared_segments/)",
+        default=None,
+        help="输出根目录 (默认: prepared_segments/moxian/ 或 prepared_segments/dunjia/)",
     )
     parser.add_argument(
         "--config",
         default=CONFIG_PATH,
         help="YAML 配置路径",
     )
+    parser.add_argument(
+        "--profile", "-p",
+        default="guida",
+        choices=["guida", "dunjia"],
+        help="数据源 profile (默认: guida)",
+    )
     args = parser.parse_args()
 
+    profile = args.profile
     start_time = time.time()
 
     # ---- 加载配置和候选方案 ----
     cfg = load_config(args.config)
-    candidates_path = Path(args.candidates)
+
+    # 默认 candidates 路径按 profile 分子目录
+    if args.candidates is None:
+        subdir = "moxian" if profile == "guida" else "dunjia"
+        candidates_path = Path("output") / subdir / "segment_candidates.json"
+    else:
+        candidates_path = Path(args.candidates)
+
     dataset_path = args.dataset
-    output_root = Path(args.output)
+
+    # 默认输出目录按 profile 分子目录
+    if args.output is None:
+        subdir = "moxian" if profile == "guida" else "dunjia"
+        output_root = Path("prepared_segments") / subdir
+    else:
+        output_root = Path(args.output)
 
     if not candidates_path.exists():
         print(f"错误: 候选文件不存在: {candidates_path}")
-        print(f"请先运行: python -m zpds_prepare.main \"{dataset_path}\"")
+        print(f"请先运行: python -m zpds_prepare.main \"{dataset_path}\" --profile {profile}")
         return 1
 
     with open(candidates_path, "r", encoding="utf-8") as f:
         candidates_doc = json.load(f)
 
     candidates = candidates_doc.get("segments", [])
-    source_session_id = candidates_doc.get("source_session_id", "guida_session_001")
+    source_session_id = candidates_doc.get(
+        "source_session_id",
+        "guida_session_001" if profile == "guida" else "dunjia_session_001",
+    )
 
     if not candidates:
         print("没有候选 Segment，退出。")
         return 0
 
+    print(f"Profile:      {profile}")
     print(f"数据源:       {dataset_path}")
     print(f"候选方案:     {candidates_path}")
     print(f"候选数量:     {len(candidates)}")
@@ -220,16 +289,64 @@ def main():
     # ---- 预加载共享资源 ----
     step_header("预加载共享资源")
 
-    print("  读取 index.jsonl ...")
-    index_frames = load_index(dataset_path)
-    timestamps = [f["timestamp_ns"] for f in index_frames]
-    print(f"  总帧数: {len(index_frames)}, "
-          f"时间范围: {timestamps[0]:,} → {timestamps[-1]:,}")
+    if profile == "dunjia":
+        from zpds_prepare.readers import dunjia_reader as dr
 
-    print("  提取标定信息 ...")
-    meta_path = str(Path(dataset_path) / "meta.json")
-    calibration = extract_calibration(meta_path)
-    print(f"  标定 ID: {calibration['calibration_id']}")
+        # 加载 index_frames
+        print("  读取 MCAP 帧索引 ...")
+        index_frames = dr.read_index_frames(dataset_path)
+        timestamps_ns = dr.read_index_timestamps(dataset_path)
+        print(f"  总帧数: {len(index_frames)}, "
+              f"时间范围: {timestamps_ns[0]:,} → {timestamps_ns[-1]:,}")
+
+        # 重构视频文件 (只做一次)
+        print("  重构 H264 视频 ...")
+        source_video = dr.get_color_video(dataset_path)
+        print(f"  视频文件: {source_video}")
+
+        # 加载 IMU
+        print("  读取 MCAP IMU ...")
+        imu_df = dr.read_imu(dataset_path)
+        print(f"  IMU 样本: {len(imu_df)}")
+
+        # 提取标定
+        print("  提取 MCAP 标定 ...")
+        calib_data = dr.read_calibration(dataset_path)
+        calibration = extract_calibration_from_mcap(calib_data)
+        print(f"  标定 ID: {calibration['calibration_id']}")
+
+        # 构建 source_assets
+        mcap_path_obj = Path(dataset_path)
+        h264_path_obj = Path(source_video)
+        source_assets = [
+            {
+                "source_asset_id": "raw_mcap",
+                "uri": mcap_path_obj.name,
+                "sha256": sha256_hex(dataset_path),
+            },
+            {
+                "source_asset_id": "reconstructed_h264",
+                "uri": h264_path_obj.name,
+                "sha256": sha256_hex(source_video) if h264_path_obj.exists() else "",
+            },
+        ]
+    else:
+        # Guida 默认模式
+        print("  读取 index.jsonl ...")
+        index_frames = load_index(dataset_path)
+        timestamps = [f["timestamp_ns"] for f in index_frames]
+        print(f"  总帧数: {len(index_frames)}, "
+              f"时间范围: {timestamps[0]:,} → {timestamps[-1]:,}")
+
+        print("  提取标定信息 ...")
+        meta_path = str(Path(dataset_path) / "meta.json")
+        calibration = extract_calibration(meta_path)
+        print(f"  标定 ID: {calibration['calibration_id']}")
+
+        source_video = None
+        imu_df = None
+        timestamps_ns = None
+        source_assets = None
 
     # ---- 逐个生成 Prepared Segment ----
     step_header(f"生成 {len(candidates)} 个 Prepared Segment")
@@ -269,6 +386,11 @@ def main():
                 session_id=source_session_id,
                 revision=REVISION,
                 quality_issues=span_issues if span_issues else None,
+                profile=profile,
+                source_video=source_video,
+                imu_df=imu_df,
+                timestamps_ns=timestamps_ns,
+                source_assets=source_assets,
             )
             elapsed = time.time() - t0
             result["elapsed_s"] = round(elapsed, 1)
@@ -322,6 +444,7 @@ def main():
         "run_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "source_session_id": source_session_id,
         "candidates_path": str(candidates_path.resolve()),
+        "profile": profile,
         "total_segments": len(results),
         "pass": pass_count,
         "fail": fail_count,

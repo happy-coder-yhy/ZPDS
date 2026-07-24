@@ -30,6 +30,7 @@ def build_segment_json(
     segment_id: str = "seg_000001",
     session_id: str = "guida_session_001",
     quality_issues: list[dict] | None = None,
+    source_assets: list[dict] | None = None,
 ) -> dict:
     """构建 segment.json 内容。
 
@@ -56,18 +57,9 @@ def build_segment_json(
 
     duration_ns = span["source_end_ns"] - span["source_start_ns"]
 
-    segment = {
-        "zrds_version": "0.1.0",
-        "record_revision": revision,
-        "segment_id": segment_id,
-        "source_type": "ego",
-
-        "source_session": {
-            "session_id": session_id,
-            "session_uri": str(data_dir.resolve()),
-        },
-
-        "source_assets": [
+    # source_assets: 可由调用方传入自定义列表（如遁甲），默认使用 Guida 路径
+    if source_assets is None:
+        source_assets = [
             {
                 "source_asset_id": "raw_color_0",
                 "uri": "color_000000.mkv",
@@ -88,7 +80,20 @@ def build_segment_json(
                 "uri": "meta.json",
                 "sha256": sha256_hex(str(meta_path)) if meta_path.exists() else "",
             },
-        ],
+        ]
+
+    segment = {
+        "zrds_version": "0.1.0",
+        "record_revision": revision,
+        "segment_id": segment_id,
+        "source_type": "ego",
+
+        "source_session": {
+            "session_id": session_id,
+            "session_uri": str(data_dir.resolve()),
+        },
+
+        "source_assets": source_assets,
 
         "timeline": {
             "start_ns": 0,

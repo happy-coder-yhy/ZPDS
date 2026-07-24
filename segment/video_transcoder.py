@@ -1,7 +1,8 @@
 """
-视频裁剪与转码：从 MKV 读取源帧，按 Span 裁剪后输出 CFR H.264 MP4。
+视频裁剪与转码：从源视频读取帧，按 Span 裁剪后输出 CFR H.264 MP4。
 
-由于环境中没有 FFmpeg，使用 OpenCV 完成读写。
+支持 MKV (墨现) 和重构的 .h264 比特流 (遁甲)。
+使用 OpenCV 完成读写。
 """
 
 import cv2
@@ -10,7 +11,7 @@ from pathlib import Path
 
 
 def transcode_rgb(
-    source_mkv: str,
+    source_video: str,
     output_mp4: str,
     source_start_ns: int,
     source_end_ns: int,
@@ -19,15 +20,15 @@ def transcode_rgb(
 ) -> dict:
     """裁剪并转码 RGB 视频。
 
-    将 source MKV 中 [source_start_ns, source_end_ns] 范围内的帧
+    将源视频中 [source_start_ns, source_end_ns] 范围内的帧
     按最近邻映射输出为 CFR target_fps 的 MP4。
 
     Args:
-        source_mkv: 源 MKV 文件路径
+        source_video: 源视频文件路径 (.mkv 或 .h264)
         output_mp4: 输出 MP4 文件路径
         source_start_ns: 源时间戳起始
         source_end_ns: 源时间戳结束
-        index_frames: index.jsonl 中 type=frame 的列表
+        index_frames: 帧索引列表 (每项含 seq, timestamp_ns)
         target_fps: 目标恒定帧率
 
     Returns:
@@ -42,7 +43,7 @@ def transcode_rgb(
     """
     Path(output_mp4).parent.mkdir(parents=True, exist_ok=True)
 
-    cap = cv2.VideoCapture(source_mkv)
+    cap = cv2.VideoCapture(source_video)
     src_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
