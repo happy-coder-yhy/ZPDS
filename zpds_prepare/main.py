@@ -17,7 +17,6 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import yaml
@@ -39,25 +38,17 @@ CONFIG_PATH = "config.yaml"
 OUTPUT_DIR = "output"
 
 
-def _get_reader(profile: str) -> tuple[Any, float, float, str]:
-    """返回 (reader_module, expected_video_fps, expected_imu_hz, get_video_fn_name)。
-
-    各 profile 的 reader 模块导出相同的函数签名：
-      - read_meta(path) -> dict
-      - read_index_frames(path) -> list[dict]
-      - read_index_timestamps(path) -> list[int]
-      - read_imu(path) -> pd.DataFrame
-      - get_color_*  (path) -> str   # 视频文件路径
-      - get_session_id(path) -> str
-    """
+def _get_reader(profile: str):
+    """返回 reader 模块。所有 reader 导出统一的 read_session() 入口。"""
     if profile == "guida":
         from zpds_prepare.readers import guida_reader as rd
-        return rd, 30.0, 50.0, "get_color_mkv"
     elif profile == "dunjia":
         from zpds_prepare.readers import dunjia_reader as rd
-        return rd, 25.0, 196.0, "get_color_video"
+    elif profile == "umi":
+        from zpds_prepare.readers import umi_reader as rd
     else:
-        raise ValueError(f"未知 profile: {profile}，可选: guida, dunjia")
+        raise ValueError(f"未知 profile: {profile}，可选: guida, dunjia, umi")
+    return rd
 
 
 def load_config(config_path: str = CONFIG_PATH) -> dict:
@@ -84,7 +75,7 @@ def main():
     parser.add_argument(
         "--profile", "-p",
         default="guida",
-        choices=["guida", "dunjia"],
+        choices=["guida", "dunjia", "umi"],
         help="数据源 profile (默认: guida)",
     )
     parser.add_argument(
@@ -101,13 +92,12 @@ def main():
 
     # ---- 解析 profile 和 reader ----
     profile = args.profile
-    rd, EXPECTED_VIDEO_FPS, EXPECTED_IMU_HZ, get_video_fn = _get_reader(profile)
-    get_video = getattr(rd, get_video_fn)
+    rd = _get_reader(profile)
 
     # ---- 默认数据集路径 ----
     if args.dataset is None:
-        if profile == "dunjia":
-            parser.error("遁甲模式必须指定 .mcap 文件路径")
+        if profile in ("dunjia", "umi"):
+            parser.error(f"{profile} 模式必须指定 .mcap 文件路径")
         else:
             # 保持与旧版的兼容默认值
             dataset_path = "E:/datasets/egos/墨现"
@@ -116,7 +106,8 @@ def main():
 
     # 默认输出目录按 profile 分子目录
     if args.output is None:
-        subdir = "moxian" if profile == "guida" else "dunjia"
+        profile_subdirs = {"guida": "moxian", "dunjia": "dunjia", "umi": "umi"}
+        subdir = profile_subdirs.get(profile, profile)
         output_dir = Path("output") / subdir
     else:
         output_dir = Path(args.output)
@@ -169,14 +160,18 @@ def main():
 
     print(f"  Profile:     {profile}")
     print(f"  数据集:      {dataset_path}")
-    meta = rd.read_meta(dataset_path)
+
+    session = rd.read_session(dataset_path)
+    pv = session.primary_video
+
+    meta = session.meta
     print(f"  设备:        {meta['device']}")
     print(f"  标称帧率:    {meta['fps']} fps")
     print(f"  分辨率:      {meta['width']}×{meta['height']}")
     print(f"  标称帧数:    {meta['frame_count']}")
 
-    index_frames = rd.read_index_frames(dataset_path)
-    timestamps_ns = [f["timestamp_ns"] for f in index_frames]
+    timestamps_ns = pv.timestamps_ns
+    index_frames = pv.index_frames
     print(f"  Index 帧数:  {len(timestamps_ns)}")
 
     if len(timestamps_ns) >= 2:
@@ -185,135 +180,127 @@ def main():
         print(f"  时长:        {duration_s:.2f} s")
         print(f"  帧间隔中位数: {median_interval_ns:,} ns (~{1e9/median_interval_ns:.1f} fps)")
 
-    session_start_ns = timestamps_ns[0]
-    session_end_ns = timestamps_ns[-1]
-    session_id = rd.get_session_id(dataset_path)
+    session_start_ns = session.session_start_ns
+    session_end_ns = session.session_end_ns
+    session_id = session.session_id
     print(f"  Session ID:  {session_id}")
 
-    # 遁甲：显示双时间戳信息
-    if profile == "dunjia" and index_frames:
+    # MCAP profile：显示双时间戳信息
+    if profile in ("dunjia", "umi") and index_frames:
         first = index_frames[0]
         print(f"  时间戳 (消息内):   {first['timestamp_ns']}")
         print(f"  log_time (MCAP):   {first.get('log_time_ns', 'N/A')}")
         print(f"  publish_time:      {first.get('publish_time_ns', 'N/A')}")
 
-    imu = rd.read_imu(dataset_path)
-    print(f"  IMU 行数:    {len(imu)}")
-
-    # 遁甲: 显示所有摄像头信息
-    if profile == "dunjia":
-        print(f"\n  多摄像头:")
-        for cam_name, topic in rd.CAMERA_TOPICS.items():
-            cnt = rd.count_messages(dataset_path, topic)
-            if cnt > 0:
-                if cam_name == "depth":
-                    frames = rd.read_depth_frames(dataset_path, topic)
-                    if frames:
-                        f0 = frames[0]
-                        print(f"    {cam_name}: {cnt} 帧, {f0['width']}×{f0['height']}, "
-                              f"{f0['dtype']} [{f0['min_val']}~{f0['max_val']}]")
-                else:
-                    calib_topic = rd.CALIB_TOPICS.get(cam_name)
-                    try:
-                        cal = rd.read_calibration(dataset_path, calib_topic)
-                        print(f"    {cam_name}: {cnt} 帧, {cal['width']}×{cal['height']}, "
-                              f"H264")
-                    except ValueError:
-                        print(f"    {cam_name}: {cnt} 帧, H264")
+    # 显示所有流
+    print(f"\n  视频流: {len(session.video_streams)} 个, "
+          f"IMU 流: {len(session.imu_streams)} 个")
+    for stream_id, vs in session.video_streams.items():
+        print(f"    [{stream_id}] {vs.frame_count} 帧, "
+              f"{vs.width}×{vs.height}, {vs.fps} fps")
+    for stream_id, imu_s in session.imu_streams.items():
+        print(f"    [{stream_id}] {len(imu_s.dataframe)} 样本, "
+              f"{imu_s.sample_rate_hz} Hz")
 
     # ================================================================
-    # Step 2: 运行检测器
+    # Step 2: 运行检测器（遍历所有流）
     # ================================================================
     step_header(2, "运行检测器")
 
     all_issues = []
-
-    # 2a. 帧数一致性检查
-    print("\n  [2a] 帧数一致性检查...")
-    fc_issues = detect_frame_count_mismatch(
-        index_frame_count=len(timestamps_ns),
-        meta_frame_count=meta["frame_count"],
-        timestamps_ns=timestamps_ns,
-        stream_id="ego_rgb",
-    )
-    all_issues.extend(fc_issues)
-    print(f"    发现 {len(fc_issues)} 个不一致")
-    for iss in fc_issues:
-        print(f"      [{iss.decision}] Index={iss.details.get('index_frame_count')} vs "
-              f"Meta={iss.details.get('meta_frame_count')}, diff={iss.details.get('difference')}")
-
-    # 2b. 获取视频路径 (遁甲: 重构 .h264; 墨现: 直接读 .mkv)
-    color_video = get_video(dataset_path)
-
-    # 2c. 坏帧检测
-    print("\n  [2b] 坏帧检测...")
-    bad_issues = detect_bad_frames(
-        video_path=color_video,
-        timestamps_ns=timestamps_ns,
-        stream_id="ego_rgb",
-    )
-    all_issues.extend(bad_issues)
-    print(f"    发现 {len(bad_issues)} 个坏帧区间")
-    for iss in bad_issues:
-        print(f"      [{iss.decision}] {iss.details.get('bad_frame_count')} 帧 "
-              f"({iss.details.get('bad_ratio', 0)*100:.1f}%)")
-
-    # 2d. 黑屏检测
-    print("\n  [2c] 黑屏检测...")
     min_black_duration_ns = int(min_black_duration_s * 1_000_000_000)
     edge_tolerance_ns = int(edge_tolerance_s * 1_000_000_000)
-
-    black_issues = detect_black_frames(
-        video_path=color_video,
-        timestamps_ns=timestamps_ns,
-        mean_intensity_threshold=black_threshold,
-        min_duration_ns=min_black_duration_ns,
-        edge_tolerance_ns=edge_tolerance_ns,
-    )
-    all_issues.extend(black_issues)
-    print(f"    发现 {len(black_issues)} 个黑屏区间")
-    for iss in black_issues:
-        print(f"      [{iss.decision}] {iss.start_ns:,} → {iss.end_ns:,} "
-              f"({(iss.end_ns - iss.start_ns)/1e9:.2f}s, "
-              f"{iss.details.get('frame_count', '?')} 帧)")
-
-    # 2e. 视频时间戳缺口检测
-    print("\n  [2d] 视频时间戳缺口检测...")
-    expected_video_interval_ns = int(1_000_000_000 / EXPECTED_VIDEO_FPS)
     video_split_gap_ns = int(video_split_gap_s * 1_000_000_000)
-
-    video_issues = detect_timestamp_gaps(
-        timestamps_ns=timestamps_ns,
-        expected_interval_ns=expected_video_interval_ns,
-        gap_factor=video_gap_factor,
-        split_gap_ns=video_split_gap_ns,
-        stream_id="ego_rgb",
-    )
-    all_issues.extend(video_issues)
-    print(f"    发现 {len(video_issues)} 个时间戳缺口")
-    for iss in video_issues:
-        print(f"      [{iss.decision}] Frame {iss.details.get('frame_index', '?')}: "
-              f"gap={iss.details.get('gap_ms', '?')}ms, "
-              f"est. missing={iss.details.get('estimated_missing_frames', '?')} 帧")
-
-    # 2f. IMU 时间戳缺口检测
-    print("\n  [2e] IMU 时间戳缺口检测...")
-    expected_imu_interval_ns = int(1_000_000_000 / EXPECTED_IMU_HZ)
     imu_split_gap_ns = int(imu_split_gap_s * 1_000_000_000)
 
-    imu_issues = detect_imu_gaps(
-        imu=imu,
-        expected_interval_ns=expected_imu_interval_ns,
-        gap_factor=imu_gap_factor,
-        split_gap_ns=imu_split_gap_ns,
-        stream_id="ego_imu",
-    )
-    all_issues.extend(imu_issues)
-    print(f"    发现 {len(imu_issues)} 个 IMU 缺口")
-    for iss in imu_issues:
-        print(f"      [{iss.decision}] Sample {iss.details.get('sample_index', '?')}: "
-              f"gap={iss.details.get('gap_s', '?')}s, "
-              f"est. missing={iss.details.get('estimated_missing_samples', '?')} 样本")
+    # ---- 视频流检测 ----
+    for stream_id, vs in session.video_streams.items():
+        print(f"\n  [{stream_id}]")
+
+        # 2a. 帧数一致性
+        fc_issues = detect_frame_count_mismatch(
+            index_frame_count=len(vs.timestamps_ns),
+            meta_frame_count=vs.frame_count,
+            timestamps_ns=vs.timestamps_ns,
+            stream_id=stream_id,
+        )
+        all_issues.extend(fc_issues)
+        if fc_issues:
+            for iss in fc_issues:
+                print(f"    帧数不一致 [{iss.decision}]: "
+                      f"Index={iss.details.get('index_frame_count')} vs "
+                      f"Meta={iss.details.get('meta_frame_count')}, "
+                      f"diff={iss.details.get('difference')}")
+        else:
+            print(f"    帧数一致: {len(vs.timestamps_ns)}")
+
+        # 2b. 坏帧检测
+        bad_issues = detect_bad_frames(
+            video_path=vs.video_path,
+            timestamps_ns=vs.timestamps_ns,
+            stream_id=stream_id,
+        )
+        all_issues.extend(bad_issues)
+        if bad_issues:
+            for iss in bad_issues:
+                print(f"    坏帧 [{iss.decision}]: "
+                      f"{iss.details.get('bad_frame_count')} 帧 "
+                      f"({iss.details.get('bad_ratio', 0)*100:.1f}%)")
+
+        # 2c. 黑屏检测
+        black_issues = detect_black_frames(
+            video_path=vs.video_path,
+            timestamps_ns=vs.timestamps_ns,
+            mean_intensity_threshold=black_threshold,
+            min_duration_ns=min_black_duration_ns,
+            edge_tolerance_ns=edge_tolerance_ns,
+        )
+        all_issues.extend(black_issues)
+        if black_issues:
+            for iss in black_issues:
+                print(f"    黑屏 [{iss.decision}]: "
+                      f"{(iss.end_ns - iss.start_ns)/1e9:.2f}s "
+                      f"({iss.details.get('frame_count', '?')} 帧)")
+
+        # 2d. 视频时间戳缺口
+        expected_interval_ns = int(1_000_000_000 / vs.fps)
+        gap_issues = detect_timestamp_gaps(
+            timestamps_ns=vs.timestamps_ns,
+            expected_interval_ns=expected_interval_ns,
+            gap_factor=video_gap_factor,
+            split_gap_ns=video_split_gap_ns,
+            stream_id=stream_id,
+        )
+        all_issues.extend(gap_issues)
+        if gap_issues:
+            for iss in gap_issues:
+                print(f"    时间戳缺口 [{iss.decision}]: "
+                      f"Frame {iss.details.get('frame_index', '?')}, "
+                      f"gap={iss.details.get('gap_ms', '?')}ms")
+
+        if not any([fc_issues, bad_issues, black_issues, gap_issues]):
+            print(f"    ✓ 无异常")
+
+    # ---- IMU 流检测 ----
+    for stream_id, imu_s in session.imu_streams.items():
+        print(f"\n  [{stream_id}]")
+
+        expected_interval_ns = int(1_000_000_000 / imu_s.sample_rate_hz)
+        imu_issues = detect_imu_gaps(
+            imu=imu_s.dataframe,
+            expected_interval_ns=expected_interval_ns,
+            gap_factor=imu_gap_factor,
+            split_gap_ns=imu_split_gap_ns,
+            stream_id=stream_id,
+        )
+        all_issues.extend(imu_issues)
+        if imu_issues:
+            for iss in imu_issues:
+                print(f"    IMU 缺口 [{iss.decision}]: "
+                      f"Sample {iss.details.get('sample_index', '?')}, "
+                      f"gap={iss.details.get('gap_s', '?')}s")
+        else:
+            print(f"    ✓ 无异常")
 
     # ================================================================
     # Step 3: 汇总分析

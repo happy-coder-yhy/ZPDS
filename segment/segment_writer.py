@@ -1,5 +1,8 @@
 """
 生成 segment.json — Prepared Segment 的核心控制文件。
+
+streams 列表根据传入的 video_results 和 imu_results 动态生成，
+文件名由各流的 stream_id 决定，不再硬编码。
 """
 
 import json
@@ -23,9 +26,7 @@ def build_segment_json(
     dataset_path: str,
     span: dict,
     video_results: list[dict] | None = None,
-    video_result: dict | None = None,
-    sample_map_rows: int = 0,
-    imu_rows: int = 0,
+    imu_results: list[dict] | None = None,
     calibration_id: str = "calib_guida_001",
     revision: str = "r0001",
     segment_id: str = "seg_000001",
@@ -38,25 +39,24 @@ def build_segment_json(
 ) -> dict:
     """构建 segment.json 内容。
 
-    Args:
-        video_results: 多相机转码结果列表 (Dunjia)。单相机时兼容 video_result。
-        depth_npz_path: 深度 .npz 文件路径 (Dunjia)
-        calibrations: 多相机标定 dict {cam_name: {...}} (Dunjia)
+    每个 video_result 应包含:
+      - stream_id, width, height, output_fps, output_frames
+      - sample_map_uri (相对于 segment 根目录)
+      - frame_id (可选), role (可选, 默认 "observation")
+
+    每个 imu_result 应包含:
+      - stream_id, uri (相对于 segment 根目录), rows
     """
     data_dir = Path(dataset_path)
-    color_path = data_dir / "color_000000.mkv"
     index_path = data_dir / "index.jsonl"
-    imu_path = data_dir / "imu" / "imu_000000.csv"
     meta_path = data_dir / "meta.json"
 
     duration_ns = span["source_end_ns"] - span["source_start_ns"]
 
-    # backward compat: single video_result → list
-    if video_results is None and video_result is not None:
-        video_results = [video_result]
-
-    # source_assets
+    # source_assets — 由调用方传入或按 guida 默认生成
     if source_assets is None:
+        color_path = data_dir / "color_000000.mkv"
+        imu_path = data_dir / "imu" / "imu_000000.csv"
         source_assets = [
             {
                 "source_asset_id": "raw_color_0",
@@ -81,75 +81,37 @@ def build_segment_json(
         ]
 
     # ---- 构建 streams 列表 ----
+    streams: list[dict] = []
 
-    streams = []
-
-    # RGB 视频流
-    if profile == "dunjia" and video_results:
-        cam_configs = [
-            ("camera0", "ego_rgb_center", "headcam_center_optical_frame"),
-            ("camera1", "ego_rgb_left", "headcam_left_optical_frame"),
-            ("camera2", "ego_rgb_right", "headcam_right_optical_frame"),
-        ]
-        for cam_name, stream_id, frame_id in cam_configs:
-            # 找到对应的 video_result
-            vr = next((v for v in video_results
-                       if v.get("camera_name") == cam_name), None)
-            if vr is None:
-                continue
-            streams.append({
-                "stream_id": stream_id,
-                "role": "observation",
-                "modality": "rgb",
-                "uri": f"data/{stream_id}.mp4",
-                "format": "mp4",
-                "encoding": "h264",
-                "shape": [vr["height"], vr["width"], 3],
-                "dtype": "uint8",
-                "frame_id": frame_id,
-                "time": {
-                    "clock_id": "segment",
-                    "sampling": "cfr",
-                    "rate_hz": vr["output_fps"],
-                    "start_ns": 0,
-                    "end_ns": duration_ns,
-                },
-                "origin": {
-                    "kind": "deterministic_transform",
-                    "source_asset_id": "raw_mcap",
-                    "operation": "trim_transcode_resample",
-                    "sample_map_uri": "maps/rgb_sample_map.parquet",
-                },
-            })
-    else:
-        # Guida / 单相机
-        vr = video_results[0] if video_results else {}
+    # RGB 视频流 — 每个 video_result 生成一个 stream entry
+    for vr in (video_results or []):
+        stream_id = vr["stream_id"]
         streams.append({
-            "stream_id": "ego_rgb",
-            "role": "observation",
+            "stream_id": stream_id,
+            "role": vr.get("role", "observation"),
             "modality": "rgb",
-            "uri": "data/ego_rgb.mp4",
+            "uri": f"data/{stream_id}.mp4",
             "format": "mp4",
             "encoding": "h264",
-            "shape": [vr.get("height", 0), vr.get("width", 0), 3],
+            "shape": [vr["height"], vr["width"], 3],
             "dtype": "uint8",
-            "frame_id": "ego_camera_optical",
+            "frame_id": vr.get("frame_id", stream_id),
             "time": {
                 "clock_id": "segment",
                 "sampling": "cfr",
-                "rate_hz": vr.get("output_fps", 30.0),
+                "rate_hz": vr["output_fps"],
                 "start_ns": 0,
                 "end_ns": duration_ns,
             },
             "origin": {
                 "kind": "deterministic_transform",
-                "source_asset_id": "raw_color_0",
+                "source_asset_id": source_assets[0]["source_asset_id"] if source_assets else "raw_color_0",
                 "operation": "trim_transcode_resample",
-                "sample_map_uri": "maps/rgb_sample_map.parquet",
+                "sample_map_uri": vr.get("sample_map_uri", f"maps/{stream_id}_sample_map.parquet"),
             },
         })
 
-    # 深度流 (Dunjia) — H.265 无损 MP4
+    # 深度流
     if depth_npz_path is not None:
         streams.append({
             "stream_id": "ego_depth",
@@ -169,45 +131,46 @@ def build_segment_json(
             },
             "origin": {
                 "kind": "deterministic_transform",
-                "source_asset_id": "raw_mcap",
+                "source_asset_id": "raw_mcap" if profile != "guida" else "raw_depth_0",
                 "operation": "trim_decode_ffv1",
             },
         })
 
-    # IMU 流
-    streams.append({
-        "stream_id": "ego_imu",
-        "role": "state",
-        "modality": "imu",
-        "uri": "data/imu.parquet",
-        "format": "parquet",
-        "time": {
-            "clock_id": "segment",
-            "sampling": "irregular",
-            "timestamp_column": "timestamp_ns",
-        },
-        "fields": [
-            {
-                "name": "linear_acceleration",
-                "shape": [3],
-                "dtype": "float32",
-                "unit": "m/s^2",
-                "frame_id": "imu",
+    # IMU 流 — 每个 imu_result 生成一个 stream entry
+    for ir in (imu_results or []):
+        streams.append({
+            "stream_id": ir["stream_id"],
+            "role": "state",
+            "modality": "imu",
+            "uri": ir["uri"],
+            "format": "parquet",
+            "time": {
+                "clock_id": "segment",
+                "sampling": "irregular",
+                "timestamp_column": "timestamp_ns",
             },
-            {
-                "name": "angular_velocity",
-                "shape": [3],
-                "dtype": "float32",
-                "unit": "rad/s",
-                "frame_id": "imu",
+            "fields": [
+                {
+                    "name": "linear_acceleration",
+                    "shape": [3],
+                    "dtype": "float32",
+                    "unit": "m/s^2",
+                    "frame_id": "imu",
+                },
+                {
+                    "name": "angular_velocity",
+                    "shape": [3],
+                    "dtype": "float32",
+                    "unit": "rad/s",
+                    "frame_id": "imu",
+                },
+            ],
+            "origin": {
+                "kind": "deterministic_transform",
+                "source_asset_id": source_assets[0]["source_asset_id"] if source_assets else "raw_imu_0",
+                "operation": "trim_and_unit_normalize",
             },
-        ],
-        "origin": {
-            "kind": "deterministic_transform",
-            "source_asset_id": "raw_imu_0" if profile == "guida" else "raw_mcap",
-            "operation": "trim_and_unit_normalize",
-        },
-    })
+        })
 
     segment = {
         "zrds_version": "0.1.0",

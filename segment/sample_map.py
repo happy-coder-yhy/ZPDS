@@ -1,5 +1,5 @@
 """
-生成 rgb_sample_map.parquet：输出帧 ↔ 源帧映射表。
+生成 {stream_id}_sample_map.parquet：输出帧 ↔ 源帧映射表。
 """
 
 import numpy as np
@@ -74,15 +74,21 @@ def generate_sample_map(
     return pd.DataFrame(rows)
 
 
-def write_sample_map(sample_map: pd.DataFrame, output_dir: str) -> str:
+def write_sample_map(sample_map: pd.DataFrame, output_dir: str,
+                     stream_id: str = "ego_rgb") -> str:
     """写出 sample_map 为 Parquet 文件。
+
+    Args:
+        sample_map: 映射表 DataFrame
+        output_dir: Prepared Segment 根目录
+        stream_id: 视频流标识，文件名生成为 {stream_id}_sample_map.parquet
 
     Returns:
         输出文件路径
     """
     maps_dir = Path(output_dir) / "maps"
     maps_dir.mkdir(parents=True, exist_ok=True)
-    output_path = maps_dir / "rgb_sample_map.parquet"
+    output_path = maps_dir / f"{stream_id}_sample_map.parquet"
     sample_map.to_parquet(str(output_path), index=False)
     return str(output_path)
 

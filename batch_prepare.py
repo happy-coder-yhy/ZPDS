@@ -3,7 +3,7 @@ ZPDS 批量 Prepared Segment 生成。
 
 读取 segment_candidates.json，对每个候选区间：
   ① 裁剪并转码 RGB 视频
-  ② 生成 rgb_sample_map.parquet
+  ② 生成 {stream_id}_sample_map.parquet
   ③ 规范化 IMU
   ④ 提取 calibration.json（共享，只做一次）
   ⑤ 生成 segment.json
@@ -34,7 +34,7 @@ from segment.sample_map import (
     generate_sample_map_from_timestamps,
     write_sample_map,
 )
-from segment.imu_normalizer import normalize_imu, normalize_imu_df, write_imu
+from segment.imu_normalizer import normalize_imu_df, write_imu
 from segment.calibration import (
     extract_calibration,
     extract_calibration_from_mcap,
@@ -43,7 +43,6 @@ from segment.calibration import (
 from segment.segment_writer import build_segment_json, write_segment_json
 from segment.segment_writer import sha256_hex
 from segment.validator import validate_segment, write_validation_report
-from segment.span_determiner import load_index
 
 # ============================================================
 # 配置
@@ -66,43 +65,31 @@ def generate_segment(
     source_end_ns: int,
     segment_id: str,
     output_dir: str,
-    index_frames: list[dict],
+    session,
     calibration: dict,
     cfg: dict,
     session_id: str = "guida_session_001",
     revision: str = "r0001",
     quality_issues: list[dict] | None = None,
     profile: str = "guida",
-    source_video: str | None = None,
-    imu_df: "pd.DataFrame | None" = None,
-    timestamps_ns: list[int] | None = None,
     source_assets: list[dict] | None = None,
-    video_results: list[dict] | None = None,  # Dunjia: 多个相机的转码结果
-    depth_npz_path: str | None = None,          # Dunjia: 深度 npz 路径
+    depth_npz_path: str | None = None,
 ) -> dict:
     """为单个候选区间生成完整 Prepared Segment。
 
-    Args:
-        ...
-        video_results: Dunjia 模式: 由调用方预先生成的所有相机转码结果列表
-        depth_npz_path: Dunjia 模式: 深度 .npz 文件路径
+    遍历 session 中所有 video_streams / imu_streams，
+    文件名由各流的 stream_id 决定，不再硬编码。
     """
-    import pandas as pd
-
     target_fps = cfg["output"]["target_fps"]
-
-    if source_video is None:
-        source_video = str(Path(dataset_path) / "color_000000.mkv")
-
     duration_ns = source_end_ns - source_start_ns
 
-    # 构建兼容 span 的 dict（segment_writer 需要）
+    pv = session.primary_video
     span = {
         "source_start_ns": source_start_ns,
         "source_end_ns": source_end_ns,
         "duration_s": duration_ns / 1_000_000_000,
         "total_frames_in_span": sum(
-            1 for f in index_frames
+            1 for f in pv.index_frames
             if source_start_ns <= f["timestamp_ns"] <= source_end_ns
         ),
         "reason": {"start": "from_candidate", "end": "from_candidate"},
@@ -110,57 +97,54 @@ def generate_segment(
         "trimmed_tail_frames": 0,
     }
 
-    # ---- ① 裁剪转码 RGB 视频 ----
-    if video_results is not None:
-        # Dunjia: 多相机由调用方预先转码完成
-        pass  # video_results 已包含所有相机的转码结果
-    else:
-        # Guida: 单个相机，在此处转码
-        output_mp4 = str(Path(output_dir) / "data" / "ego_rgb.mp4")
-        video_result = transcode_rgb(
-            source_video=source_video,
+    # ---- ① 每个视频流: 转码 + sample_map ----
+    video_results = []
+    for stream_id, vs in session.video_streams.items():
+        output_mp4 = str(Path(output_dir) / "data" / f"{stream_id}.mp4")
+        vr = transcode_rgb(
+            source_video=vs.video_path,
             output_mp4=output_mp4,
             source_start_ns=source_start_ns,
             source_end_ns=source_end_ns,
-            index_frames=index_frames,
+            index_frames=vs.index_frames,
             target_fps=target_fps,
         )
-        video_results = [video_result]
+        vr["stream_id"] = stream_id
 
-    # ---- ② 生成采样映射表 ----
-    if profile == "dunjia" and timestamps_ns is not None:
-        sample_map = generate_sample_map_from_timestamps(
-            timestamps_ns=timestamps_ns,
-            source_start_ns=source_start_ns,
-            source_end_ns=source_end_ns,
-            target_fps=target_fps,
-        )
-        sample_map_rows = len(sample_map)
-    else:
-        sample_map = generate_sample_map(
-            index_frames=index_frames,
-            source_start_ns=source_start_ns,
-            source_end_ns=source_end_ns,
-            target_fps=target_fps,
-        )
-        sample_map_rows = len(sample_map)
-    write_sample_map(sample_map, output_dir)
+        # ② sample_map
+        if profile in ("dunjia", "umi"):
+            sample_map = generate_sample_map_from_timestamps(
+                timestamps_ns=vs.timestamps_ns,
+                source_start_ns=source_start_ns,
+                source_end_ns=source_end_ns,
+                target_fps=target_fps,
+            )
+        else:
+            sample_map = generate_sample_map(
+                index_frames=vs.index_frames,
+                source_start_ns=source_start_ns,
+                source_end_ns=source_end_ns,
+                target_fps=target_fps,
+            )
+        write_sample_map(sample_map, output_dir, stream_id)
+        vr["sample_map_uri"] = f"maps/{stream_id}_sample_map.parquet"
 
-    # ---- ③ 规范化 IMU ----
-    if profile == "dunjia" and imu_df is not None:
+        video_results.append(vr)
+
+    # ---- ③ 每个 IMU 流: 规范化 + 写出 ----
+    imu_results = []
+    for stream_id, imu_s in session.imu_streams.items():
         imu = normalize_imu_df(
-            imu=imu_df,
+            imu=imu_s.dataframe,
             source_start_ns=source_start_ns,
             source_end_ns=source_end_ns,
         )
-    else:
-        imu_path = str(Path(dataset_path) / "imu" / "imu_000000.csv")
-        imu = normalize_imu(
-            imu_path=imu_path,
-            source_start_ns=source_start_ns,
-            source_end_ns=source_end_ns,
-        )
-    write_imu(imu, output_dir)
+        write_imu(imu, output_dir, stream_id)
+        imu_results.append({
+            "stream_id": stream_id,
+            "uri": f"data/{stream_id}.parquet",
+            "rows": len(imu),
+        })
 
     # ---- ④ 写出 calibration ----
     write_calibration(calibration, output_dir)
@@ -170,8 +154,7 @@ def generate_segment(
         dataset_path=dataset_path,
         span=span,
         video_results=video_results,
-        sample_map_rows=sample_map_rows,
-        imu_rows=len(imu),
+        imu_results=imu_results,
         calibration_id=calibration["calibration_id"],
         revision=revision,
         segment_id=segment_id,
@@ -192,8 +175,8 @@ def generate_segment(
         "segment_id": segment_id,
         "status": validation["status"],
         "duration_s": duration_ns / 1_000_000_000,
-        "rgb_frames": video_results[0]["output_frames"],
-        "imu_samples": len(imu),
+        "rgb_frames": video_results[0]["output_frames"] if video_results else 0,
+        "imu_samples": sum(ir["rows"] for ir in imu_results),
         "checks": validation["checks"],
         "errors": validation["errors"],
     }
@@ -232,7 +215,7 @@ def main():
     parser.add_argument(
         "--profile", "-p",
         default="guida",
-        choices=["guida", "dunjia"],
+        choices=["guida", "dunjia", "umi"],
         help="数据源 profile (默认: guida)",
     )
     args = parser.parse_args()
@@ -245,7 +228,8 @@ def main():
 
     # 默认 candidates 路径按 profile 分子目录
     if args.candidates is None:
-        subdir = "moxian" if profile == "guida" else "dunjia"
+        profile_subdirs = {"guida": "moxian", "dunjia": "dunjia", "umi": "umi"}
+        subdir = profile_subdirs.get(profile, profile)
         candidates_path = Path("output") / subdir / "segment_candidates.json"
     else:
         candidates_path = Path(args.candidates)
@@ -254,7 +238,8 @@ def main():
 
     # 默认输出目录按 profile 分子目录
     if args.output is None:
-        subdir = "moxian" if profile == "guida" else "dunjia"
+        profile_subdirs = {"guida": "moxian", "dunjia": "dunjia", "umi": "umi"}
+        subdir = profile_subdirs.get(profile, profile)
         output_root = Path("prepared_segments") / subdir
     else:
         output_root = Path(args.output)
@@ -268,9 +253,14 @@ def main():
         candidates_doc = json.load(f)
 
     candidates = candidates_doc.get("segments", [])
+    default_session_ids = {
+        "guida": "guida_session_001",
+        "dunjia": "dunjia_session_001",
+        "umi": "umi_session_001",
+    }
     source_session_id = candidates_doc.get(
         "source_session_id",
-        "guida_session_001" if profile == "guida" else "dunjia_session_001",
+        default_session_ids.get(profile, f"{profile}_session_001"),
     )
 
     if not candidates:
@@ -289,33 +279,31 @@ def main():
     if profile == "dunjia":
         from zpds_prepare.readers import dunjia_reader as dr
 
-        # 加载主相机 index_frames (camera0, 用于 QC 时间线)
-        print("  读取 camera0 帧索引 ...")
-        index_frames = dr.read_index_frames(dataset_path)
-        timestamps_ns = dr.read_index_timestamps(dataset_path)
-        print(f"  camera0: {len(index_frames)} 帧, "
+        # 统一读取 Session
+        print("  读取 MCAP Session ...")
+        session = dr.read_session(dataset_path)
+        pv = session.primary_video
+        index_frames = pv.index_frames
+        timestamps_ns = pv.timestamps_ns
+        print(f"  camera0: {pv.frame_count} 帧, "
               f"时间范围: {timestamps_ns[0]:,} → {timestamps_ns[-1]:,}")
+        print(f"  摄像头: {len(session.video_streams)} 个")
 
-        # 重构所有 RGB 相机视频
-        print("  重构多相机 H264 视频 ...")
+        # 显示所有视频流信息
         video_results = []
-        for cam_name in ["camera0", "camera1", "camera2"]:
-            topic = dr.CAMERA_TOPICS[cam_name]
-            mp4_path = dr.get_video_for_topic(dataset_path, topic)
-            cam_frames = dr.read_index_frames(dataset_path, topic)
+        for stream_id, vs in session.video_streams.items():
             try:
-                calib = dr.read_calibration(dataset_path, dr.CALIB_TOPICS[cam_name])
+                calib = dr.read_calibration(
+                    dataset_path, dr.CALIB_TOPICS.get(stream_id, "")
+                )
                 w, h = calib["width"], calib["height"]
             except (ValueError, KeyError):
-                w, h = 0, 0
-            print(f"    {cam_name}: {len(cam_frames)} 帧, {w}×{h}, {mp4_path}")
-
-        # 重构主相机 source_video (保持向后兼容)
-        source_video = dr.get_video_for_topic(dataset_path, dr.TOPIC_CAMERA0)
+                w, h = vs.width, vs.height
+            print(f"    {stream_id}: {vs.frame_count} 帧, {w}×{h}, {vs.video_path}")
 
         # 加载 IMU
         print("  读取 MCAP IMU ...")
-        imu_df = dr.read_imu(dataset_path)
+        imu_df = session.primary_imu.dataframe
         print(f"  IMU 样本: {len(imu_df)}")
 
         # 提取所有相机标定
@@ -323,7 +311,9 @@ def main():
         calibrations = {}
         for cam_name in ["camera0", "camera1", "camera2", "depth"]:
             try:
-                calib_data = dr.read_calibration(dataset_path, dr.CALIB_TOPICS[cam_name])
+                calib_data = dr.read_calibration(
+                    dataset_path, dr.CALIB_TOPICS[cam_name]
+                )
                 calibrations[cam_name] = calib_data
                 print(f"    {cam_name}: {calib_data['width']}×{calib_data['height']}")
             except (ValueError, KeyError):
@@ -352,11 +342,82 @@ def main():
                 "sha256": sha256_hex(dataset_path),
             },
         ]
+    elif profile == "umi":
+        from zpds_prepare.readers import umi_reader as ur
+
+        # 统一读取 Session
+        print("  读取 UMI MCAP Session ...")
+        session = ur.read_session(dataset_path)
+        pv = session.primary_video
+        index_frames = pv.index_frames
+        timestamps_ns = pv.timestamps_ns
+        print(f"  {pv.stream_id}: {pv.frame_count} 帧, "
+              f"时间范围: {timestamps_ns[0]:,} → {timestamps_ns[-1]:,}")
+        print(f"  摄像头: {len(session.video_streams)} 个, "
+              f"IMU: {len(session.imu_streams)} 个")
+
+        # 显示所有流信息
+        for stream_id, vs in session.video_streams.items():
+            try:
+                calib = ur.read_calibration(
+                    dataset_path, ur.CALIB_TOPICS.get(
+                        stream_id.replace("_camera0", ""), ""
+                    )
+                )
+                w, h = calib["width"], calib["height"]
+                dmodel = calib.get("distortion_model", "?")
+            except (ValueError, KeyError):
+                w, h = vs.width, vs.height
+                dmodel = "?"
+            print(f"    [{stream_id}] {vs.frame_count} 帧, {w}×{h}, "
+                  f"{vs.fps} fps, {dmodel}")
+
+        for stream_id, imu_s in session.imu_streams.items():
+            print(f"    [{stream_id}] {len(imu_s.dataframe)} 样本, "
+                  f"{imu_s.sample_rate_hz} Hz")
+
+        # 提取双端相机标定
+        print("  提取双端相机标定 ...")
+        calibrations = {}
+        for robot_id in ["robot0", "robot1"]:
+            try:
+                calib_data = ur.read_calibration(
+                    dataset_path, ur.CALIB_TOPICS[robot_id]
+                )
+                calibrations[robot_id] = calib_data
+                print(f"    {robot_id}: {calib_data['width']}×{calib_data['height']}, "
+                      f"{calib_data['distortion_model']}, "
+                      f"T_b_c={len(calib_data.get('T_b_c', []))} 元")
+            except (ValueError, KeyError):
+                pass
+        calibration = extract_calibration_from_mcap(
+            calibrations.get("robot0", {}),
+            calibration_id="calib_umi_001",
+            multi_cam=calibrations,
+        )
+        print(f"  标定 ID: {calibration['calibration_id']}")
+
+        # UMI 第一版无深度
+        depth_npz_path = None
+
+        # 构建 source_assets
+        mcap_path_obj = Path(dataset_path)
+        source_assets = [
+            {
+                "source_asset_id": "raw_mcap",
+                "uri": mcap_path_obj.name,
+                "sha256": sha256_hex(dataset_path),
+            },
+        ]
     else:
         # Guida 默认模式
-        print("  读取 index.jsonl ...")
-        index_frames = load_index(dataset_path)
-        timestamps = [f["timestamp_ns"] for f in index_frames]
+        from zpds_prepare.readers import guida_reader as gr
+
+        print("  读取 Session ...")
+        session = gr.read_session(dataset_path)
+        pv = session.primary_video
+        index_frames = pv.index_frames
+        timestamps = pv.timestamps_ns
         print(f"  总帧数: {len(index_frames)}, "
               f"时间范围: {timestamps[0]:,} → {timestamps[-1]:,}")
 
@@ -365,9 +426,6 @@ def main():
         calibration = extract_calibration(meta_path)
         print(f"  标定 ID: {calibration['calibration_id']}")
 
-        source_video = None
-        imu_df = None
-        timestamps_ns = None
         source_assets = None
 
     # ---- 逐个生成 Prepared Segment ----
@@ -396,81 +454,32 @@ def main():
         t0 = time.time()
 
         try:
-            # Dunjia: 每个相机单独转码
-            if profile == "dunjia":
-                seg_video_results = []
-                for cam_name in ["camera0", "camera1", "camera2"]:
-                    topic = dr.CAMERA_TOPICS[cam_name]
-                    cam_video = dr.get_video_for_topic(dataset_path, topic)
-                    cam_frames = dr.read_index_frames(dataset_path, topic)
-                    stream_id = {
-                        "camera0": "ego_rgb_center",
-                        "camera1": "ego_rgb_left",
-                        "camera2": "ego_rgb_right",
-                    }[cam_name]
-                    out_mp4 = str(Path(seg_dir) / "data" / f"{stream_id}.mp4")
-                    vr = transcode_rgb(
-                        source_video=cam_video,
-                        output_mp4=out_mp4,
-                        source_start_ns=source_start,
-                        source_end_ns=source_end,
-                        index_frames=cam_frames,
-                        target_fps=cfg["output"]["target_fps"],
-                    )
-                    vr["stream_id"] = stream_id
-                    vr["camera_name"] = cam_name
-                    seg_video_results.append(vr)
-
-                # 深度 — H.265 无损 MP4 视频
-                seg_depth_path = None
-                depth_vr = None
-                if dr.TOPIC_DEPTH in dr.CAMERA_TOPICS.values():
-                    seg_depth_path = str(Path(seg_dir) / "data" / "ego_depth.mp4")
-                    depth_vr = dr.transcode_depth_video(
-                        dataset_path, seg_depth_path,
-                        source_start, source_end,
-                        target_fps=cfg["output"]["target_fps"],
-                    )
-                    seg_depth_path = depth_vr["output_path"]
-
-                result = generate_segment(
-                    dataset_path=dataset_path,
-                    source_start_ns=source_start,
-                    source_end_ns=source_end,
-                    segment_id=seg_id,
-                    output_dir=str(seg_dir),
-                    index_frames=index_frames,
-                    calibration=calibration,
-                    cfg=cfg,
-                    session_id=source_session_id,
-                    revision=REVISION,
-                    quality_issues=span_issues if span_issues else None,
-                    profile=profile,
-                    source_video=source_video,
-                    imu_df=imu_df,
-                    timestamps_ns=timestamps_ns,
-                    source_assets=source_assets,
-                    video_results=seg_video_results,
-                    depth_npz_path=seg_depth_path,
+            # 深度 — Dunjia 专有（不在 session 中，需单独处理）
+            seg_depth_path = None
+            if profile == "dunjia" and dr.TOPIC_DEPTH in dr.CAMERA_TOPICS.values():
+                seg_depth_path = str(Path(seg_dir) / "data" / "ego_depth.mp4")
+                depth_vr = dr.transcode_depth_video(
+                    dataset_path, seg_depth_path,
+                    source_start, source_end,
+                    target_fps=cfg["output"]["target_fps"],
                 )
-            else:
-                result = generate_segment(
-                    dataset_path=dataset_path,
+                seg_depth_path = depth_vr["output_path"]
+
+            result = generate_segment(
+                dataset_path=dataset_path,
                 source_start_ns=source_start,
                 source_end_ns=source_end,
                 segment_id=seg_id,
                 output_dir=str(seg_dir),
-                index_frames=index_frames,
+                session=session,
                 calibration=calibration,
                 cfg=cfg,
                 session_id=source_session_id,
                 revision=REVISION,
                 quality_issues=span_issues if span_issues else None,
                 profile=profile,
-                source_video=source_video,
-                imu_df=imu_df,
-                timestamps_ns=timestamps_ns,
                 source_assets=source_assets,
+                depth_npz_path=seg_depth_path,
             )
             elapsed = time.time() - t0
             result["elapsed_s"] = round(elapsed, 1)

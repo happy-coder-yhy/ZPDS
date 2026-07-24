@@ -564,15 +564,168 @@ def read_session_bounds(mcap_path: str) -> tuple[int, int]:
 # 导出
 # ================================================================
 
+def read_session(dataset_path: str):
+    """统一读取 Session 全部流数据。
+
+    一次扫描 MCAP，收集所有 camera 视频流 + IMU 流，
+    返回包含 video_streams 和 imu_streams 的 Session 对象。
+
+    Returns:
+        Session 对象，包含:
+          - video_streams: {"camera0": VideoStream, "camera1": ..., "camera2": ...}
+          - imu_streams:  {"robot0_imu": ImuStream}
+    """
+    from zpds_prepare.readers.session_model import Session, VideoStream, ImuStream
+
+    reader, fh = _open_mcap(dataset_path)
+    try:
+        # ---- 第一遍扫描：收集所有流数据 ----
+        cam_data: dict[str, dict] = {}
+        for cam_name in ["camera0", "camera1", "camera2"]:
+            cam_data[cam_name] = {"frames": [], "has_calib": False, "width": 0, "height": 0}
+
+        imu_rows: list[dict] = []
+        camera0_fps = 25.0
+        camera0_dropped = 0
+        imu_rate = 196.0
+
+        for _schema, channel, msg, decoded in reader.iter_decoded_messages():
+            topic = channel.topic
+
+            # ---- 视频消息 ----
+            for cam_name, cam_topic in CAMERA_TOPICS.items():
+                if topic == cam_topic and cam_name in cam_data:
+                    ts = decoded.timestamp
+                    ts_ns = ts.seconds * 1_000_000_000 + ts.nanos
+                    cam_data[cam_name]["frames"].append({
+                        "seq": len(cam_data[cam_name]["frames"]),
+                        "timestamp_ns": ts_ns,
+                        "log_time_ns": msg.log_time,
+                        "publish_time_ns": msg.publish_time,
+                        "h264_size": len(decoded.data),
+                    })
+                    break
+
+            # ---- 标定消息 (提取分辨率) ----
+            for cam_name, calib_topic in CALIB_TOPICS.items():
+                if topic == calib_topic and cam_name in cam_data:
+                    if not cam_data[cam_name]["has_calib"]:
+                        cam_data[cam_name]["width"] = decoded.width
+                        cam_data[cam_name]["height"] = decoded.height
+                        cam_data[cam_name]["has_calib"] = True
+                    break
+
+            # ---- IMU 消息 ----
+            if topic == TOPIC_IMU:
+                ts = decoded.timestamp
+                ts_ns = ts.seconds * 1_000_000_000 + ts.nanos
+                imu_rows.append({
+                    "timestamp_ns": ts_ns,
+                    "ax": decoded.linear_acceleration.x,
+                    "ay": decoded.linear_acceleration.y,
+                    "az": decoded.linear_acceleration.z,
+                    "gx": decoded.angular_velocity.x,
+                    "gy": decoded.angular_velocity.y,
+                    "gz": decoded.angular_velocity.z,
+                })
+
+        # ---- 计算 camera0 元数据 ----
+        c0_frames = cam_data["camera0"]["frames"]
+        if c0_frames:
+            c0_ts = [f["timestamp_ns"] for f in c0_frames]
+            if len(c0_ts) >= 2:
+                intervals = np.diff(np.sort(c0_ts))
+                median_ns = np.median(intervals)
+                camera0_fps = 1e9 / median_ns if median_ns > 0 else 25.0
+                camera0_dropped = int(np.sum(intervals > median_ns * 2))
+            camera0_frame_count = len(c0_ts)
+            c0_width = cam_data["camera0"]["width"] or 1600
+            c0_height = cam_data["camera0"]["height"] or 1300
+        else:
+            camera0_frame_count = 0
+            c0_width = 1600
+            c0_height = 1300
+
+        if len(imu_rows) >= 2:
+            imu_ts_sorted = np.sort([r["timestamp_ns"] for r in imu_rows])
+            imu_intervals = np.diff(imu_ts_sorted)
+            imu_median_ns = np.median(imu_intervals)
+            imu_rate = 1e9 / imu_median_ns if imu_median_ns > 0 else 196.0
+    finally:
+        fh.close()
+
+    # ---- 构建 meta ----
+    meta = {
+        "device": "Dunjia",
+        "fps": round(camera0_fps, 1),
+        "frame_count": camera0_frame_count,
+        "width": c0_width,
+        "height": c0_height,
+        "dropped_frames": camera0_dropped,
+        "imu_sample_rate": round(imu_rate, 1),
+    }
+
+    # ---- 构建 video_streams ----
+    video_streams: dict[str, VideoStream] = {}
+    vid_topics = {
+        "camera0": TOPIC_CAMERA0,
+        "camera1": TOPIC_CAMERA1,
+        "camera2": TOPIC_CAMERA2,
+    }
+    for cam_name in ["camera0", "camera1", "camera2"]:
+        frames = cam_data[cam_name]["frames"]
+        if not frames:
+            continue
+        ts_list = [f["timestamp_ns"] for f in frames]
+        if len(ts_list) >= 2:
+            intervals = np.diff(np.sort(ts_list))
+            median_ns = np.median(intervals)
+            cam_fps = 1e9 / median_ns if median_ns > 0 else 25.0
+        else:
+            cam_fps = camera0_fps
+
+        # 获取视频路径 (缓存优先)
+        video_path = get_video_for_topic(dataset_path, vid_topics[cam_name])
+
+        video_streams[cam_name] = VideoStream(
+            stream_id=cam_name,
+            timestamps_ns=ts_list,
+            index_frames=frames,
+            video_path=video_path,
+            fps=round(cam_fps, 1),
+            width=cam_data[cam_name]["width"],
+            height=cam_data[cam_name]["height"],
+            frame_count=len(frames),
+        )
+
+    # ---- 构建 imu_streams ----
+    imu_streams: dict[str, ImuStream] = {}
+    if imu_rows:
+        imu_df = pd.DataFrame(imu_rows)
+        imu_streams["robot0_imu"] = ImuStream(
+            stream_id="robot0_imu",
+            dataframe=imu_df,
+            sample_rate_hz=meta["imu_sample_rate"],
+        )
+
+    return Session(
+        session_id=get_session_id(dataset_path),
+        source_path=dataset_path,
+        meta=meta,
+        video_streams=video_streams,
+        imu_streams=imu_streams,
+    )
+
+
 __all__ = [
     "CAMERA_TOPICS", "CALIB_TOPICS", "CAMERA_IDS",
     "TOPIC_CAMERA0", "TOPIC_CAMERA1", "TOPIC_CAMERA2",
     "TOPIC_DEPTH", "TOPIC_IMU",
     "read_meta", "count_messages",
     "read_index_frames", "read_index_timestamps",
-    "read_imu",
+    "read_imu", "read_session",
     "get_color_video", "get_video_for_topic", "reconstruct_video",
     "get_session_id",
-    "read_depth_frames", "write_depth_npz",
+    "read_depth_frames", "write_depth_npz", "transcode_depth_video",
     "read_calibration", "read_session_bounds",
 ]

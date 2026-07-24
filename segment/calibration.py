@@ -80,49 +80,49 @@ def extract_calibration_from_mcap(
 ) -> dict:
     """从 MCAP foxglove.CameraCalibration 消息构建标定 JSON。
 
+    支持遁甲 (3 路 RGB + depth) 和 UMI (双 robot) 两种多相机标定。
+
     Args:
-        calib_data: camera0 的标定数据 (主相机)
+        calib_data: 主相机的标定数据
         calibration_id: 标定 ID
-        multi_cam: 多相机标定 dict {cam_name: calib_data, ...}，可选
+        multi_cam: 多相机标定 dict，键为 cam_name (遁甲) 或 robot_id (UMI)
 
     Returns:
         与 extract_calibration() 兼容的 calibration dict
     """
+    # 判断 multi_cam 键的风格：遁甲用 camera0/camera1/camera2，UMI 用 robot0/robot1
+    is_umi = multi_cam and any(k.startswith("robot") for k in multi_cam)
+
     k = calib_data.get("K", [0]*9)
+    main_stream_id = (
+        "robot0_camera0" if is_umi
+        else "ego_rgb_center" if multi_cam
+        else "ego_rgb"
+    )
     cameras = [
-        {
-            "stream_id": "ego_rgb_center" if multi_cam else "ego_rgb",
-            "frame_id": calib_data.get("frame_id", "headcam_center_optical_frame"),
-            "model": "pinhole",
-            "resolution": [calib_data.get("width", 0), calib_data.get("height", 0)],
-            "intrinsics": {
-                "fx": k[0] if len(k) > 0 else 0,
-                "fy": k[4] if len(k) > 4 else 0,
-                "cx": k[2] if len(k) > 2 else 0,
-                "cy": k[5] if len(k) > 5 else 0,
-            },
-        }
+        _build_camera_entry(calib_data, stream_id=main_stream_id),
     ]
 
-    # 添加额外相机
     if multi_cam:
-        for cam_name in ["camera1", "camera2"]:
-            if cam_name in multi_cam:
-                cb = multi_cam[cam_name]
-                ck = cb.get("K", [0]*9)
-                stream_id = "ego_rgb_left" if cam_name == "camera1" else "ego_rgb_right"
-                cameras.append({
-                    "stream_id": stream_id,
-                    "frame_id": cb.get("frame_id", ""),
-                    "model": "pinhole",
-                    "resolution": [cb.get("width", 0), cb.get("height", 0)],
-                    "intrinsics": {
-                        "fx": ck[0] if len(ck) > 0 else 0,
-                        "fy": ck[4] if len(ck) > 4 else 0,
-                        "cx": ck[2] if len(ck) > 2 else 0,
-                        "cy": ck[5] if len(ck) > 5 else 0,
-                    },
-                })
+        if is_umi:
+            # UMI 风格：添加 robot1（robot0 已是主相机，跳过）
+            for robot_id in ["robot0", "robot1"]:
+                if robot_id in multi_cam and robot_id != "robot0":
+                    stream_id = f"{robot_id}_camera0"
+                    cameras.append(
+                        _build_camera_entry(multi_cam[robot_id], stream_id=stream_id)
+                    )
+        else:
+            # 遁甲风格：添加 camera1/camera2
+            for cam_name in ["camera1", "camera2"]:
+                if cam_name in multi_cam:
+                    stream_id = (
+                        "ego_rgb_left" if cam_name == "camera1"
+                        else "ego_rgb_right"
+                    )
+                    cameras.append(
+                        _build_camera_entry(multi_cam[cam_name], stream_id=stream_id)
+                    )
 
     return {
         "calibration_id": calibration_id,
@@ -150,6 +150,44 @@ def extract_calibration_from_mcap(
             "status": "unavailable",
         },
     }
+
+
+def _build_camera_entry(
+    calib_data: dict,
+    stream_id: str,
+) -> dict:
+    """从单个 CameraCalibration 数据构建相机条目。
+
+    承载 K 内参、畸变模型、T_b_c 外参（UMI）等。
+    """
+    k = calib_data.get("K", [0]*9)
+    entry: dict = {
+        "stream_id": stream_id,
+        "frame_id": calib_data.get("frame_id", ""),
+        "model": "pinhole",
+        "resolution": [calib_data.get("width", 0), calib_data.get("height", 0)],
+        "intrinsics": {
+            "fx": k[0] if len(k) > 0 else 0,
+            "fy": k[4] if len(k) > 4 else 0,
+            "cx": k[2] if len(k) > 2 else 0,
+            "cy": k[5] if len(k) > 5 else 0,
+        },
+    }
+
+    # 畸变模型
+    dmodel = calib_data.get("distortion_model", "")
+    if dmodel:
+        entry["distortion_model"] = dmodel
+    D = calib_data.get("D", [])
+    if D:
+        entry["D"] = D
+
+    # UMI: body→camera 外参
+    T_b_c = calib_data.get("T_b_c", [])
+    if T_b_c:
+        entry["T_b_c"] = T_b_c
+
+    return entry
 
 
 def write_calibration(calib: dict, output_dir: str) -> str:

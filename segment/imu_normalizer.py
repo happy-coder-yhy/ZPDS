@@ -117,14 +117,20 @@ def normalize_imu_df(
     return imu[cols]
 
 
-def write_imu(imu: pd.DataFrame, output_dir: str) -> str:
+def write_imu(imu: pd.DataFrame, output_dir: str,
+              stream_id: str = "ego_imu") -> str:
     """写出规范化 IMU 为 Parquet。
+
+    Args:
+        imu: 规范化后的 IMU DataFrame
+        output_dir: Prepared Segment 根目录
+        stream_id: IMU 流标识，文件名生成为 {stream_id}.parquet
 
     Returns:
         输出文件路径
     """
     data_dir = Path(output_dir) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    output_path = data_dir / "imu.parquet"
+    output_path = data_dir / f"{stream_id}.parquet"
     imu.to_parquet(str(output_path), index=False)
     return str(output_path)

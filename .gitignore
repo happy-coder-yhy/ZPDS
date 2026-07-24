@@ -11,6 +11,7 @@ output/
 batch_summary.json
 zpds_prepare/__pycache__/
 Prepared_Segment_详解.md
+开源项目解读_LeRobot_EgoSmith.md
 docs/
 CLAUDE.md
 AGENTS.md

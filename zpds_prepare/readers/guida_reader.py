@@ -74,3 +74,45 @@ def get_session_id(dataset_path: str) -> str:
     """从数据集路径推导 session_id。"""
     folder = Path(dataset_path).name
     return f"guida_{folder}"
+
+
+def read_session(dataset_path: str):
+    """统一读取 Session 全部流数据。
+
+    Returns:
+        Session 对象，包含:
+          - video_streams: {"ego_rgb": VideoStream}
+          - imu_streams:  {"ego_imu": ImuStream}
+    """
+    from zpds_prepare.readers.session_model import Session, VideoStream, ImuStream
+
+    meta = read_meta(dataset_path)
+    index_frames = read_index_frames(dataset_path)
+    timestamps_ns = [f["timestamp_ns"] for f in index_frames]
+    video_path = get_color_mkv(dataset_path)
+    imu_df = read_imu(dataset_path)
+
+    video_stream = VideoStream(
+        stream_id="ego_rgb",
+        timestamps_ns=timestamps_ns,
+        index_frames=index_frames,
+        video_path=video_path,
+        fps=meta["fps"],
+        width=meta["width"],
+        height=meta["height"],
+        frame_count=meta["frame_count"],
+    )
+
+    imu_stream = ImuStream(
+        stream_id="ego_imu",
+        dataframe=imu_df,
+        sample_rate_hz=meta["imu_sample_rate"],
+    )
+
+    return Session(
+        session_id=get_session_id(dataset_path),
+        source_path=dataset_path,
+        meta=meta,
+        video_streams={"ego_rgb": video_stream},
+        imu_streams={"ego_imu": imu_stream},
+    )
