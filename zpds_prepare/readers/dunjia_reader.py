@@ -18,6 +18,7 @@ MCAP 内部使用 foxglove protobuf schema：
 
 import os
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ from mcap.reader import make_reader
 from mcap_protobuf.decoder import DecoderFactory
 
 
-# ---- 默认 topic 名称 ----
+# ---- topic 名称 ----
 TOPIC_CAMERA0 = "/robot0/sensor/camera0/compressed"
 TOPIC_CAMERA1 = "/robot0/sensor/camera1/compressed"
 TOPIC_CAMERA2 = "/robot0/sensor/camera2/compressed"
@@ -38,12 +39,29 @@ TOPIC_CAMERA1_CALIB = "/robot0/sensor/camera1/camera_info"
 TOPIC_CAMERA2_CALIB = "/robot0/sensor/camera2/camera_info"
 TOPIC_DEPTH_CALIB = "/robot0/sensor/depth/calibration"
 
+# ---- 映射表 ----
+CAMERA_TOPICS = {
+    "camera0": TOPIC_CAMERA0,
+    "camera1": TOPIC_CAMERA1,
+    "camera2": TOPIC_CAMERA2,
+    "depth": TOPIC_DEPTH,
+}
+CALIB_TOPICS = {
+    "camera0": TOPIC_CAMERA0_CALIB,
+    "camera1": TOPIC_CAMERA1_CALIB,
+    "camera2": TOPIC_CAMERA2_CALIB,
+    "depth": TOPIC_DEPTH_CALIB,
+}
+CAMERA_IDS = {
+    "camera0": "headcam_center_optical_frame",
+    "camera1": "headcam_left_optical_frame",
+    "camera2": "headcam_right_optical_frame",
+    "depth": "depth_optical_frame",
+}
+
 
 def _open_mcap(mcap_path: str):
-    """打开 MCAP 文件，返回 (reader, file_handle)。
-
-    调用方负责在完成后 close file_handle。
-    """
+    """打开 MCAP 文件，返回 (reader, file_handle)。"""
     path = Path(mcap_path)
     if not path.exists():
         raise FileNotFoundError(f"MCAP 文件不存在: {mcap_path}")
@@ -62,16 +80,7 @@ def read_meta(dataset_path: str) -> dict[str, Any]:
     """扫描 MCAP，提取 Session 级元数据。
 
     Returns:
-        {
-            "device": "Dunjia",
-            "fps": float,           # 从实际帧间隔推算
-            "frame_count": int,     # 主相机帧数 (camera0)
-            "width": int,           # 主相机宽度
-            "height": int,          # 主相机高度
-            "dropped_frames": int,  # 通过时间戳间隔估算
-            "imu_sample_rate": float,
-            "session_id": str,
-        }
+        {device, fps, frame_count, width, height, dropped_frames, imu_sample_rate}
     """
     reader, fh = _open_mcap(dataset_path)
     try:
@@ -94,22 +103,15 @@ def read_meta(dataset_path: str) -> dict[str, Any]:
                 height = decoded.height
                 has_calib = True
 
-        # 从实际时间戳推算帧率
         if len(camera0_ts) >= 2:
             intervals = np.diff(np.sort(camera0_ts))
             median_interval_ns = np.median(intervals)
             fps = 1e9 / median_interval_ns if median_interval_ns > 0 else 25.0
+            dropped = int(np.sum(intervals > median_interval_ns * 2))
         else:
             fps = 25.0
-
-        # 检测丢帧（间隔 > 2x 中位数）
-        if len(camera0_ts) >= 2:
-            threshold = median_interval_ns * 2
-            dropped = int(np.sum(intervals > threshold))
-        else:
             dropped = 0
 
-        # IMU 采样率
         if len(imu_ts) >= 2:
             imu_intervals = np.diff(np.sort(imu_ts))
             imu_median_ns = np.median(imu_intervals)
@@ -130,28 +132,41 @@ def read_meta(dataset_path: str) -> dict[str, Any]:
         fh.close()
 
 
+def count_messages(mcap_path: str, topic: str) -> int:
+    """快速统计指定 topic 的消息数。"""
+    reader, fh = _open_mcap(mcap_path)
+    try:
+        cnt = 0
+        for _schema, channel, _msg, _decoded in reader.iter_decoded_messages():
+            if channel.topic == topic:
+                cnt += 1
+        return cnt
+    finally:
+        fh.close()
+
+
 # ================================================================
 # 帧索引 (index.jsonl 等价)
 # ================================================================
 
-def read_index_frames(dataset_path: str) -> list[dict]:
-    """从 camera0 CompressedVideo 消息构建帧索引列表。
+def read_index_frames(dataset_path: str, topic: str | None = None) -> list[dict]:
+    """从指定 CompressedVideo topic 构建帧索引列表。
 
-    每项包含：
-      - seq: 帧序号 (0-based)
-      - timestamp_ns: 消息内 timestamp (int, 权威时间轴)
-      - log_time_ns: MCAP 容器 log_time (int)
-      - publish_time_ns: MCAP publish_time (int)
-      - h264_size: H264 数据字节数
+    Args:
+        dataset_path: MCAP 文件路径
+        topic: topic 名称，默认 camera0
 
-    保留三重时间戳以满足双时间戳硬约束。
+    每项包含 seq, timestamp_ns, log_time_ns, publish_time_ns, h264_size。
     """
+    if topic is None:
+        topic = TOPIC_CAMERA0
+
     reader, fh = _open_mcap(dataset_path)
     try:
         frames = []
-        local_seq = 0  # 0-based 视频帧索引，非 MCAP 全局序号
+        local_seq = 0
         for (_schema, channel, msg, decoded) in reader.iter_decoded_messages():
-            if channel.topic != TOPIC_CAMERA0:
+            if channel.topic != topic:
                 continue
             ts = decoded.timestamp
             ts_ns = ts.seconds * 1_000_000_000 + ts.nanos
@@ -168,9 +183,9 @@ def read_index_frames(dataset_path: str) -> list[dict]:
         fh.close()
 
 
-def read_index_timestamps(dataset_path: str) -> list[int]:
-    """返回主相机消息内 timestamp_ns 的有序列表。"""
-    frames = read_index_frames(dataset_path)
+def read_index_timestamps(dataset_path: str, topic: str | None = None) -> list[int]:
+    """返回指定 topic 的消息内 timestamp_ns 有序列表。"""
+    frames = read_index_frames(dataset_path, topic)
     return [f["timestamp_ns"] for f in frames]
 
 
@@ -181,12 +196,7 @@ def read_index_timestamps(dataset_path: str) -> list[int]:
 def read_imu(dataset_path: str) -> pd.DataFrame:
     """解析 foxglove.Imu 消息，返回与 guida_reader 兼容的 DataFrame。
 
-    Columns:
-      timestamp_ns, ax, ay, az, gx, gy, gz
-
-    保留消息内 timestamp 作为 timestamp_ns。
-    加速度单位由 foxglove schema 规定为 m/s²，
-    角速度单位为 rad/s。
+    Columns: timestamp_ns, ax, ay, az, gx, gy, gz
     """
     reader, fh = _open_mcap(dataset_path)
     try:
@@ -218,23 +228,35 @@ def read_imu(dataset_path: str) -> pd.DataFrame:
 # 视频文件 (color_000000.mkv 等价)
 # ================================================================
 
-def reconstruct_h264(mcap_path: str, output_path: str | None = None) -> str:
-    """从 camera0 CompressedVideo 消息重构 H264 比特流。
-
-    MCAP 中的 H264 数据已使用 Annex B 起始码 (0x00000001)。
-    先拼接为 raw .h264，再用 ffmpeg 重封装为 .mp4，确保 OpenCV 可读。
+def reconstruct_video(
+    mcap_path: str,
+    topic: str | None = None,
+    output_path: str | None = None,
+) -> str:
+    """从 MCAP 消息重构 H264 视频并重封装为 .mp4。
 
     Args:
         mcap_path: MCAP 文件路径
-        output_path: 输出 .mp4 路径。默认在 MCAP 同目录生成 .cache.mp4
+        topic: 视频 topic，默认 camera0
+        output_path: 输出 .mp4 路径，默认 MCAP 同目录下 <topic短名>.cache.mp4
 
     Returns:
         写入的 .mp4 文件路径
     """
+    if topic is None:
+        topic = TOPIC_CAMERA0
+
     reader, fh = _open_mcap(mcap_path)
     try:
         if output_path is None:
-            output_path = str(Path(mcap_path).with_suffix(".cache.mp4"))
+            # 生成短名: camera0→cam0, camera1→cam1, etc.
+            for cam_name, t in CAMERA_TOPICS.items():
+                if t == topic:
+                    short = cam_name.replace("camera", "cam").replace("depth", "depth")
+                    output_path = str(Path(mcap_path).parent / f"{Path(mcap_path).stem}.{short}.cache.mp4")
+                    break
+            else:
+                output_path = str(Path(mcap_path).with_suffix(".cache.mp4"))
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -243,31 +265,23 @@ def reconstruct_h264(mcap_path: str, output_path: str | None = None) -> str:
         nal_count = 0
         with open(raw_h264, "wb") as f_out:
             for _schema, channel, _msg, decoded in reader.iter_decoded_messages():
-                if channel.topic != TOPIC_CAMERA0:
+                if channel.topic != topic:
                     continue
                 f_out.write(decoded.data)
                 nal_count += 1
 
         if nal_count == 0:
-            raise ValueError(f"MCAP 中没有 {TOPIC_CAMERA0} 消息")
+            raise ValueError(f"MCAP 中没有 {topic} 消息")
 
-        # Step 2: ffmpeg 重封装为 .mp4（不重新编码，只换容器）
-        import subprocess
+        # Step 2: ffmpeg 重封装
         result = subprocess.run(
-            [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                "-i", raw_h264,
-                "-c", "copy",
-                output_path,
-            ],
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-i", raw_h264, "-c", "copy", output_path],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(
-                f"ffmpeg 重封装失败: {result.stderr.strip()}"
-            )
+            raise RuntimeError(f"ffmpeg 重封装失败 ({topic}): {result.stderr.strip()}")
 
-        # 清理临时 .h264
         try:
             os.remove(raw_h264)
         except OSError:
@@ -279,45 +293,246 @@ def reconstruct_h264(mcap_path: str, output_path: str | None = None) -> str:
 
 
 def get_color_video(dataset_path: str) -> str:
-    """返回视频文件路径用于 OpenCV 检测和转码。
+    """返回主相机 camera0 的 .mp4 缓存路径（向后兼容）。"""
+    return get_video_for_topic(dataset_path, TOPIC_CAMERA0)
 
-    对遁甲而言，从 MCAP 提取 H264 并重封装为 .mp4，缓存在 MCAP 同目录。
-    """
-    cache_path = str(Path(dataset_path).with_suffix(".cache.mp4"))
-    if Path(cache_path).exists():
-        return cache_path
-    return reconstruct_h264(dataset_path, cache_path)
+
+def get_video_for_topic(dataset_path: str, topic: str | None = None) -> str:
+    """返回指定 topic 的 .mp4 缓存路径，不存在则重建。"""
+    if topic is None:
+        topic = TOPIC_CAMERA0
+    # 生成缓存路径
+    for cam_name, t in CAMERA_TOPICS.items():
+        if t == topic:
+            short = cam_name.replace("camera", "cam").replace("depth", "depth")
+            cache_path = str(Path(dataset_path).parent
+                             / f"{Path(dataset_path).stem}.{short}.cache.mp4")
+            if Path(cache_path).exists():
+                return cache_path
+            return reconstruct_video(dataset_path, topic, cache_path)
+    # fallback
+    return reconstruct_video(dataset_path, topic)
 
 
 def get_session_id(dataset_path: str) -> str:
-    """从文件名推导 session_id。
-
-    Example:
-        20260618_084650_00.mcap -> dunjia_20260618_084650_00
-    """
+    """从文件名推导 session_id。"""
     stem = Path(dataset_path).stem
     return f"dunjia_{stem}"
+
+
+# ================================================================
+# 深度
+# ================================================================
+
+def read_depth_frames(
+    mcap_path: str,
+    topic: str | None = None,
+) -> list[dict]:
+    """从 MCAP 读取深度 PNG 帧，解码并返回结构化列表。
+
+    Returns:
+        [{seq, timestamp_ns, log_time_ns, width, height, dtype, min_val, max_val}, ...]
+        不返回原始像素数据（太大），只返回元信息。
+        实际像素数据通过 write_depth_npz 写出。
+    """
+    import cv2
+
+    if topic is None:
+        topic = TOPIC_DEPTH
+
+    reader, fh = _open_mcap(mcap_path)
+    try:
+        frames = []
+        local_seq = 0
+        for _schema, channel, msg, decoded in reader.iter_decoded_messages():
+            if channel.topic != topic:
+                continue
+            ts = decoded.timestamp
+            ts_ns = ts.seconds * 1_000_000_000 + ts.nanos
+            # 解码 PNG → numpy 获取元信息
+            nparr = np.frombuffer(decoded.data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+            frames.append({
+                "seq": local_seq,
+                "timestamp_ns": ts_ns,
+                "log_time_ns": msg.log_time,
+                "width": img.shape[1] if img is not None else 0,
+                "height": img.shape[0] if img is not None else 0,
+                "dtype": str(img.dtype) if img is not None else "unknown",
+                "min_val": int(img.min()) if img is not None else 0,
+                "max_val": int(img.max()) if img is not None else 0,
+            })
+            local_seq += 1
+        return frames
+    finally:
+        fh.close()
+
+
+def write_depth_npz(
+    mcap_path: str,
+    output_path: str,
+    source_start_ns: int,
+    source_end_ns: int,
+    topic: str | None = None,
+) -> str:
+    """解码深度 PNG 帧 → 裁剪 → 写出 .npz 文件。"""
+    import cv2
+
+    if topic is None:
+        topic = TOPIC_DEPTH
+
+    reader, fh = _open_mcap(mcap_path)
+    try:
+        timestamps = []
+        images = []
+        for _schema, channel, msg, decoded in reader.iter_decoded_messages():
+            if channel.topic != topic:
+                continue
+            ts = decoded.timestamp
+            ts_ns = ts.seconds * 1_000_000_000 + ts.nanos
+            if ts_ns < source_start_ns or ts_ns > source_end_ns:
+                continue
+            nparr = np.frombuffer(decoded.data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                timestamps.append(ts_ns)
+                images.append(img)
+
+        if not images:
+            raise ValueError("时间范围内没有深度帧")
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        stack = np.stack(images, axis=0)
+        np.savez_compressed(
+            output_path,
+            frames=stack,
+            timestamps=np.array(timestamps, dtype=np.int64),
+            source_start_ns=np.int64(source_start_ns),
+            source_end_ns=np.int64(source_end_ns),
+        )
+        return output_path
+    finally:
+        fh.close()
+
+
+def transcode_depth_video(
+    mcap_path: str,
+    output_path: str,
+    source_start_ns: int,
+    source_end_ns: int,
+    target_fps: float = 30.0,
+    topic: str | None = None,
+) -> dict:
+    """解码深度 PNG 帧 → H.265 无损 MP4 视频。
+
+    使用 libx265 lossless 模式保留 uint16 深度精度。
+    FFmpeg 管道: rawvideo gray16le → libx265 lossless → mp4
+
+    Returns:
+        {output_frames, output_fps, width, height, codec, output_path}
+    """
+    import cv2
+
+    if topic is None:
+        topic = TOPIC_DEPTH
+
+    reader, fh = _open_mcap(mcap_path)
+    try:
+        images = []
+        timestamps_ns = []
+        width, height = 0, 0
+        for _schema, channel, msg, decoded in reader.iter_decoded_messages():
+            if channel.topic != topic:
+                continue
+            ts = decoded.timestamp
+            ts_ns = ts.seconds * 1_000_000_000 + ts.nanos
+            if ts_ns < source_start_ns or ts_ns > source_end_ns:
+                continue
+            nparr = np.frombuffer(decoded.data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                if width == 0:
+                    height, width = img.shape
+                images.append(img)
+                timestamps_ns.append(ts_ns)
+
+        if not images:
+            raise ValueError("时间范围内没有深度帧")
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        timestamps_arr = np.array(timestamps_ns, dtype=np.int64)
+        frame_interval_ns = int(1_000_000_000 / target_fps)
+        output_count = int((source_end_ns - source_start_ns) / frame_interval_ns)
+
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "rawvideo",
+            "-pix_fmt", "gray16le",
+            "-s", f"{width}x{height}",
+            "-r", str(target_fps),
+            "-i", "-",
+            "-c:v", "ffv1",
+            "-level", "3",
+            "-coder", "1",
+            "-context", "1",
+            "-pix_fmt", "gray16le",
+            output_path,
+        ]
+        proc = subprocess.Popen(
+            ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        total_output = 0
+        try:
+            for out_idx in range(output_count):
+                target_ts = source_start_ns + out_idx * frame_interval_ns
+                if target_ts > source_end_ns:
+                    break
+                nearest_idx = int(np.argmin(np.abs(timestamps_arr - target_ts)))
+                frame = images[nearest_idx]
+                proc.stdin.write(frame.tobytes())
+                total_output += 1
+
+            proc.stdin.close()
+            ret = proc.wait(timeout=120)
+            if ret != 0:
+                stderr = proc.stderr.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"FFmpeg 深度编码失败: {stderr.strip()}")
+        except Exception:
+            proc.kill()
+            raise
+
+        return {
+            "output_frames": total_output,
+            "output_fps": target_fps,
+            "width": width,
+            "height": height,
+            "codec": "ffv1",
+            "output_path": output_path,
+        }
+    finally:
+        fh.close()
 
 
 # ================================================================
 # 标定
 # ================================================================
 
-def read_calibration(mcap_path: str) -> dict[str, Any]:
+def read_calibration(mcap_path: str, topic: str | None = None) -> dict[str, Any]:
     """从 MCAP CameraCalibration 消息提取相机标定。
 
-    Returns:
-        {
-            "width": int, "height": int,
-            "frame_id": str,
-            "K": [9], "D": [n], "R": [9], "P": [12],
-            "distortion_model": str,
-        }
+    Args:
+        mcap_path: MCAP 文件路径
+        topic: 标定 topic，默认 camera0 标定
     """
+    if topic is None:
+        topic = TOPIC_CAMERA0_CALIB
+
     reader, fh = _open_mcap(mcap_path)
     try:
         for _schema, channel, _msg, decoded in reader.iter_decoded_messages():
-            if channel.topic == TOPIC_CAMERA0_CALIB:
+            if channel.topic == topic:
                 return {
                     "width": decoded.width,
                     "height": decoded.height,
@@ -328,7 +543,7 @@ def read_calibration(mcap_path: str) -> dict[str, Any]:
                     "P": list(decoded.P),
                     "distortion_model": decoded.distortion_model,
                 }
-        raise ValueError(f"MCAP 中没有 {TOPIC_CAMERA0_CALIB} 消息")
+        raise ValueError(f"MCAP 中没有 {topic} 消息")
     finally:
         fh.close()
 
@@ -338,10 +553,7 @@ def read_calibration(mcap_path: str) -> dict[str, Any]:
 # ================================================================
 
 def read_session_bounds(mcap_path: str) -> tuple[int, int]:
-    """读取 Session 时间范围 (start_ns, end_ns)。
-
-    基于 camera0 的消息内 timestamp。
-    """
+    """读取 Session 时间范围 (start_ns, end_ns)，基于 camera0。"""
     timestamps = read_index_timestamps(mcap_path)
     if not timestamps:
         raise ValueError("MCAP 中没有 camera0 帧")
@@ -349,17 +561,18 @@ def read_session_bounds(mcap_path: str) -> tuple[int, int]:
 
 
 # ================================================================
-# 导出符号 (与 guida_reader 一致)
+# 导出
 # ================================================================
 
 __all__ = [
-    "read_meta",
-    "read_index_frames",
-    "read_index_timestamps",
+    "CAMERA_TOPICS", "CALIB_TOPICS", "CAMERA_IDS",
+    "TOPIC_CAMERA0", "TOPIC_CAMERA1", "TOPIC_CAMERA2",
+    "TOPIC_DEPTH", "TOPIC_IMU",
+    "read_meta", "count_messages",
+    "read_index_frames", "read_index_timestamps",
     "read_imu",
-    "get_color_video",
+    "get_color_video", "get_video_for_topic", "reconstruct_video",
     "get_session_id",
-    "reconstruct_h264",
-    "read_calibration",
-    "read_session_bounds",
+    "read_depth_frames", "write_depth_npz",
+    "read_calibration", "read_session_bounds",
 ]

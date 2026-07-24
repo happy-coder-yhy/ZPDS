@@ -200,6 +200,27 @@ def main():
     imu = rd.read_imu(dataset_path)
     print(f"  IMU 行数:    {len(imu)}")
 
+    # 遁甲: 显示所有摄像头信息
+    if profile == "dunjia":
+        print(f"\n  多摄像头:")
+        for cam_name, topic in rd.CAMERA_TOPICS.items():
+            cnt = rd.count_messages(dataset_path, topic)
+            if cnt > 0:
+                if cam_name == "depth":
+                    frames = rd.read_depth_frames(dataset_path, topic)
+                    if frames:
+                        f0 = frames[0]
+                        print(f"    {cam_name}: {cnt} 帧, {f0['width']}×{f0['height']}, "
+                              f"{f0['dtype']} [{f0['min_val']}~{f0['max_val']}]")
+                else:
+                    calib_topic = rd.CALIB_TOPICS.get(cam_name)
+                    try:
+                        cal = rd.read_calibration(dataset_path, calib_topic)
+                        print(f"    {cam_name}: {cnt} 帧, {cal['width']}×{cal['height']}, "
+                              f"H264")
+                    except ValueError:
+                        print(f"    {cam_name}: {cnt} 帧, H264")
+
     # ================================================================
     # Step 2: 运行检测器
     # ================================================================

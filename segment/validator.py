@@ -73,36 +73,42 @@ def validate_segment(output_dir: str) -> dict:
         "Missing" in e for e in errors
     ) else "fail"
 
-    # ---- 3. 视频可解码 ----
-    rgb_path = seg_dir / "data" / "ego_rgb.mp4"
-    try:
-        cap = cv2.VideoCapture(str(rgb_path))
-        video_ok, frame = cap.read()
-        cap.release()
-        checks["video_decode"] = "pass" if video_ok and frame is not None else "fail"
-        if not video_ok:
-            errors.append("Video decode failed")
-    except Exception:
-        checks["video_decode"] = "fail"
-        errors.append("Video open failed")
+    # ---- 3. 视频流可解码（按 segment.json 中的 streams 遍历） ----
+    video_streams = [s for s in segment.get("streams", [])
+                     if s.get("format") == "mp4"]
+    all_video_ok = True
+    for vs in video_streams:
+        vpath = seg_dir / vs["uri"]
+        try:
+            cap = cv2.VideoCapture(str(vpath))
+            video_ok, frame = cap.read()
+            cap.release()
+            if not video_ok or frame is None:
+                all_video_ok = False
+                errors.append(f"Video decode failed: {vs['uri']}")
+        except Exception:
+            all_video_ok = False
+            errors.append(f"Video open failed: {vs['uri']}")
+    checks["video_decode"] = "pass" if all_video_ok and video_streams else "fail"
 
-    # ---- 4. 视频帧数 == sample_map 行数 ----
+    # ---- 4. 视频帧数 == sample_map 行数（测试主相机的 sample_map） ----
     sm_path = seg_dir / "maps" / "rgb_sample_map.parquet"
     if sm_path.exists():
         sm = pd.read_parquet(str(sm_path))
         stats["sample_map_rows"] = len(sm)
 
-        cap = cv2.VideoCapture(str(rgb_path))
-        video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-        stats["rgb_frames"] = video_frames
+        if video_streams:
+            cap = cv2.VideoCapture(str(seg_dir / video_streams[0]["uri"]))
+            video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            stats["rgb_frames"] = video_frames
 
-        match = abs(video_frames - len(sm)) <= 2  # 容忍 ±2 帧
-        checks["video_sample_map_count_match"] = "pass" if match else "fail"
-        if not match:
-            errors.append(
-                f"Video frames ({video_frames}) != sample_map rows ({len(sm)})"
-            )
+            match = abs(video_frames - len(sm)) <= 2
+            checks["video_sample_map_count_match"] = "pass" if match else "fail"
+            if not match:
+                errors.append(
+                    f"Video frames ({video_frames}) != sample_map rows ({len(sm)})"
+                )
     else:
         checks["video_sample_map_count_match"] = "skip"
 

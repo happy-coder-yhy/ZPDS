@@ -76,25 +76,62 @@ def extract_calibration(
 def extract_calibration_from_mcap(
     calib_data: dict,
     calibration_id: str = "calib_dunjia_001",
+    multi_cam: dict | None = None,
 ) -> dict:
     """从 MCAP foxglove.CameraCalibration 消息构建标定 JSON。
 
     Args:
-        calib_data: dunjia_reader.read_calibration() 返回的字典
-            {width, height, frame_id, K, D, R, P, distortion_model}
+        calib_data: camera0 的标定数据 (主相机)
         calibration_id: 标定 ID
+        multi_cam: 多相机标定 dict {cam_name: calib_data, ...}，可选
 
     Returns:
         与 extract_calibration() 兼容的 calibration dict
     """
-    k = calib_data["K"]
+    k = calib_data.get("K", [0]*9)
+    cameras = [
+        {
+            "stream_id": "ego_rgb_center" if multi_cam else "ego_rgb",
+            "frame_id": calib_data.get("frame_id", "headcam_center_optical_frame"),
+            "model": "pinhole",
+            "resolution": [calib_data.get("width", 0), calib_data.get("height", 0)],
+            "intrinsics": {
+                "fx": k[0] if len(k) > 0 else 0,
+                "fy": k[4] if len(k) > 4 else 0,
+                "cx": k[2] if len(k) > 2 else 0,
+                "cy": k[5] if len(k) > 5 else 0,
+            },
+        }
+    ]
+
+    # 添加额外相机
+    if multi_cam:
+        for cam_name in ["camera1", "camera2"]:
+            if cam_name in multi_cam:
+                cb = multi_cam[cam_name]
+                ck = cb.get("K", [0]*9)
+                stream_id = "ego_rgb_left" if cam_name == "camera1" else "ego_rgb_right"
+                cameras.append({
+                    "stream_id": stream_id,
+                    "frame_id": cb.get("frame_id", ""),
+                    "model": "pinhole",
+                    "resolution": [cb.get("width", 0), cb.get("height", 0)],
+                    "intrinsics": {
+                        "fx": ck[0] if len(ck) > 0 else 0,
+                        "fy": ck[4] if len(ck) > 4 else 0,
+                        "cx": ck[2] if len(ck) > 2 else 0,
+                        "cy": ck[5] if len(ck) > 5 else 0,
+                    },
+                })
+
     return {
         "calibration_id": calibration_id,
         "source": {
-            "uri": "MCAP /robot0/sensor/camera0/camera_info",
+            "uri": "MCAP camera_info topics",
             "kind": "source_recorded",
             "format": "foxglove.CameraCalibration",
         },
+        "calibrations": multi_cam,  # 传递完整多相机标定
         "frames": [
             {
                 "frame_id": calib_data.get("frame_id", "headcam_center_optical_frame"),
@@ -105,20 +142,7 @@ def extract_calibration_from_mcap(
                 "parent_frame_id": calib_data.get("frame_id", "headcam_center_optical_frame"),
             },
         ],
-        "cameras": [
-            {
-                "stream_id": "ego_rgb",
-                "frame_id": calib_data.get("frame_id", "headcam_center_optical_frame"),
-                "model": "pinhole",
-                "resolution": [calib_data["width"], calib_data["height"]],
-                "intrinsics": {
-                    "fx": k[0],
-                    "fy": k[4],
-                    "cx": k[2],
-                    "cy": k[5],
-                },
-            }
-        ],
+        "cameras": cameras,
         "depth_to_color": {
             "status": "unavailable",
         },
