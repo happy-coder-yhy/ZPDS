@@ -36,6 +36,7 @@ def build_segment_json(
     profile: str = "guida",
     depth_npz_path: str | None = None,
     calibrations: dict | None = None,
+    annotation_results: list[dict] | None = None,
 ) -> dict:
     """构建 segment.json 内容。
 
@@ -46,6 +47,10 @@ def build_segment_json(
 
     每个 imu_result 应包含:
       - stream_id, uri (相对于 segment 根目录), rows
+
+    每个 annotation_result 应包含:
+      - stream_id, uri, modality, source_asset_id
+      - ground_truth_status (可选), operation (可选), sample_map_uri (可选)
     """
     data_dir = Path(dataset_path)
     index_path = data_dir / "index.jsonl"
@@ -169,6 +174,28 @@ def build_segment_json(
                 "kind": "deterministic_transform",
                 "source_asset_id": source_assets[0]["source_asset_id"] if source_assets else "raw_imu_0",
                 "operation": "trim_and_unit_normalize",
+            },
+        })
+
+    # 标注流 — 每个 annotation_result 生成一个 stream entry
+    for ar in (annotation_results or []):
+        streams.append({
+            "stream_id": ar["stream_id"],
+            "role": "annotation",
+            "modality": ar.get("modality", "hand_object_detection"),
+            "uri": ar["uri"],
+            "format": "parquet",
+            "ground_truth_status": ar.get("ground_truth_status", "model_generated"),
+            "time": {
+                "clock_id": "segment",
+                "sampling": "sparse",
+                "timestamp_column": "timestamp_ns",
+            },
+            "origin": {
+                "kind": "imported_model_annotation",
+                "source_asset_id": ar.get("source_asset_id", "raw_hand_object_pkl"),
+                "operation": ar.get("operation", "safe_pickle_parse_and_frame_remap"),
+                "sample_map_uri": ar.get("sample_map_uri", "maps/ego_rgb_sample_map.parquet"),
             },
         })
 

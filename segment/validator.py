@@ -10,6 +10,9 @@ import cv2
 import pandas as pd
 import numpy as np
 
+from segment.annotation_validator import validate_hand_object_stream
+from segment.mask_validator import validate_mask_stream
+
 
 def sha256_hex(path: str) -> str:
     h = hashlib.sha256()
@@ -157,7 +160,60 @@ def validate_segment(output_dir: str) -> dict:
             "pass" if min_ts >= 0 and min_ts < 1_000_000_000 else "warn"
         )
 
-    # ---- 7. 统计 ----
+    # ---- 7. 标注流验证（按 modality 分发） ----
+    annotation_streams = [
+        s for s in segment.get("streams", [])
+        if s.get("role") == "annotation" or s.get("modality") == "hand_object_detection"
+    ]
+    if annotation_streams:
+        # 提取源视频尺寸（用于 bbox 校验）
+        video_streams_all = [
+            s for s in segment.get("streams", [])
+            if s.get("format") == "mp4"
+        ]
+        video_width = None
+        video_height = None
+        if video_streams_all:
+            shape = video_streams_all[0].get("shape", [])
+            if len(shape) >= 2:
+                video_height, video_width = shape[0], shape[1]
+
+        timeline_end_ns = segment["timeline"]["end_ns"]
+
+        for ann_s in annotation_streams:
+            modality = ann_s.get("modality", "")
+            stream_id = ann_s.get("stream_id", "unknown")
+
+            if modality == "hand_object_detection":
+                ann_result = validate_hand_object_stream(
+                    seg_dir=seg_dir,
+                    stream=ann_s,
+                    timeline_end_ns=timeline_end_ns,
+                    video_width=video_width,
+                    video_height=video_height,
+                )
+            elif modality == "instance_segmentation":
+                ann_result = validate_mask_stream(
+                    seg_dir=seg_dir,
+                    stream=ann_s,
+                    timeline_end_ns=timeline_end_ns,
+                    video_width=video_width,
+                    video_height=video_height,
+                )
+            else:
+                continue
+
+            # 合并结果
+            for check_name, result in ann_result["checks"].items():
+                checks[f"annotation_{stream_id}_{check_name}"] = result
+
+            for stat_name, value in ann_result["statistics"].items():
+                stats[f"annotation_{stream_id}_{stat_name}"] = value
+
+            if ann_result["errors"]:
+                errors.extend(ann_result["errors"])
+
+    # ---- 8. 统计 ----
     stats["duration_ns"] = segment["timeline"]["end_ns"] - segment["timeline"]["start_ns"]
 
     # ---- 汇总 ----
@@ -183,4 +239,50 @@ def write_validation_report(validation: dict, output_dir: str) -> str:
     output_path = reports_dir / "validation.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(validation, f, indent=2, ensure_ascii=False)
+    return str(output_path)
+
+
+def write_annotation_validation_report(validation: dict, output_dir: str) -> str:
+    """从完整 validation 结果中提取标注部分，写出 annotation_validation.json。
+
+    只保留 checks/statistics/errors 中与 annotation 相关的条目。
+
+    Returns:
+        输出文件路径，若无标注数据则返回空字符串
+    """
+    ann_checks = {
+        k: v for k, v in validation.get("checks", {}).items()
+        if k.startswith("annotation_")
+    }
+    ann_stats = {
+        k: v for k, v in validation.get("statistics", {}).items()
+        if k.startswith("annotation_")
+    }
+    ann_errors = [
+        e for e in validation.get("errors", [])
+        if any(kw in e.lower() for kw in ["annotation", "标注", "bbox", "mask", "rle", "entity", "hand", "object"])
+    ]
+
+    if not ann_checks and not ann_stats:
+        return ""
+
+    # 计算标注子状态
+    ann_status = "pass"
+    if any(v == "fail" for v in ann_checks.values()):
+        ann_status = "fail"
+    elif any(v == "warn" for v in ann_checks.values()):
+        ann_status = "warn"
+
+    report = {
+        "status": ann_status,
+        "checks": ann_checks,
+        "statistics": ann_stats,
+        "errors": ann_errors,
+    }
+
+    reports_dir = Path(output_dir) / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    output_path = reports_dir / "annotation_validation.json"
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
     return str(output_path)

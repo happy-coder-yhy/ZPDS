@@ -30,7 +30,9 @@ from segment.sample_map import generate_sample_map, write_sample_map
 from segment.imu_normalizer import normalize_imu, write_imu
 from segment.calibration import extract_calibration, write_calibration
 from segment.segment_writer import build_segment_json, write_segment_json
-from segment.validator import validate_segment, write_validation_report
+from segment.validator import (
+    validate_segment, write_validation_report, write_annotation_validation_report,
+)
 
 # ---- QC 模块（使用新版统一检测器） ----
 from zpds_prepare.detectors.black_frame import detect_black_frames
@@ -192,6 +194,9 @@ def main():
 
     validation = validate_segment(OUTPUT_DIR)
     val_path = write_validation_report(validation, OUTPUT_DIR)
+    ann_val_path = write_annotation_validation_report(validation, OUTPUT_DIR)
+    if ann_val_path:
+        print(f"\n  标注验证报告: {ann_val_path}")
 
     print(f"\n  状态: {validation['status'].upper()}")
     for check_name, result in validation["checks"].items():

@@ -26,6 +26,7 @@ import sys
 import time
 from pathlib import Path
 
+import pandas as pd
 import yaml
 
 from segment.video_transcoder import transcode_rgb
@@ -42,7 +43,11 @@ from segment.calibration import (
 )
 from segment.segment_writer import build_segment_json, write_segment_json
 from segment.segment_writer import sha256_hex
-from segment.validator import validate_segment, write_validation_report
+from segment.validator import (
+    validate_segment, write_validation_report, write_annotation_validation_report,
+)
+from segment.annotation_normalizer import normalize_hand_objects, write_annotation_parquet
+from segment.mask_normalizer import normalize_masks, write_mask_parquet
 
 # ============================================================
 # 配置
@@ -146,6 +151,68 @@ def generate_segment(
             "rows": len(imu),
         })
 
+    # ---- ③b 每个标注流: 标准化 + 写出 Parquet ----
+    annotation_results = []
+    for stream_id, ann_s in session.annotation_streams.items():
+        if not ann_s.records:
+            continue
+
+        # 使用第一个视频流的 sample_map
+        first_vr = video_results[0] if video_results else None
+        if first_vr is None:
+            continue
+
+        sm_path = Path(output_dir) / first_vr.get("sample_map_uri", "maps/ego_rgb_sample_map.parquet")
+        if not sm_path.exists():
+            continue
+        sample_map = pd.read_parquet(str(sm_path))
+
+        vs = session.video_streams[ann_s.source_video_stream_id]
+
+        if ann_s.annotation_type == "hand_object_detection":
+            df = normalize_hand_objects(
+                annotation_stream=ann_s,
+                video_timestamps_ns=vs.timestamps_ns,
+                sample_map=sample_map,
+                source_start_ns=source_start_ns,
+                source_end_ns=source_end_ns,
+                video_width=vs.width,
+                video_height=vs.height,
+            )
+            write_annotation_parquet(df, output_dir, stream_id)
+            annotation_results.append({
+                "stream_id": stream_id,
+                "uri": f"annotations/{stream_id}.parquet",
+                "modality": "hand_object_detection",
+                "source_asset_id": f"raw_{stream_id}_pkl",
+                "ground_truth_status": "model_generated",
+                "operation": "safe_pickle_parse_and_frame_remap",
+                "sample_map_uri": first_vr.get("sample_map_uri", "maps/ego_rgb_sample_map.parquet"),
+                "rows": len(df),
+            })
+
+        elif ann_s.annotation_type == "instance_segmentation":
+            df = normalize_masks(
+                annotation_stream=ann_s,
+                video_timestamps_ns=vs.timestamps_ns,
+                sample_map=sample_map,
+                source_start_ns=source_start_ns,
+                source_end_ns=source_end_ns,
+                video_width=vs.width,
+                video_height=vs.height,
+            )
+            write_mask_parquet(df, output_dir, stream_id)
+            annotation_results.append({
+                "stream_id": stream_id,
+                "uri": f"annotations/{stream_id}.parquet",
+                "modality": "instance_segmentation",
+                "source_asset_id": f"raw_{stream_id}_pkl",
+                "ground_truth_status": "model_generated",
+                "operation": "safe_pickle_parse_rle_normalize",
+                "sample_map_uri": first_vr.get("sample_map_uri", "maps/ego_rgb_sample_map.parquet"),
+                "rows": len(df),
+            })
+
     # ---- ④ 写出 calibration ----
     write_calibration(calibration, output_dir)
 
@@ -164,12 +231,14 @@ def generate_segment(
         profile=profile,
         depth_npz_path=depth_npz_path,
         calibrations=calibration.get("calibrations", None),
+        annotation_results=annotation_results if annotation_results else None,
     )
     write_segment_json(segment, output_dir)
 
     # ---- ⑥ 写出后验证 ----
     validation = validate_segment(output_dir)
     write_validation_report(validation, output_dir)
+    write_annotation_validation_report(validation, output_dir)
 
     return {
         "segment_id": segment_id,
@@ -177,6 +246,9 @@ def generate_segment(
         "duration_s": duration_ns / 1_000_000_000,
         "rgb_frames": video_results[0]["output_frames"] if video_results else 0,
         "imu_samples": sum(ir["rows"] for ir in imu_results),
+        "annotation_rows": sum(
+            ar.get("rows", 0) for ar in annotation_results
+        ) if annotation_results else 0,
         "checks": validation["checks"],
         "errors": validation["errors"],
     }
@@ -215,7 +287,7 @@ def main():
     parser.add_argument(
         "--profile", "-p",
         default="guida",
-        choices=["guida", "dunjia", "umi"],
+        choices=["guida", "dunjia", "umi", "epic"],
         help="数据源 profile (默认: guida)",
     )
     args = parser.parse_args()
@@ -228,7 +300,7 @@ def main():
 
     # 默认 candidates 路径按 profile 分子目录
     if args.candidates is None:
-        profile_subdirs = {"guida": "moxian", "dunjia": "dunjia", "umi": "umi"}
+        profile_subdirs = {"guida": "moxian", "dunjia": "dunjia", "umi": "umi", "epic": "epic"}
         subdir = profile_subdirs.get(profile, profile)
         candidates_path = Path("output") / subdir / "segment_candidates.json"
     else:
@@ -409,6 +481,73 @@ def main():
                 "sha256": sha256_hex(dataset_path),
             },
         ]
+    elif profile == "epic":
+        from zpds_prepare.readers import epic_reader as er
+        from segment.calibration import extract_calibration_from_mcap
+
+        # 从 record JSON 或视频路径加载
+        epic_config = {}
+        if dataset_path.endswith(".json"):
+            with open(dataset_path, "r", encoding="utf-8") as _f:
+                _record = json.load(_f)
+            video_path = _record.get("video_uri")
+            if not video_path:
+                print(f"错误: record JSON 缺少 video_uri: {dataset_path}")
+                return 1
+            if _record.get("hand_object_uri"):
+                epic_config["hand_object_path"] = _record["hand_object_uri"]
+            if _record.get("mask_uri"):
+                epic_config["mask_path"] = _record["mask_uri"]
+            print(f"  从 record JSON 加载: {dataset_path}")
+        else:
+            video_path = dataset_path
+
+        print(f"  读取 EPIC Session: {video_path}")
+        session = er.read_session(video_path, config=epic_config if epic_config else None)
+        pv = session.primary_video
+        index_frames = pv.index_frames
+        timestamps_ns = pv.timestamps_ns
+        print(f"  ego_rgb: {pv.frame_count} 帧, {pv.width}×{pv.height}, {pv.fps} fps")
+        print(f"  时间范围: {timestamps_ns[0]:,} → {timestamps_ns[-1]:,}")
+        print(f"  标注流: {len(session.annotation_streams)} 个")
+
+        for stream_id, ann_s in session.annotation_streams.items():
+            print(f"    [{stream_id}] {ann_s.annotation_type}, "
+                  f"{len(ann_s.records)} 标注帧, bbox={ann_s.bbox_format}")
+
+        # EPIC 无标定 — 生成最小占位
+        calibration = {
+            "calibration_id": f"calib_epic_{session.meta.get('video_id', '001')}",
+            "cameras": [{
+                "name": "ego_rgb",
+                "width": pv.width,
+                "height": pv.height,
+                "intrinsics": {"fx": 0.0, "fy": 0.0, "cx": 0.0, "cy": 0.0},
+                "distortion_model": "none",
+            }],
+        }
+
+        # source_assets: 视频 + pickle
+        source_assets = []
+        video_path_obj = Path(video_path)
+        source_assets.append({
+            "source_asset_id": "raw_color_0",
+            "uri": video_path_obj.name,
+            "sha256": sha256_hex(video_path) if video_path_obj.exists() else "",
+        })
+        for stream_id, ann_s in session.annotation_streams.items():
+            asset_id = f"raw_{stream_id}_pkl"
+            pkl_path = ann_s.source_path
+            source_assets.append({
+                "source_asset_id": asset_id,
+                "uri": str(pkl_path),
+                "media_type": "application/python-pickle",
+                "sha256": sha256_hex(str(pkl_path)) if pkl_path.exists() else "",
+                "ground_truth_status": "model_generated",
+            })
+
+        depth_npz_path = None
+        calibrations = None
     else:
         # Guida 默认模式
         from zpds_prepare.readers import guida_reader as gr

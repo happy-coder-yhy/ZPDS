@@ -46,8 +46,10 @@ def _get_reader(profile: str):
         from zpds_prepare.readers import dunjia_reader as rd
     elif profile == "umi":
         from zpds_prepare.readers import umi_reader as rd
+    elif profile == "epic":
+        from zpds_prepare.readers import epic_reader as rd
     else:
-        raise ValueError(f"未知 profile: {profile}，可选: guida, dunjia, umi")
+        raise ValueError(f"未知 profile: {profile}，可选: guida, dunjia, umi, epic")
     return rd
 
 
@@ -75,7 +77,7 @@ def main():
     parser.add_argument(
         "--profile", "-p",
         default="guida",
-        choices=["guida", "dunjia", "umi"],
+        choices=["guida", "dunjia", "umi", "epic"],
         help="数据源 profile (默认: guida)",
     )
     parser.add_argument(
@@ -88,6 +90,21 @@ def main():
         default=CONFIG_PATH,
         help="YAML 配置路径",
     )
+    parser.add_argument(
+        "--epic-ho",
+        default=None,
+        help="[EPIC] hand-object .pkl 标注路径",
+    )
+    parser.add_argument(
+        "--epic-mask",
+        default=None,
+        help="[EPIC] mask .pkl 标注路径",
+    )
+    parser.add_argument(
+        "--epic-record",
+        default=None,
+        help="[EPIC] 单条 inventory record JSON (替代 --epic-ho/--epic-mask)",
+    )
     args = parser.parse_args()
 
     # ---- 解析 profile 和 reader ----
@@ -98,20 +115,58 @@ def main():
     if args.dataset is None:
         if profile in ("dunjia", "umi"):
             parser.error(f"{profile} 模式必须指定 .mcap 文件路径")
+        elif profile == "epic":
+            parser.error(
+                "epic 模式必须指定视频文件路径或 record JSON\n"
+                "  --dataset /path/to/P01_01.mp4\n"
+                "  --dataset output/epic/records/P01_01.json"
+            )
         else:
             # 保持与旧版的兼容默认值
             dataset_path = "E:/datasets/egos/墨现"
     else:
         dataset_path = args.dataset
 
+    # ---- EPIC: 从 record JSON 加载路径 ----
+    epic_config: dict = {}
+    if profile == "epic":
+        record_json_path = args.epic_record or (
+            dataset_path if dataset_path.endswith(".json") else None
+        )
+        if record_json_path:
+            import json as _json
+            with open(record_json_path, "r", encoding="utf-8") as _f:
+                _record = _json.load(_f)
+            video_path = _record.get("video_uri")
+            if not video_path:
+                parser.error(f"Record JSON 缺少 video_uri: {record_json_path}")
+            dataset_path = video_path
+            if _record.get("hand_object_uri"):
+                epic_config["hand_object_path"] = _record["hand_object_uri"]
+            if _record.get("mask_uri"):
+                epic_config["mask_path"] = _record["mask_uri"]
+            print(f"  从 record JSON 加载: {record_json_path}")
+        else:
+            # 命令行参数优先，否则由 caller 后续处理
+            if args.epic_ho:
+                epic_config["hand_object_path"] = args.epic_ho
+            if args.epic_mask:
+                epic_config["mask_path"] = args.epic_mask
+
     # 默认输出目录按 profile 分子目录
     if args.output is None:
-        profile_subdirs = {"guida": "moxian", "dunjia": "dunjia", "umi": "umi"}
+        profile_subdirs = {"guida": "moxian", "dunjia": "dunjia", "umi": "umi", "epic": "epic"}
         subdir = profile_subdirs.get(profile, profile)
         output_dir = Path("output") / subdir
     else:
         output_dir = Path(args.output)
     config_path = args.config
+
+    # EPIC: per-video 子目录 (output/epic/P01_01/)
+    if profile == "epic":
+        from zpds_prepare.readers.epic_inventory import parse_epic_id
+        _, video_id = parse_epic_id(Path(dataset_path))
+        output_dir = output_dir / video_id
 
     start_time = time.time()
 
@@ -161,7 +216,11 @@ def main():
     print(f"  Profile:     {profile}")
     print(f"  数据集:      {dataset_path}")
 
-    session = rd.read_session(dataset_path)
+    # EPIC: 传递 pickle 路径
+    if profile == "epic":
+        session = rd.read_session(dataset_path, config=epic_config if epic_config else None)
+    else:
+        session = rd.read_session(dataset_path)
     pv = session.primary_video
 
     meta = session.meta
@@ -194,13 +253,18 @@ def main():
 
     # 显示所有流
     print(f"\n  视频流: {len(session.video_streams)} 个, "
-          f"IMU 流: {len(session.imu_streams)} 个")
+          f"IMU 流: {len(session.imu_streams)} 个, "
+          f"标注流: {len(session.annotation_streams)} 个")
     for stream_id, vs in session.video_streams.items():
         print(f"    [{stream_id}] {vs.frame_count} 帧, "
               f"{vs.width}×{vs.height}, {vs.fps} fps")
     for stream_id, imu_s in session.imu_streams.items():
         print(f"    [{stream_id}] {len(imu_s.dataframe)} 样本, "
               f"{imu_s.sample_rate_hz} Hz")
+    for stream_id, ann_s in session.annotation_streams.items():
+        print(f"    [{stream_id}] {ann_s.annotation_type}, "
+              f"{len(ann_s.records)} 标注帧, "
+              f"bbox={ann_s.bbox_format}")
 
     # ================================================================
     # Step 2: 运行检测器（遍历所有流）
@@ -218,19 +282,43 @@ def main():
         print(f"\n  [{stream_id}]")
 
         # 2a. 帧数一致性
-        fc_issues = detect_frame_count_mismatch(
-            index_frame_count=len(vs.timestamps_ns),
-            meta_frame_count=vs.frame_count,
-            timestamps_ns=vs.timestamps_ns,
-            stream_id=stream_id,
-        )
+        if profile == "epic":
+            # EPIC: 比较 ffprobe 声明 / 时间戳 / 标注范围
+            ann_max = None
+            for ann_s in session.annotation_streams.values():
+                if ann_s.records:
+                    max_idx = max(r["frame_index"] for r in ann_s.records)
+                    ann_max = max(ann_max, max_idx + 1) if ann_max is not None else max_idx + 1
+            fc_issues = detect_frame_count_mismatch(
+                stream_id=stream_id,
+                timestamps_ns=vs.timestamps_ns,
+                declared_count=vs.frame_count,
+                timestamp_count=len(vs.timestamps_ns),
+                annotation_max_frame=ann_max,
+            )
+        else:
+            fc_issues = detect_frame_count_mismatch(
+                stream_id=stream_id,
+                timestamps_ns=vs.timestamps_ns,
+                index_frame_count=len(vs.timestamps_ns),
+                meta_frame_count=vs.frame_count,
+            )
         all_issues.extend(fc_issues)
         if fc_issues:
             for iss in fc_issues:
-                print(f"    帧数不一致 [{iss.decision}]: "
-                      f"Index={iss.details.get('index_frame_count')} vs "
-                      f"Meta={iss.details.get('meta_frame_count')}, "
-                      f"diff={iss.details.get('difference')}")
+                if iss.issue_type == "annotation_frame_out_of_range":
+                    print(f"    标注越界 [{iss.decision}]: "
+                          f"标注最大帧={iss.details.get('annotation_max_frame')} > "
+                          f"可解码帧数={iss.details.get('decoded_frame_count')}")
+                else:
+                    src_a = iss.details.get("source_a", "index_frame_count")
+                    src_b = iss.details.get("source_b", "meta_frame_count")
+                    val_a = iss.details.get("value_a", iss.details.get("index_frame_count"))
+                    val_b = iss.details.get("value_b", iss.details.get("meta_frame_count"))
+                    print(f"    帧数不一致 [{iss.decision}]: "
+                          f"{src_a}={val_a} vs "
+                          f"{src_b}={val_b}, "
+                          f"diff={iss.details.get('difference')}")
         else:
             print(f"    帧数一致: {len(vs.timestamps_ns)}")
 
