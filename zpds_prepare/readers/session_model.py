@@ -1,9 +1,10 @@
 """
 Session 统一数据模型。
 
-read_session() 返回一个 Session 对象，包含 video_streams、imu_streams 和
-annotation_streams 字典。调用方不再分别调用 read_index_frames() / read_imu() /
-get_color_*()，而是从 Session 中按流 ID 获取所需数据。
+read_session() 返回一个 Session 对象，包含 video_streams、imu_streams、
+annotation_streams 和 time_series_streams 字典。
+调用方不再分别调用 read_index_frames() / read_imu() / get_color_*()，
+而是从 Session 中按流 ID 获取所需数据。
 """
 
 from dataclasses import dataclass, field
@@ -76,6 +77,52 @@ class AnnotationStream:
 
 
 @dataclass
+class TimeSeriesStream:
+    """通用时序流——机器人关节状态、力传感器、末端位姿、控制指令等。
+
+    与 VideoStream / ImuStream / AnnotationStream 并列。
+    不绑定特定模态，供 A2D / 磁编码器 / 力传感器 / VIO 等数据源复用。
+
+    Attributes:
+        stream_id: 流标识，如 "robot_state", "robot_action", "gripper_state"
+        modality:   模态标签，如 "joint_state", "joint_command", "force", "pose"
+        role:       角色标签，如 "state", "action", "sensor"
+        source_path: 原始数据文件路径
+        timestamps_ns: 有序纳秒时间戳列表
+        rows:       行数据（list[list] 或 numpy ndarray），按 timestamp 对齐
+        fields:     字段描述 [{name, dtype, unit?}, ...]
+        expected_rate_hz: 标称采样率
+        frame_id:   坐标系 frame（如 "robot_base", "left_gripper"）
+        clock_id:   时间基准标识（默认 "source_clock"）
+        metadata:   附加元数据
+    """
+    stream_id: str
+    modality: str
+    role: str
+
+    source_path: Path
+    timestamps_ns: list[int]
+    rows: Any  # list[list[float]] | np.ndarray
+
+    fields: list[dict[str, Any]] = field(default_factory=list)
+    expected_rate_hz: float | None = None
+    frame_id: str | None = None
+    clock_id: str = "source_clock"
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def num_samples(self) -> int:
+        """样本数。"""
+        return len(self.timestamps_ns)
+
+    @property
+    def num_fields(self) -> int:
+        """字段数（每行维度）。"""
+        return len(self.fields)
+
+
+@dataclass
 class Session:
     """一次采集 Session 的全部流数据。
 
@@ -86,6 +133,7 @@ class Session:
         video_streams: {stream_id: VideoStream}
         imu_streams: {stream_id: ImuStream}
         annotation_streams: {stream_id: AnnotationStream}
+        time_series_streams: {stream_id: TimeSeriesStream}
     """
     session_id: str
     source_path: str
@@ -93,6 +141,7 @@ class Session:
     video_streams: dict[str, VideoStream] = field(default_factory=dict)
     imu_streams: dict[str, ImuStream] = field(default_factory=dict)
     annotation_streams: dict[str, AnnotationStream] = field(default_factory=dict)
+    time_series_streams: dict[str, TimeSeriesStream] = field(default_factory=dict)
 
     @property
     def primary_video(self) -> VideoStream:
