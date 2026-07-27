@@ -112,10 +112,10 @@ def transcode_image_sequence(
         raise ValueError("无法加载任何源帧")
 
     # ---- 4. 创建 VideoWriter ----
-    # 按优先级尝试编码器: H264 → avc1 → mp4v
+    # 按优先级尝试编码器: mp4v（内置）→ avc1 → H264（需 OpenH264 DLL）
     codec = None
     writer = None
-    for codec in ("H264", "avc1", "mp4v"):
+    for codec in ("mp4v", "avc1", "H264"):
         fourcc = cv2.VideoWriter_fourcc(*codec)
         writer = cv2.VideoWriter(str(output_path), fourcc, target_fps, (width, height))
         if writer.isOpened():
