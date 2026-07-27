@@ -8,9 +8,64 @@ stage3_visual:
   black_threshold: 5
   overexposure_ratio: 0.95
 
+  # D13 过曝检测
+  overexposure:
+    enabled: true
+    mean_threshold: 220
+    overexposure_ratio: 0.95
+    saturated_ratio: 0.30
+    p95_threshold: 245
+    p99_threshold: 250
+    consecutive_min: 3
+    sample_interval: 1
+
+  # D14 模糊检测
+  blur:
+    enabled: true
+    laplacian_threshold: 150.0    # 1600×1300
+    consecutive_min: 3
+    sample_interval: 1
+
+stage5_depth:
+  # D15 深度有效性（UMI 无深度流，默认禁用）
+  enabled: false
+  zero_ratio_max: 0.50
+  invalid_ratio_max: 0.60
+  valid_ratio_min: 0.40
+  frozen_consecutive_min: 3
+  rgb_depth_pairing:
+    max_offset_ns: 50000000
+
 stage6_imu:
   max_gap_s: 0.03
   sample_rate_hz: 200
+  # D16 IMU 异常
+  interval:
+    expected_interval_s: 0.005   # ~200 Hz (robot0) / ~193 Hz (robot1)
+    gap_factor: 3.0
+  spike:
+    enabled: true
+    std_factor: 6.0
+  freeze:
+    enabled: true
+    consecutive_min: 10
+  static_bias:
+    enabled: true
+    static_window_s: 1.0
 
 stage7_robot:
   joint_limit_margin: 0.01   # 关节限位裕度 (rad)
+
+stage11_dedup:
+  # D18 近重复检测
+  exact_hash:
+    enabled: true
+    algorithm: sha256
+  phash:
+    enabled: true
+    hamming_max: 10
+    sample_count: 10
+  trajectory:
+    enabled: false               # UMI 无机器人轨迹
+    correlation_min: 0.95
+    n_bins: 20

@@ -8,9 +8,63 @@ stage3_visual:
   black_threshold: 5        # 黑屏灰度阈值
   overexposure_ratio: 0.95  # 过曝像素比例
 
-stage6_imu:
-  max_gap_s: 0.06           # IMU 最大允许中断 (s)
-  sample_rate_hz: 50
+  # D13 过曝检测
+  overexposure:
+    enabled: true
+    mean_threshold: 220        # 灰度均值阈值 (0-255)
+    overexposure_ratio: 0.95   # 过曝像素比例阈值
+    saturated_ratio: 0.30      # 饱和像素 (>=250) 比例
+    p95_threshold: 245         # P95 强度阈值
+    p99_threshold: 250         # P99 强度阈值
+    consecutive_min: 3         # 连续过曝最少帧数
+    sample_interval: 1         # 采样间隔
+
+  # D14 模糊检测
+  blur:
+    enabled: true
+    laplacian_threshold: 80.0  # Laplacian 方差阈值 (1280×720)
+    consecutive_min: 3         # 连续模糊最少帧数
+    sample_interval: 1
 
 stage4_video_timing:
   vfr_tolerance: 0.01       # VFR 容忍度
+
+stage5_depth:
+  # D15 深度有效性
+  zero_ratio_max: 0.50
+  invalid_ratio_max: 0.60
+  valid_ratio_min: 0.40
+  frozen_consecutive_min: 3
+  rgb_depth_pairing:
+    max_offset_ns: 50000000    # 50ms
+
+stage6_imu:
+  max_gap_s: 0.06           # IMU 最大允许中断 (s)
+  sample_rate_hz: 50
+  # D16 IMU 异常
+  interval:
+    expected_interval_s: 0.02  # 50 Hz
+    gap_factor: 3.0
+  spike:
+    enabled: true
+    std_factor: 6.0
+  freeze:
+    enabled: true
+    consecutive_min: 10
+  static_bias:
+    enabled: true
+    static_window_s: 1.0
+
+stage11_dedup:
+  # D18 近重复检测
+  exact_hash:
+    enabled: true
+    algorithm: sha256
+  phash:
+    enabled: true
+    hamming_max: 10
+    sample_count: 10
+  trajectory:
+    enabled: false           # Guida 无机器人轨迹
+    correlation_min: 0.95
+    n_bins: 20
