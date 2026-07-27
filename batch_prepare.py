@@ -55,7 +55,7 @@ from segment.mask_normalizer import normalize_masks, write_mask_parquet
 DATASET = "E:/datasets/egos/墨现"
 CANDIDATES_PATH = "output/segment_candidates.json"
 CONFIG_PATH = "config.yaml"
-OUTPUT_ROOT = "prepared_segments"
+OUTPUT_ROOT = "output"  # 子目录在运行时按 profile 拼接 prepared_segments
 REVISION = "r0001"
 
 
@@ -312,7 +312,7 @@ def main():
     if args.output is None:
         profile_subdirs = {"guida": "moxian", "dunjia": "dunjia", "umi": "umi"}
         subdir = profile_subdirs.get(profile, profile)
-        output_root = Path("prepared_segments") / subdir
+        output_root = Path("output") / subdir / "prepared_segments"
     else:
         output_root = Path(args.output)
 

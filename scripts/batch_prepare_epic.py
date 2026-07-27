@@ -34,7 +34,7 @@ import yaml
 
 CONFIG_PATH = "config.yaml"
 RECORDS_DIR = Path("output/epic/records")
-PREPARED_ROOT = Path("prepared_segments/epic")
+PREPARED_ROOT = Path("output/epic/prepared_segments")
 BATCH_SUMMARY_PATH = PREPARED_ROOT / "batch_summary.json"
 
 
