@@ -188,22 +188,10 @@ def generate_segment(
         "trimmed_tail_frames": 0,
     }
 
-    # ---- ① 每个视频流: 转码 + sample_map ----
-    video_results = []
+    # ---- ① sample_map (无需等转码，直接用 session 生成) ----
+    video_meta: list[dict] = []
     for stream_id, vs in session.video_streams.items():
-        output_mp4 = str(Path(output_dir) / "data" / f"{stream_id}.mp4")
-        vr = transcode_rgb(
-            source_video=vs.video_path,
-            output_mp4=output_mp4,
-            source_start_ns=source_start_ns,
-            source_end_ns=source_end_ns,
-            index_frames=vs.index_frames,
-            target_fps=target_fps,
-        )
-        vr["stream_id"] = stream_id
-
-        # ② sample_map
-        if profile in ("dunjia", "umi"):
+        if profile in ("dunjia", "umi", "epic"):
             sample_map = generate_sample_map_from_timestamps(
                 timestamps_ns=vs.timestamps_ns,
                 source_start_ns=source_start_ns,
@@ -218,11 +206,18 @@ def generate_segment(
                 target_fps=target_fps,
             )
         write_sample_map(sample_map, output_dir, stream_id)
-        vr["sample_map_uri"] = f"maps/{stream_id}_sample_map.parquet"
 
-        video_results.append(vr)
+        output_mp4 = str(Path(output_dir) / "data" / f"{stream_id}.mp4")
+        video_meta.append({
+            "stream_id": stream_id,
+            "width": vs.width,
+            "height": vs.height,
+            "output_fps": target_fps,
+            "output_mp4": output_mp4,
+            "sample_map_uri": f"maps/{stream_id}_sample_map.parquet",
+        })
 
-    # ---- ③ 每个 IMU 流: 规范化 + 写出 ----
+    # ---- ② IMU ----
     imu_results = []
     for stream_id, imu_s in session.imu_streams.items():
         imu = normalize_imu_df(
@@ -237,7 +232,7 @@ def generate_segment(
             "rows": len(imu),
         })
 
-    # ---- UMI 机器人时序：保留原始值、位姿和 MCAP 时钟 ----
+    # ---- ③ UMI 机器人时序：保留原始值、位姿和 MCAP 时钟 ----
     time_series_results = []
     for stream in session.time_series_streams.values():
         if stream.modality == "magnetic_encoder":
@@ -259,7 +254,7 @@ def generate_segment(
                 )
             )
 
-    # ---- ③a 深度流: 保留原始频率并无损写出 ----
+    # ---- ④ 深度流: 保留原始频率并无损写出 ----
     depth_results = []
     for depth_stream in session.depth_streams.values():
         depth_results.append(
@@ -271,18 +266,18 @@ def generate_segment(
             )
         )
 
-    # ---- ③b 每个标注流: 标准化 + 写出 Parquet ----
+    # ---- ⑤ 标注: 标准化 + 写出 ----
     annotation_results = []
     for stream_id, ann_s in session.annotation_streams.items():
         if not ann_s.records:
             continue
 
         # 使用第一个视频流的 sample_map
-        first_vr = video_results[0] if video_results else None
-        if first_vr is None:
+        first_vm = video_meta[0] if video_meta else None
+        if first_vm is None:
             continue
 
-        sm_path = Path(output_dir) / first_vr.get("sample_map_uri", "maps/ego_rgb_sample_map.parquet")
+        sm_path = Path(output_dir) / first_vm.get("sample_map_uri", "maps/ego_rgb_sample_map.parquet")
         if not sm_path.exists():
             continue
         sample_map = pd.read_parquet(str(sm_path))
@@ -307,7 +302,7 @@ def generate_segment(
                 "source_asset_id": f"raw_{stream_id}_pkl",
                 "ground_truth_status": "model_generated",
                 "operation": "safe_pickle_parse_and_frame_remap",
-                "sample_map_uri": first_vr.get("sample_map_uri", "maps/ego_rgb_sample_map.parquet"),
+                "sample_map_uri": first_vm.get("sample_map_uri", "maps/ego_rgb_sample_map.parquet"),
                 "rows": len(df),
             })
 
@@ -329,18 +324,18 @@ def generate_segment(
                 "source_asset_id": f"raw_{stream_id}_pkl",
                 "ground_truth_status": "model_generated",
                 "operation": "safe_pickle_parse_rle_normalize",
-                "sample_map_uri": first_vr.get("sample_map_uri", "maps/ego_rgb_sample_map.parquet"),
+                "sample_map_uri": first_vm.get("sample_map_uri", "maps/ego_rgb_sample_map.parquet"),
                 "rows": len(df),
             })
 
-    # ---- ④ 写出 calibration ----
+    # ---- ④ calibration ----
     write_calibration(calibration, output_dir)
 
-    # ---- ⑤ 生成 segment.json ----
+    # ---- ⑤ segment.json (video_meta 提供元数据，不依赖实际转码结果) ----
     segment = build_segment_json(
         dataset_path=dataset_path,
         span=span,
-        video_results=video_results,
+        video_results=video_meta,
         imu_results=imu_results,
         calibration_id=calibration["calibration_id"],
         revision=revision,
@@ -361,7 +356,23 @@ def generate_segment(
     )
     write_segment_json(segment, output_dir)
 
-    # ---- ⑥ 写出后验证 ----
+    # ---- ⑥ 转码 (放最后 — 最慢的步骤，不影响其他产出) ----
+    video_results = []
+    for vm in video_meta:
+        vs = session.video_streams[vm["stream_id"]]
+        vr = transcode_rgb(
+            source_video=vs.video_path,
+            output_mp4=vm["output_mp4"],
+            source_start_ns=source_start_ns,
+            source_end_ns=source_end_ns,
+            index_frames=vs.index_frames,
+            target_fps=target_fps,
+        )
+        vr["stream_id"] = vm["stream_id"]
+        vr["sample_map_uri"] = vm["sample_map_uri"]
+        video_results.append(vr)
+
+    # ---- ⑦ 写出后验证 ----
     validation = validate_segment(output_dir)
     write_validation_report(validation, output_dir)
     write_annotation_validation_report(validation, output_dir)

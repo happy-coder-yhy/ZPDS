@@ -209,11 +209,22 @@ def _decode_mask_pickle(pkl_path: str) -> list[dict]:
 # ---- ffprobe 视频探测 ----
 
 def probe_video(video_path: Path) -> dict:
-    """使用 ffprobe 获取视频流元信息。
+    """获取视频流元信息（优先 ffprobe，回退 OpenCV）。
 
     Returns:
         {"width": int, "height": int, "fps": float, "nb_frames": int, "duration_s": float}
     """
+    import shutil
+
+    # 优先 ffprobe（帧数/时长精确）
+    if shutil.which("ffprobe"):
+        return _probe_with_ffprobe(video_path)
+
+    # 回退 OpenCV（跨平台，无外部依赖）
+    return _probe_with_opencv(video_path)
+
+
+def _probe_with_ffprobe(video_path: Path) -> dict:
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -233,7 +244,6 @@ def probe_video(video_path: Path) -> dict:
     height = stream.get("height", 0)
     nb_frames = int(stream.get("nb_frames", 0))
 
-    # 解析帧率 (avg_frame_rate 格式为 "30000/1001")
     fps_str = stream.get("avg_frame_rate", "30/1")
     if "/" in fps_str:
         num, den = fps_str.split("/")
@@ -252,11 +262,44 @@ def probe_video(video_path: Path) -> dict:
     }
 
 
-def read_frame_pts_ns(video_path: Path) -> list[int]:
+def _probe_with_opencv(video_path: Path) -> dict:
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"OpenCV 无法打开视频: {video_path}")
+
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    nb_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration_s = nb_frames / fps if fps > 0 else 0.0
+    cap.release()
+
+    return {
+        "width": width,
+        "height": height,
+        "fps": round(fps, 2),
+        "nb_frames": nb_frames,
+        "duration_s": duration_s,
+    }
+
+
+def read_frame_pts_ns(video_path: Path, fast: bool = False) -> list[int]:
     """使用 ffprobe 逐帧提取 PTS (Presentation TimeStamp)，返回纳秒列表。
 
     若 ffprobe 提取失败（如文件无索引），回退为基于帧率和帧数的推算。
+    fast=True 时直接使用推算（EPIC CFR 视频无需逐帧提取）。
     """
+    # fast 模式：EPIC CFR 视频直接用帧率推算（秒级，跳过 ffprobe 空等）
+    if fast:
+        probe = probe_video(video_path)
+        nb = probe["nb_frames"]
+        fps = probe["fps"]
+        if nb <= 0 or fps <= 0:
+            return []
+        return [int(i * 1e9 / fps) for i in range(nb)]
+
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -264,9 +307,13 @@ def read_frame_pts_ns(video_path: Path) -> list[int]:
         "-of", "csv=p=0",
         str(video_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # ffprobe 逐帧 PTS 对大视频（30min+ 59.94fps）极慢，设 30s 超时回退推算
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        result = None
 
-    if result.returncode == 0 and result.stdout.strip():
+    if result is not None and result.returncode == 0 and result.stdout.strip():
         timestamps_ns = []
         for line in result.stdout.splitlines():
             line = line.strip()
@@ -309,6 +356,7 @@ def read_session(source: str, config: dict | None = None) -> Session:
     """
     if config is None:
         config = {}
+    fast_pts = config.get("fast_pts", True)  # EPIC CFR 视频默认快速推算
 
     video_path = Path(source)
     if not video_path.is_file():
@@ -325,7 +373,7 @@ def read_session(source: str, config: dict | None = None) -> Session:
     nb_frames = probe["nb_frames"]
 
     # ---- 提取帧时间戳 ----
-    timestamps_ns = read_frame_pts_ns(video_path)
+    timestamps_ns = read_frame_pts_ns(video_path, fast=fast_pts)
     if not timestamps_ns:
         raise RuntimeError(f"无法提取视频帧时间戳: {video_path}")
 

@@ -189,82 +189,92 @@ def normalize_hand_objects(
         # ---- 判断是否有物体交互 ----
         has_object = "object_bbox" in rec
 
-        # ============================================================
-        # Hand 实体
-        # ============================================================
+        # ---- Hand 退化框检查 (EPIC 模型输出 [0,0,0,0] 表示"无检测") ----
         hand_bbox_norm = rec["hand_bbox"]  # [x1, y1, x2, y2] 归一化
-        hx1 = hand_bbox_norm[0] * video_width
-        hy1 = hand_bbox_norm[1] * video_height
-        hx2 = hand_bbox_norm[2] * video_width
-        hy2 = hand_bbox_norm[3] * video_height
-
-        hx1_c, hy1_c, hx2_c, hy2_c, clipped = clip_bbox(
-            hx1, hy1, hx2, hy2, video_width, video_height
+        hand_is_zero = (
+            hand_bbox_norm[0] == 0 and hand_bbox_norm[1] == 0
+            and hand_bbox_norm[2] == 0 and hand_bbox_norm[3] == 0
         )
 
-        hand_row = {
-            "timestamp_ns": out_ts,
-            "output_frame_index": out_frame_idx,
-            "source_timestamp_ns": src_ts,
-            "source_frame_index": frame_idx,
-            "source_record_index": rec_idx,
-            "entity_type": "hand",
-            "entity_id": f"hand_{rec_idx}",
-            "track_id": None,
-            "hand_side": None,
-            "bbox_x1": hx1_c,
-            "bbox_y1": hy1_c,
-            "bbox_x2": hx2_c,
-            "bbox_y2": hy2_c,
-            "confidence": rec.get("hand_score", 0.0),
-            "interaction_state": has_object,
-            "linked_entity_id": f"object_{rec_idx}" if has_object else None,
-            "original_bbox": [hx1, hy1, hx2, hy2],
-            "bbox_was_clipped": clipped,
-            "mapping_method": "nearest_timestamp",
-            "mapping_error_ns": mapping_error_ns,
-            "source_file": source_file,
-        }
-        rows.append(hand_row)
-
         # ============================================================
-        # Object 实体 (可选)
+        # Hand 实体 (跳过退化框)
         # ============================================================
-        if has_object:
-            obj_bbox_norm = rec["object_bbox"]
-            ox1 = obj_bbox_norm[0] * video_width
-            oy1 = obj_bbox_norm[1] * video_height
-            ox2 = obj_bbox_norm[2] * video_width
-            oy2 = obj_bbox_norm[3] * video_height
+        if not hand_is_zero:
+            hx1 = hand_bbox_norm[0] * video_width
+            hy1 = hand_bbox_norm[1] * video_height
+            hx2 = hand_bbox_norm[2] * video_width
+            hy2 = hand_bbox_norm[3] * video_height
 
-            ox1_c, oy1_c, ox2_c, oy2_c, o_clipped = clip_bbox(
-                ox1, oy1, ox2, oy2, video_width, video_height
+            hx1_c, hy1_c, hx2_c, hy2_c, clipped = clip_bbox(
+                hx1, hy1, hx2, hy2, video_width, video_height
             )
 
-            obj_row = {
+            rows.append({
                 "timestamp_ns": out_ts,
                 "output_frame_index": out_frame_idx,
                 "source_timestamp_ns": src_ts,
                 "source_frame_index": frame_idx,
                 "source_record_index": rec_idx,
-                "entity_type": "object",
-                "entity_id": f"object_{rec_idx}",
+                "entity_type": "hand",
+                "entity_id": f"hand_{rec_idx}",
                 "track_id": None,
                 "hand_side": None,
-                "bbox_x1": ox1_c,
-                "bbox_y1": oy1_c,
-                "bbox_x2": ox2_c,
-                "bbox_y2": oy2_c,
-                "confidence": rec.get("object_score", 0.0),
-                "interaction_state": True,
-                "linked_entity_id": f"hand_{rec_idx}",
-                "original_bbox": [ox1, oy1, ox2, oy2],
-                "bbox_was_clipped": o_clipped,
+                "bbox_x1": hx1_c,
+                "bbox_y1": hy1_c,
+                "bbox_x2": hx2_c,
+                "bbox_y2": hy2_c,
+                "confidence": rec.get("hand_score", 0.0),
+                "interaction_state": has_object,
+                "linked_entity_id": f"object_{rec_idx}" if has_object else None,
+                "original_bbox": [hx1, hy1, hx2, hy2],
+                "bbox_was_clipped": clipped,
                 "mapping_method": "nearest_timestamp",
                 "mapping_error_ns": mapping_error_ns,
                 "source_file": source_file,
-            }
-            rows.append(obj_row)
+            })
+
+        # ============================================================
+        # Object 实体 (可选，跳过退化框)
+        # ============================================================
+        if has_object:
+            obj_bbox_norm = rec["object_bbox"]
+            obj_is_zero = (
+                obj_bbox_norm[0] == 0 and obj_bbox_norm[1] == 0
+                and obj_bbox_norm[2] == 0 and obj_bbox_norm[3] == 0
+            )
+            if not obj_is_zero:
+                ox1 = obj_bbox_norm[0] * video_width
+                oy1 = obj_bbox_norm[1] * video_height
+                ox2 = obj_bbox_norm[2] * video_width
+                oy2 = obj_bbox_norm[3] * video_height
+
+                ox1_c, oy1_c, ox2_c, oy2_c, o_clipped = clip_bbox(
+                    ox1, oy1, ox2, oy2, video_width, video_height
+                )
+
+                rows.append({
+                    "timestamp_ns": out_ts,
+                    "output_frame_index": out_frame_idx,
+                    "source_timestamp_ns": src_ts,
+                    "source_frame_index": frame_idx,
+                    "source_record_index": rec_idx,
+                    "entity_type": "object",
+                    "entity_id": f"object_{rec_idx}",
+                    "track_id": None,
+                    "hand_side": None,
+                    "bbox_x1": ox1_c,
+                    "bbox_y1": oy1_c,
+                    "bbox_x2": ox2_c,
+                    "bbox_y2": oy2_c,
+                    "confidence": rec.get("object_score", 0.0),
+                    "interaction_state": True,
+                    "linked_entity_id": f"hand_{rec_idx}",
+                    "original_bbox": [ox1, oy1, ox2, oy2],
+                    "bbox_was_clipped": o_clipped,
+                    "mapping_method": "nearest_timestamp",
+                    "mapping_error_ns": mapping_error_ns,
+                    "source_file": source_file,
+                })
 
     if not rows:
         return pd.DataFrame()

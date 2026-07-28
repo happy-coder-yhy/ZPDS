@@ -27,6 +27,11 @@ import time
 import traceback
 from pathlib import Path
 
+# 确保项目根在 sys.path 上（无需手动设 PYTHONPATH）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import yaml
 
 
@@ -54,12 +59,17 @@ def _write_record_json(record: dict) -> Path:
 def _run_quality_detection(
     record: dict,
     output_dir: Path,
+    skip_pixel_qc: bool = True,
 ) -> dict:
-    """对单条记录运行技术质量检测，返回 results dict。"""
-    from zpds_prepare.main import _get_reader, load_config, step_header
+    """对单条记录运行技术质量检测，返回 results dict。
 
-    profile = "epic"
-    rd = _get_reader(profile)
+    EPIC 是预清洗公开基准数据集，默认 skip_pixel_qc=True，
+    跳过黑屏检测和坏帧检测（两个都是逐帧解码，30min 视频需 20+ 分钟）。
+    保留帧数一致性和时间戳缺口检测（纯数学运算，秒级完成）。
+    """
+    from zpds_prepare.main import load_config, step_header
+    from zpds_prepare.readers import epic_reader as rd
+
     cfg = load_config(CONFIG_PATH)
 
     video_path = record["video_uri"]
@@ -73,7 +83,7 @@ def _run_quality_detection(
     if record.get("mask_uri"):
         epic_config["mask_path"] = record["mask_uri"]
 
-    # 读取 Session
+    # 读取 Session（后续 segment 生成阶段复用，避免重复加载）
     session = rd.read_session(video_path, config=epic_config if epic_config else None)
 
     # 运行检测器 (复用 main.py 的检测逻辑)
@@ -119,21 +129,23 @@ def _run_quality_detection(
         )
         all_issues.extend(fc_issues)
 
-        # 坏帧
-        all_issues.extend(detect_bad_frames(
-            video_path=vs.video_path,
-            timestamps_ns=vs.timestamps_ns,
-            stream_id=stream_id,
-        ))
+        # 坏帧（像素级检测，大视频慢，EPIC 默认跳过）
+        if not skip_pixel_qc:
+            all_issues.extend(detect_bad_frames(
+                video_path=vs.video_path,
+                timestamps_ns=vs.timestamps_ns,
+                stream_id=stream_id,
+            ))
 
-        # 黑屏
-        all_issues.extend(detect_black_frames(
-            video_path=vs.video_path,
-            timestamps_ns=vs.timestamps_ns,
-            mean_intensity_threshold=black_threshold,
-            min_duration_ns=min_black_duration_ns,
-            edge_tolerance_ns=edge_tolerance_ns,
-        ))
+        # 黑屏（像素级检测，大视频慢，EPIC 默认跳过）
+        if not skip_pixel_qc:
+            all_issues.extend(detect_black_frames(
+                video_path=vs.video_path,
+                timestamps_ns=vs.timestamps_ns,
+                mean_intensity_threshold=black_threshold,
+                min_duration_ns=min_black_duration_ns,
+                edge_tolerance_ns=edge_tolerance_ns,
+            ))
 
         # 时间戳缺口
         expected_interval_ns = int(1_000_000_000 / vs.fps)
@@ -174,6 +186,7 @@ def _run_quality_detection(
     return {
         "stage": "quality_detection",
         "status": "ok",
+        "session": session,
         "session_id": session.session_id,
         "issues_total": summary["total"],
         "candidate_count": len(candidates),
@@ -190,8 +203,12 @@ def _run_segment_generation(
     record: dict,
     candidates_path: Path,
     output_root: Path,
+    session=None,
 ) -> list[dict]:
-    """对单条记录的所有候选 Segment 运行 batch_prepare。"""
+    """对单条记录的所有候选 Segment 运行 batch_prepare。
+
+    session 由 QC 阶段传入，避免重复 read_session（EPIC 视频大，加载慢）。
+    """
     from batch_prepare import generate_segment
 
     if not candidates_path.exists():
@@ -203,15 +220,8 @@ def _run_segment_generation(
     candidates = candidates_doc.get("segments", [])
     source_session_id = candidates_doc.get("source_session_id", "epic_session")
 
-    # 加载 session
-    from zpds_prepare.readers import epic_reader as er
+    # Session 由调用方传入（已由 QC 阶段加载）
     video_path = record["video_uri"]
-    epic_config: dict = {}
-    if record.get("hand_object_uri"):
-        epic_config["hand_object_path"] = record["hand_object_uri"]
-    if record.get("mask_uri"):
-        epic_config["mask_path"] = record["mask_uri"]
-    session = er.read_session(video_path, config=epic_config if epic_config else None)
 
     # 占位标定
     pv = session.primary_video
@@ -226,24 +236,25 @@ def _run_segment_generation(
         }],
     }
 
-    # source_assets
+    # source_assets（EPIC 视频 5GB+，跳过 SHA-256 避免读盘数分钟）
     from segment.segment_writer import sha256_hex
     source_assets = []
     if Path(video_path).exists():
         source_assets.append({
             "source_asset_id": "raw_color_0",
             "uri": Path(video_path).name,
-            "sha256": sha256_hex(video_path),
+            "sha256": "",  # EPIC: 跳过大文件哈希
         })
     for stream_id, ann_s in session.annotation_streams.items():
         pkl_path = ann_s.source_path
-        source_assets.append({
-            "source_asset_id": f"raw_{stream_id}_pkl",
-            "uri": str(pkl_path),
-            "media_type": "application/python-pickle",
-            "sha256": sha256_hex(str(pkl_path)) if pkl_path.exists() else "",
-            "ground_truth_status": "model_generated",
-        })
+        if pkl_path.exists():
+            source_assets.append({
+                "source_asset_id": f"raw_{stream_id}_pkl",
+                "uri": str(pkl_path),
+                "media_type": "application/python-pickle",
+                "sha256": sha256_hex(str(pkl_path)),
+                "ground_truth_status": "model_generated",
+            })
 
     cfg = yaml.safe_load(open(CONFIG_PATH, "r", encoding="utf-8"))
 
@@ -396,6 +407,7 @@ def main():
                 print(f"  ② 质量检测 → {output_dir}")
                 qd_result = _run_quality_detection(rec, output_dir)
                 result["stages"]["quality_detection"] = qd_result
+                session = qd_result.pop("session", None)
                 if "error" in qd_result:
                     print(f"    ✗ 失败: {qd_result['error']}")
                     failed += 1
@@ -407,12 +419,20 @@ def main():
                       f"{qd_result.get('candidate_count', 0)} 个候选")
             else:
                 print(f"  ② 跳过质量检测")
+                # 跳过 QC 时仍需加载 session
+                from zpds_prepare.readers import epic_reader as er
+                epic_config: dict = {}
+                if rec.get("hand_object_uri"):
+                    epic_config["hand_object_path"] = rec["hand_object_uri"]
+                if rec.get("mask_uri"):
+                    epic_config["mask_path"] = rec["mask_uri"]
+                session = er.read_session(rec["video_uri"], config=epic_config if epic_config else None)
 
-            # ③ 生成 Prepared Segment
+            # ③ 生成 Prepared Segment（复用 session）
             candidates_path = output_dir / "segment_candidates.json"
             seg_root = PREPARED_ROOT / video_id
             print(f"  ③ 生成 Prepared Segment → {seg_root}")
-            seg_results = _run_segment_generation(rec, candidates_path, seg_root)
+            seg_results = _run_segment_generation(rec, candidates_path, seg_root, session=session)
             result["stages"]["segment_generation"] = seg_results
 
             seg_pass = sum(1 for s in seg_results if s.get("status") == "pass")
