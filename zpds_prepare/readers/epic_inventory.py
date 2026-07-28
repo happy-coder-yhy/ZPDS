@@ -61,10 +61,11 @@ def scan_files(
     Returns:
         (video_files, hand_object_files, mask_files)
     """
-    # 视频
+    # 视频（Windows NTFS 大小写不敏感，glob *.mp4 和 *.MP4 会重复匹配，需去重）
     video_files: list[Path] = []
     for suffix in ("*.mp4", "*.MP4", "*.mkv"):
         video_files.extend(videos_root.rglob(suffix))
+    video_files = list(dict.fromkeys(video_files))  # 保序去重
 
     # Hand-object Pickle（排除 .html 等非 pickle 文件）
     ho_dir = annotations_root / "hand-objects"
