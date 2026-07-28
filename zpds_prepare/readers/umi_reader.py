@@ -6,8 +6,7 @@
   - /robot{N}/sensor/imu                  (foxglove.IMUMeasurement)
   - /robot{N}/sensor/camera0/camera_info  (foxglove.CameraCalibration)
 
-已实现: 两路 RGB + 两路 IMU + 两套相机标定 + 两路磁编码器。
-VIO 位姿尚未正式化。
+已实现: 两路 RGB、IMU、相机标定、磁编码器和原始语义 VIO 位姿。
 
 与遁甲的关键差异:
   - 视频消息类型为 CompressedImage (非 CompressedVideo)，但 data 字段同为 H264 字节
@@ -34,6 +33,8 @@ TOPIC_ROBOT0_IMU = "/robot0/sensor/imu"
 TOPIC_ROBOT1_IMU = "/robot1/sensor/imu"
 TOPIC_ROBOT0_MAGNETIC_ENCODER = "/robot0/sensor/magnetic_encoder"
 TOPIC_ROBOT1_MAGNETIC_ENCODER = "/robot1/sensor/magnetic_encoder"
+TOPIC_ROBOT0_VIO_POSE = "/robot0/vio/eef_pose"
+TOPIC_ROBOT1_VIO_POSE = "/robot1/vio/eef_pose"
 TOPIC_ROBOT0_CALIB = "/robot0/sensor/camera0/camera_info"
 TOPIC_ROBOT1_CALIB = "/robot1/sensor/camera0/camera_info"
 
@@ -49,6 +50,10 @@ IMU_TOPICS = {
 MAGNETIC_ENCODER_TOPICS = {
     "robot0": TOPIC_ROBOT0_MAGNETIC_ENCODER,
     "robot1": TOPIC_ROBOT1_MAGNETIC_ENCODER,
+}
+VIO_POSE_TOPICS = {
+    "robot0": TOPIC_ROBOT0_VIO_POSE,
+    "robot1": TOPIC_ROBOT1_VIO_POSE,
 }
 CALIB_TOPICS = {
     "robot0": TOPIC_ROBOT0_CALIB,
@@ -289,13 +294,14 @@ def read_session(
       - CompressedImage 视频帧 (h264)
       - IMUMeasurement 数据
       - MagneticEncoderMeasurement 原始值
+      - PoseInFrame VIO 原始位姿
       - CameraCalibration (分辨率)
 
     Returns:
         Session 对象，包含:
           - video_streams: {"robot0_camera0": VideoStream, "robot1_camera0": VideoStream}
           - imu_streams:  {"robot0_imu": ImuStream, "robot1_imu": ImuStream}
-          - time_series_streams: {"robot0_magnetic_encoder": TimeSeriesStream, ...}
+          - time_series_streams: 磁编码器和 VIO 位姿双路 TimeSeriesStream
     """
     from zpds_prepare.readers.session_model import (
         ImuStream,
@@ -313,6 +319,10 @@ def read_session(
         }
         imu_data: dict[str, list[dict]] = {"robot0": [], "robot1": []}
         encoder_data: dict[str, list[dict]] = {
+            "robot0": [],
+            "robot1": [],
+        }
+        vio_pose_data: dict[str, list[dict]] = {
             "robot0": [],
             "robot1": [],
         }
@@ -388,6 +398,30 @@ def read_session(
                     "publish_time_ns": int(msg.publish_time),
                     "raw_value": float(decoded.value),
                     "frame_id": decoded.frame_id or "",
+                })
+
+            # ---- VIO end-effector pose (preserve raw pose semantics) ----
+            elif topic in {
+                TOPIC_ROBOT0_VIO_POSE,
+                TOPIC_ROBOT1_VIO_POSE,
+            }:
+                robot_id = "robot0" if topic == TOPIC_ROBOT0_VIO_POSE else "robot1"
+                pose = decoded.pose
+                vio_pose_data[robot_id].append({
+                    "timestamp_ns": int(decoded.header.timestamp),
+                    "log_time_ns": int(msg.log_time),
+                    "publish_time_ns": int(msg.publish_time),
+                    "tx": float(pose.position.x),
+                    "ty": float(pose.position.y),
+                    "tz": float(pose.position.z),
+                    "qx": float(pose.orientation.x),
+                    "qy": float(pose.orientation.y),
+                    "qz": float(pose.orientation.z),
+                    "qw": float(pose.orientation.w),
+                    "source_frame_id": str(decoded.frame_id or ""),
+                    "source_header_topic": str(
+                        decoded.header.topic_name or ""
+                    ),
                 })
 
         # ---- 计算 robot0 camera 元数据 (用作 session 主元数据) ----
@@ -562,6 +596,117 @@ def read_session(
             },
         )
 
+    # ---- Build VIO pose time-series streams ----
+    for robot_id in ["robot0", "robot1"]:
+        records = vio_pose_data[robot_id]
+        if not records:
+            continue
+
+        timestamps_ns = [int(record["timestamp_ns"]) for record in records]
+        if len(timestamps_ns) >= 2:
+            intervals = np.diff(np.asarray(timestamps_ns, dtype=np.int64))
+            positive_intervals = intervals[intervals > 0]
+            rate_hz = (
+                1e9 / float(np.median(positive_intervals))
+                if len(positive_intervals)
+                else 0.0
+            )
+        else:
+            rate_hz = 0.0
+
+        source_frame_ids = sorted({
+            str(record["source_frame_id"])
+            for record in records
+            if record["source_frame_id"]
+        })
+        header_topics = sorted({
+            str(record["source_header_topic"])
+            for record in records
+            if record["source_header_topic"]
+        })
+        stream_id = f"{robot_id}_vio_pose"
+        time_series_streams[stream_id] = TimeSeriesStream(
+            stream_id=stream_id,
+            modality="vio_pose",
+            role="state",
+            source_path=Path(dataset_path),
+            timestamps_ns=timestamps_ns,
+            rows=pd.DataFrame(
+                {
+                    "log_time_ns": pd.Series(
+                        [record["log_time_ns"] for record in records],
+                        dtype="int64",
+                    ),
+                    "publish_time_ns": pd.Series(
+                        [record["publish_time_ns"] for record in records],
+                        dtype="int64",
+                    ),
+                    **{
+                        axis: pd.Series(
+                            [record[axis] for record in records],
+                            dtype="float64",
+                        )
+                        for axis in (
+                            "tx",
+                            "ty",
+                            "tz",
+                            "qx",
+                            "qy",
+                            "qz",
+                            "qw",
+                        )
+                    },
+                    "source_frame_id": pd.Series(
+                        [
+                            record["source_frame_id"]
+                            for record in records
+                        ],
+                        dtype="string",
+                    ),
+                    "source_header_topic": pd.Series(
+                        [
+                            record["source_header_topic"]
+                            for record in records
+                        ],
+                        dtype="string",
+                    ),
+                }
+            ),
+            fields=[
+                {"name": "translation", "shape": [3], "dtype": "float64"},
+                {
+                    "name": "orientation",
+                    "shape": [4],
+                    "dtype": "float64",
+                    "representation": "quaternion_xyzw",
+                },
+            ],
+            expected_rate_hz=round(rate_hz, 6),
+            frame_id=(
+                source_frame_ids[0]
+                if len(source_frame_ids) == 1
+                else None
+            ),
+            metadata={
+                "robot_id": robot_id,
+                "source_topic": VIO_POSE_TOPICS[robot_id],
+                "source_schema": "foxglove.PoseInFrame",
+                "source_field": "pose",
+                "source_asset_id": "raw_mcap",
+                "timestamp_source": "header.timestamp",
+                "unit": "unknown",
+                "translation_unit": "unknown",
+                "orientation_representation": "quaternion_xyzw",
+                "semantic_status": "raw_unverified",
+                "source_frame_ids": source_frame_ids,
+                "child_frame": "unknown",
+                "transform_direction": "unknown",
+                "source_header_topics": header_topics,
+                "source_topic_authority": "mcap_channel",
+                "message_count": len(records),
+            },
+        )
+
     return Session(
         session_id=get_session_id(dataset_path),
         source_path=dataset_path,
@@ -581,10 +726,13 @@ __all__ = [
     "TOPIC_ROBOT0_CAMERA",
     "TOPIC_ROBOT0_IMU",
     "TOPIC_ROBOT0_MAGNETIC_ENCODER",
+    "TOPIC_ROBOT0_VIO_POSE",
     "TOPIC_ROBOT1_CALIB",
     "TOPIC_ROBOT1_CAMERA",
     "TOPIC_ROBOT1_IMU",
     "TOPIC_ROBOT1_MAGNETIC_ENCODER",
+    "TOPIC_ROBOT1_VIO_POSE",
+    "VIO_POSE_TOPICS",
     "get_session_id",
     "get_video_for_topic",
     "read_calibration",

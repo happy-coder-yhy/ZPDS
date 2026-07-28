@@ -14,6 +14,7 @@ import pandas as pd
 
 from segment.annotation_validator import validate_hand_object_stream
 from segment.mask_validator import validate_mask_stream
+from segment.vio_pose_validator import validate_vio_pose_streams
 
 
 def _probe_video(path: Path, attempts: int = 10) -> tuple[bool, int]:
@@ -861,7 +862,13 @@ def validate_segment(output_dir: str) -> dict:
     stats.update(encoder_validation["statistics"])
     errors.extend(encoder_validation["errors"])
 
-    # ---- 9. 标注流验证（按 modality 分发） ----
+    # ---- 9. UMI VIO 位姿、连续区间和 Raw 可追溯性 ----
+    vio_validation = validate_vio_pose_streams(seg_dir, segment)
+    checks.update(vio_validation["checks"])
+    stats.update(vio_validation["statistics"])
+    errors.extend(vio_validation["errors"])
+
+    # ---- 10. 标注流验证（按 modality 分发） ----
     annotation_streams = [
         s for s in segment.get("streams", [])
         if s.get("role") == "annotation" or s.get("modality") == "hand_object_detection"

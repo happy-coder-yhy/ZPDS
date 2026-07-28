@@ -52,6 +52,7 @@ from segment.validator import (
     write_validation_report,
 )
 from segment.video_transcoder import transcode_rgb
+from segment.vio_pose_writer import write_vio_pose_stream
 
 # ============================================================
 # 配置
@@ -236,19 +237,27 @@ def generate_segment(
             "rows": len(imu),
         })
 
-    # ---- UMI 磁编码器：保留原始值和 MCAP 双时钟 ----
+    # ---- UMI 机器人时序：保留原始值、位姿和 MCAP 时钟 ----
     time_series_results = []
     for stream in session.time_series_streams.values():
-        if stream.modality != "magnetic_encoder":
-            continue
-        time_series_results.append(
-            write_magnetic_encoder_stream(
-                stream=stream,
-                output_dir=output_dir,
-                source_start_ns=source_start_ns,
-                source_end_ns=source_end_ns,
+        if stream.modality == "magnetic_encoder":
+            time_series_results.append(
+                write_magnetic_encoder_stream(
+                    stream=stream,
+                    output_dir=output_dir,
+                    source_start_ns=source_start_ns,
+                    source_end_ns=source_end_ns,
+                )
             )
-        )
+        elif stream.modality == "vio_pose":
+            time_series_results.append(
+                write_vio_pose_stream(
+                    stream=stream,
+                    output_dir=output_dir,
+                    source_start_ns=source_start_ns,
+                    source_end_ns=source_end_ns,
+                )
+            )
 
     # ---- ③a 深度流: 保留原始频率并无损写出 ----
     depth_results = []

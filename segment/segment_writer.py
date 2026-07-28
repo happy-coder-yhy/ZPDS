@@ -238,7 +238,7 @@ def build_segment_json(
 
     # 通用时序流（UMI 磁编码器、后续 VIO 等）
     for tr in (time_series_results or []):
-        streams.append({
+        stream_entry = {
             "stream_id": tr["stream_id"],
             "role": tr.get("role", "sensor"),
             "modality": tr["modality"],
@@ -271,7 +271,15 @@ def build_segment_json(
                 ),
             },
             "sample_count": tr.get("rows", 0),
-        })
+        }
+        for contract_key in (
+            "coordinate_contract",
+            "continuity",
+            "continuity_group_count",
+        ):
+            if contract_key in tr:
+                stream_entry[contract_key] = tr[contract_key]
+        streams.append(stream_entry)
 
     # 标注流 — 每个 annotation_result 生成一个 stream entry
     for ar in (annotation_results or []):
