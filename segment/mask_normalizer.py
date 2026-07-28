@@ -195,6 +195,10 @@ def normalize_masks(
         mask_w = int(rle_encoded["size"][1])
         area = float(mask_utils.area(rle_encoded))
 
+        # ---- 过滤空 mask (area=0，模型无实例帧输出) ----
+        if area <= 0:
+            continue
+
         # ---- BBox 归一化 → 像素 ----
         bbox_norm = rec["mask_bbox"]
         bx1 = bbox_norm[0] * video_width
