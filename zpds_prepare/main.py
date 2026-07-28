@@ -21,18 +21,18 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from zpds_prepare.detectors.black_frame import detect_black_frames
-from zpds_prepare.detectors.timestamp_gap import detect_timestamp_gaps
-from zpds_prepare.detectors.imu_gap import detect_imu_gaps
-from zpds_prepare.detectors.frame_count import detect_frame_count_mismatch
-from zpds_prepare.detectors.bad_frame import detect_bad_frames
 from zpds_prepare.decisions.segment_planner import (
-    plan_segments,
     get_issue_summary,
+    plan_segments,
 )
-from zpds_prepare.writers.quality_writer import write_quality_issues
+from zpds_prepare.detectors.bad_frame import detect_bad_frames
+from zpds_prepare.detectors.black_frame import detect_black_frames
+from zpds_prepare.detectors.depth_coverage import detect_depth_coverage
+from zpds_prepare.detectors.frame_count import detect_frame_count_mismatch
+from zpds_prepare.detectors.imu_gap import detect_imu_gaps
+from zpds_prepare.detectors.timestamp_gap import detect_timestamp_gaps
 from zpds_prepare.writers.candidate_writer import write_segment_candidates
-
+from zpds_prepare.writers.quality_writer import write_quality_issues
 
 CONFIG_PATH = "config.yaml"
 OUTPUT_DIR = "output"
@@ -87,6 +87,11 @@ def main():
         "--config", "-c",
         default=CONFIG_PATH,
         help="YAML 配置路径",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="[Dunjia] H264 重建缓存目录（默认: 输出目录/.cache）",
     )
     parser.add_argument(
         "--epic-ho",
@@ -205,6 +210,11 @@ def main():
     seg = cfg.get("segment", {})
     min_duration_s = seg.get("min_duration_s", 1.0)
     max_duration_s = seg.get("max_duration_s", 120.0)
+    profile_depth = cfg.get(profile, {}).get("depth", {})
+    depth_coverage_tolerance_ns = int(
+        float(profile_depth.get("coverage_tolerance_s", 0.08))
+        * 1_000_000_000
+    )
 
     # ================================================================
     # Step 1: 读取数据
@@ -217,6 +227,15 @@ def main():
     # EPIC: 传递 pickle 路径
     if profile == "epic":
         session = rd.read_session(dataset_path, config=epic_config if epic_config else None)
+    elif profile == "dunjia":
+        dunjia_depth = cfg.get("dunjia", {}).get("depth", {})
+        cache_dir = Path(args.cache_dir) if args.cache_dir else output_dir / ".cache"
+        session = rd.read_session(
+            dataset_path,
+            cache_dir=cache_dir,
+            include_depth=bool(dunjia_depth.get("enabled", True)),
+            require_depth=bool(dunjia_depth.get("required", True)),
+        )
     else:
         session = rd.read_session(dataset_path)
     pv = session.primary_video
@@ -251,11 +270,18 @@ def main():
 
     # 显示所有流
     print(f"\n  视频流: {len(session.video_streams)} 个, "
+          f"深度流: {len(session.depth_streams)} 个, "
           f"IMU 流: {len(session.imu_streams)} 个, "
           f"标注流: {len(session.annotation_streams)} 个")
     for stream_id, vs in session.video_streams.items():
         print(f"    [{stream_id}] {vs.frame_count} 帧, "
               f"{vs.width}×{vs.height}, {vs.fps} fps")
+    for stream_id, depth_s in session.depth_streams.items():
+        print(
+            f"    [{stream_id}] {depth_s.frame_count} 帧, "
+            f"{depth_s.width}×{depth_s.height}, {depth_s.fps} Hz, "
+            f"dtype={depth_s.dtype}, unit={depth_s.unit}"
+        )
     for stream_id, imu_s in session.imu_streams.items():
         print(f"    [{stream_id}] {len(imu_s.dataframe)} 样本, "
               f"{imu_s.sample_rate_hz} Hz")
@@ -365,7 +391,36 @@ def main():
                       f"gap={iss.details.get('gap_ms', '?')}ms")
 
         if not any([fc_issues, bad_issues, black_issues, gap_issues]):
-            print(f"    ✓ 无异常")
+            print("    ✓ 无异常")
+
+    # ---- 必需深度流覆盖范围 ----
+    depth_coverage_issues = detect_depth_coverage(
+        video_streams=session.video_streams,
+        depth_streams=session.depth_streams,
+        tolerance_ns=depth_coverage_tolerance_ns,
+    )
+    all_issues.extend(depth_coverage_issues)
+    for stream_id, depth_s in session.depth_streams.items():
+        print(f"\n  [{stream_id}]")
+        stream_issues = [
+            issue
+            for issue in depth_coverage_issues
+            if issue.stream_id == stream_id
+        ]
+        if stream_issues:
+            for issue in stream_issues:
+                missing_ns = (
+                    issue.details.get("missing_tail_ns")
+                    or issue.details.get("missing_head_ns")
+                    or 0
+                )
+                print(
+                    f"    覆盖边界 [{issue.decision}]: {issue.issue_type}, "
+                    f"缺失 {missing_ns / 1e9:.3f}s, "
+                    f"覆盖率 {issue.details['coverage_ratio']:.2%}"
+                )
+        else:
+            print("    ✓ 覆盖 RGB 公共时间范围")
 
     # ---- IMU 流检测 ----
     for stream_id, imu_s in session.imu_streams.items():
@@ -386,7 +441,7 @@ def main():
                       f"Sample {iss.details.get('sample_index', '?')}, "
                       f"gap={iss.details.get('gap_s', '?')}s")
         else:
-            print(f"    ✓ 无异常")
+            print("    ✓ 无异常")
 
     # ================================================================
     # Step 3: 汇总分析
@@ -452,7 +507,7 @@ def main():
     # ================================================================
     elapsed = time.time() - start_time
     print(f"\n{'=' * 60}")
-    print(f"  完成")
+    print("  完成")
     print(f"  耗时:        {elapsed:.1f}s")
     print(f"  发现异常:    {summary['total']}")
     print(f"  候选 Segment: {len(candidates)}")

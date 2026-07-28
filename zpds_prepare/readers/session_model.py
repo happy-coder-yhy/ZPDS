@@ -51,6 +51,31 @@ class ImuStream:
 
 
 @dataclass
+class DepthStream:
+    """原始深度流。
+
+    深度不放入 ``video_streams``，避免通用 RGB 转码器将 uint16 深度静默转换
+    为 8 位彩色视频。Prepared 写出阶段会把该流保存为无损 PNG 序列，并为
+    每个输出帧生成可追溯的 sample map。
+    """
+
+    stream_id: str
+    timestamps_ns: list[int]
+    index_frames: list[dict[str, Any]]
+    source_files: list[Path]
+    source_kind: str
+    fps: float
+    width: int = 0
+    height: int = 0
+    frame_count: int = 0
+    dtype: str = "unknown"
+    unit: str = "unknown"
+    invalid_value: int | float | None = None
+    frame_id: str = "depth_optical_frame"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class AnnotationStream:
     """单个标注流的数据。
 
@@ -131,6 +156,7 @@ class Session:
         source_path: 原始数据路径
         meta: 扁平化元数据 dict (device, fps, width, height, frame_count, ...)
         video_streams: {stream_id: VideoStream}
+        depth_streams: {stream_id: DepthStream}
         imu_streams: {stream_id: ImuStream}
         annotation_streams: {stream_id: AnnotationStream}
         time_series_streams: {stream_id: TimeSeriesStream}
@@ -139,6 +165,7 @@ class Session:
     source_path: str
     meta: dict
     video_streams: dict[str, VideoStream] = field(default_factory=dict)
+    depth_streams: dict[str, DepthStream] = field(default_factory=dict)
     imu_streams: dict[str, ImuStream] = field(default_factory=dict)
     annotation_streams: dict[str, AnnotationStream] = field(default_factory=dict)
     time_series_streams: dict[str, TimeSeriesStream] = field(default_factory=dict)

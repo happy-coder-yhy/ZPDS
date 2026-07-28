@@ -21,6 +21,7 @@ ZPDS 批量 Prepared Segment 生成。
 """
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -29,25 +30,27 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from segment.video_transcoder import transcode_rgb
-from segment.sample_map import (
-    generate_sample_map,
-    generate_sample_map_from_timestamps,
-    write_sample_map,
-)
-from segment.imu_normalizer import normalize_imu_df, write_imu
+from segment.annotation_normalizer import normalize_hand_objects, write_annotation_parquet
 from segment.calibration import (
     extract_calibration,
     extract_calibration_from_mcap,
     write_calibration,
 )
-from segment.segment_writer import build_segment_json, write_segment_json
-from segment.segment_writer import sha256_hex
-from segment.validator import (
-    validate_segment, write_validation_report, write_annotation_validation_report,
-)
-from segment.annotation_normalizer import normalize_hand_objects, write_annotation_parquet
+from segment.depth_writer import write_depth_stream
+from segment.imu_normalizer import normalize_imu_df, write_imu
 from segment.mask_normalizer import normalize_masks, write_mask_parquet
+from segment.sample_map import (
+    generate_sample_map,
+    generate_sample_map_from_timestamps,
+    write_sample_map,
+)
+from segment.segment_writer import build_segment_json, sha256_hex, write_segment_json
+from segment.validator import (
+    validate_segment,
+    write_annotation_validation_report,
+    write_validation_report,
+)
+from segment.video_transcoder import transcode_rgb
 
 # ============================================================
 # 配置
@@ -62,6 +65,87 @@ REVISION = "r0001"
 def load_config(config_path: str = CONFIG_PATH) -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _sha256_manifest(paths: list[Path], root: Path) -> str:
+    """计算文件集合的确定性 manifest 哈希。"""
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError:
+            relative = path.name
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(sha256_hex(str(path)).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _build_guida_source_assets(dataset_path: str, session) -> list[dict]:
+    """构建 Guida Raw 资产清单，包含正式深度来源。"""
+    root = Path(dataset_path)
+    assets: list[dict] = []
+    standard_assets = [
+        ("raw_color_0", root / "color_000000.mkv", "color_000000.mkv"),
+        ("raw_index", root / "index.jsonl", "index.jsonl"),
+        ("raw_imu_0", root / "imu" / "imu_000000.csv", "imu/imu_000000.csv"),
+        ("raw_meta", root / "meta.json", "meta.json"),
+    ]
+    for asset_id, path, uri in standard_assets:
+        assets.append({
+            "source_asset_id": asset_id,
+            "uri": uri,
+            "sha256": sha256_hex(str(path)) if path.is_file() else "",
+        })
+
+    depth_stream = session.depth_streams.get("ego_depth")
+    if depth_stream is None:
+        return assets
+
+    source_files = list(depth_stream.source_files)
+    if depth_stream.source_kind == "image_sequence":
+        parent = source_files[0].parent
+        try:
+            uri = parent.relative_to(root).as_posix()
+        except ValueError:
+            uri = str(parent)
+        assets.append({
+            "source_asset_id": "raw_depth_0",
+            "uri": uri,
+            "media_type": "image/png-sequence",
+            "sha256": _sha256_manifest(source_files, root),
+            "hash_kind": "sha256_path_content_manifest",
+            "member_count": len(source_files),
+        })
+    else:
+        depth_hash = (
+            sha256_hex(str(source_files[0]))
+            if len(source_files) == 1
+            else _sha256_manifest(source_files, root)
+        )
+        assets.append({
+            "source_asset_id": "raw_depth_0",
+            "uri": (
+                source_files[0].relative_to(root).as_posix()
+                if source_files[0].is_relative_to(root)
+                else str(source_files[0])
+            ),
+            "media_type": "video/x-matroska",
+            "sha256": depth_hash,
+            "hash_kind": (
+                "sha256"
+                if len(source_files) == 1
+                else "sha256_path_content_manifest"
+            ),
+            "members": [
+                path.relative_to(root).as_posix()
+                if path.is_relative_to(root)
+                else str(path)
+                for path in source_files
+            ],
+        })
+    return assets
 
 
 def generate_segment(
@@ -151,6 +235,18 @@ def generate_segment(
             "rows": len(imu),
         })
 
+    # ---- ③a 深度流: 保留原始频率并无损写出 ----
+    depth_results = []
+    for depth_stream in session.depth_streams.values():
+        depth_results.append(
+            write_depth_stream(
+                stream=depth_stream,
+                output_dir=output_dir,
+                source_start_ns=source_start_ns,
+                source_end_ns=source_end_ns,
+            )
+        )
+
     # ---- ③b 每个标注流: 标准化 + 写出 Parquet ----
     annotation_results = []
     for stream_id, ann_s in session.annotation_streams.items():
@@ -230,6 +326,7 @@ def generate_segment(
         source_assets=source_assets,
         profile=profile,
         depth_npz_path=depth_npz_path,
+        depth_results=depth_results,
         calibrations=calibration.get("calibrations", None),
         annotation_results=annotation_results if annotation_results else None,
     )
@@ -246,6 +343,7 @@ def generate_segment(
         "duration_s": duration_ns / 1_000_000_000,
         "rgb_frames": video_results[0]["output_frames"] if video_results else 0,
         "imu_samples": sum(ir["rows"] for ir in imu_results),
+        "depth_frames": sum(dr["frames"] for dr in depth_results),
         "annotation_rows": sum(
             ar.get("rows", 0) for ar in annotation_results
         ) if annotation_results else 0,
@@ -285,6 +383,11 @@ def main():
         help="YAML 配置路径",
     )
     parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="[Dunjia] H264 重建缓存目录（默认: 输出目录/.cache）",
+    )
+    parser.add_argument(
         "--profile", "-p",
         default="guida",
         choices=["guida", "dunjia", "umi", "epic"],
@@ -293,7 +396,6 @@ def main():
     args = parser.parse_args()
 
     profile = args.profile
-    start_time = time.time()
 
     # ---- 加载配置和候选方案 ----
     cfg = load_config(args.config)
@@ -353,7 +455,18 @@ def main():
 
         # 统一读取 Session
         print("  读取 MCAP Session ...")
-        session = dr.read_session(dataset_path)
+        dunjia_depth = cfg.get("dunjia", {}).get("depth", {})
+        cache_dir = (
+            Path(args.cache_dir)
+            if args.cache_dir
+            else output_root / ".cache"
+        )
+        session = dr.read_session(
+            dataset_path,
+            cache_dir=cache_dir,
+            include_depth=bool(dunjia_depth.get("enabled", True)),
+            require_depth=bool(dunjia_depth.get("required", True)),
+        )
         pv = session.primary_video
         index_frames = pv.index_frames
         timestamps_ns = pv.timestamps_ns
@@ -362,7 +475,6 @@ def main():
         print(f"  摄像头: {len(session.video_streams)} 个")
 
         # 显示所有视频流信息
-        video_results = []
         for stream_id, vs in session.video_streams.items():
             try:
                 calib = dr.read_calibration(
@@ -395,15 +507,14 @@ def main():
         )
         print(f"  标定 ID: {calibration['calibration_id']}")
 
-        # 处理深度
-        depth_npz_path = None
-        if dr.TOPIC_DEPTH in dr.CAMERA_TOPICS.values():
-            print("  处理深度流 ...")
-            depth_frames = dr.read_depth_frames(dataset_path, dr.TOPIC_DEPTH)
-            if depth_frames:
-                print(f"    depth: {len(depth_frames)} 帧, "
-                      f"{depth_frames[0]['width']}×{depth_frames[0]['height']}, "
-                      f"{depth_frames[0]['dtype']}")
+        # 深度已作为正式 DepthStream 进入统一 Session
+        for stream_id, depth_stream in session.depth_streams.items():
+            print(
+                f"  深度流 {stream_id}: {depth_stream.frame_count} 帧, "
+                f"{depth_stream.width}×{depth_stream.height}, "
+                f"dtype={depth_stream.dtype}, unit={depth_stream.unit}, "
+                f"rate={depth_stream.fps} Hz"
+            )
 
         # 构建 source_assets
         mcap_path_obj = Path(dataset_path)
@@ -469,9 +580,6 @@ def main():
         )
         print(f"  标定 ID: {calibration['calibration_id']}")
 
-        # UMI 第一版无深度
-        depth_npz_path = None
-
         # 构建 source_assets
         mcap_path_obj = Path(dataset_path)
         source_assets = [
@@ -483,7 +591,6 @@ def main():
         ]
     elif profile == "epic":
         from zpds_prepare.readers import epic_reader as er
-        from segment.calibration import extract_calibration_from_mcap
 
         # 从 record JSON 或视频路径加载
         epic_config = {}
@@ -546,14 +653,19 @@ def main():
                 "ground_truth_status": "model_generated",
             })
 
-        depth_npz_path = None
-        calibrations = None
     else:
         # Guida 默认模式
         from zpds_prepare.readers import guida_reader as gr
 
         print("  读取 Session ...")
-        session = gr.read_session(dataset_path)
+        depth_cfg = cfg.get("guida", {}).get("depth", {})
+        depth_enabled = bool(depth_cfg.get("enabled", True))
+        depth_required = bool(depth_cfg.get("required", False))
+        session = gr.read_session(
+            dataset_path,
+            include_depth=depth_enabled,
+            require_depth=depth_required,
+        )
         pv = session.primary_video
         index_frames = pv.index_frames
         timestamps = pv.timestamps_ns
@@ -565,7 +677,17 @@ def main():
         calibration = extract_calibration(meta_path)
         print(f"  标定 ID: {calibration['calibration_id']}")
 
-        source_assets = None
+        if session.depth_streams:
+            depth_stream = session.depth_streams["ego_depth"]
+            print(
+                f"  深度流: {depth_stream.source_kind}, "
+                f"{depth_stream.frame_count} 帧, "
+                f"dtype={depth_stream.dtype}, unit={depth_stream.unit}"
+            )
+        else:
+            print("  深度流: 未发现（本次保持兼容，不写出 Depth Stream）")
+
+        source_assets = _build_guida_source_assets(dataset_path, session)
 
     # ---- 逐个生成 Prepared Segment ----
     step_header(f"生成 {len(candidates)} 个 Prepared Segment")
@@ -593,17 +715,6 @@ def main():
         t0 = time.time()
 
         try:
-            # 深度 — Dunjia 专有（不在 session 中，需单独处理）
-            seg_depth_path = None
-            if profile == "dunjia" and dr.TOPIC_DEPTH in dr.CAMERA_TOPICS.values():
-                seg_depth_path = str(Path(seg_dir) / "data" / "ego_depth.mp4")
-                depth_vr = dr.transcode_depth_video(
-                    dataset_path, seg_depth_path,
-                    source_start, source_end,
-                    target_fps=cfg["output"]["target_fps"],
-                )
-                seg_depth_path = depth_vr["output_path"]
-
             result = generate_segment(
                 dataset_path=dataset_path,
                 source_start_ns=source_start,
@@ -618,7 +729,6 @@ def main():
                 quality_issues=span_issues if span_issues else None,
                 profile=profile,
                 source_assets=source_assets,
-                depth_npz_path=seg_depth_path,
             )
             elapsed = time.time() - t0
             result["elapsed_s"] = round(elapsed, 1)
@@ -633,7 +743,7 @@ def main():
                 for e in result["errors"]:
                     print(f"    ⚠ {e}")
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 单个 Segment 失败不能中止整批
             elapsed = time.time() - t0
             result = {
                 "segment_id": seg_id,

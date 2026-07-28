@@ -29,6 +29,23 @@ output:
   rgb_codec: "avc1"           # H.264 fourcc (fallback: mp4v)
   rgb_pix_fmt: "yuv420p"      # 兼容性像素格式（OpenCV 尽力）
 
+# ---- Guida 深度 ----
+guida:
+  depth:
+    enabled: true              # 自动发现 meta 声明、depth_*.mkv 或 depth/*.png
+    required: true             # Guida 正式 Prepared 必须包含深度；缺失时明确失败
+    output_format: "png_sequence"
+    preserve_source_rate: true
+
+# ---- Dunjia 深度 ----
+dunjia:
+  depth:
+    enabled: true              # 从 MCAP CompressedImage Topic 读取内嵌 PNG
+    required: true             # 正式 Prepared 必须包含深度流
+    output_format: "png_sequence"
+    preserve_source_rate: true # 保留源约 25 Hz，不插帧到 RGB 目标帧率
+    coverage_tolerance_s: 0.08 # 超过约 2 个源帧周期才视为边界缺失
+
 # ---- Segment 约束 ----
 segment:
   min_duration_s: 1.0         # 最小 segment 时长

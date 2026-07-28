@@ -5,7 +5,6 @@
 一个或多个候选 Segment。
 """
 
-import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -120,6 +119,15 @@ def plan_segments(
 
     if not valid_spans and valid_start < valid_end:
         valid_spans.append((valid_start, valid_end, "full_session"))
+
+    if (head_trims or tail_trims) and len(valid_spans) == 1:
+        start_ns, end_ns, reason = valid_spans[0]
+        if reason == "full_session":
+            valid_spans[0] = (
+                start_ns,
+                end_ns,
+                "trimmed_by_quality_boundary",
+            )
 
     # ---- 5. 生成候选 Segment ----
     candidates = []

@@ -5,8 +5,8 @@ streams 列表根据传入的 video_results 和 imu_results 动态生成，
 文件名由各流的 stream_id 决定，不再硬编码。
 """
 
-import json
 import hashlib
+import json
 from pathlib import Path
 
 
@@ -35,6 +35,7 @@ def build_segment_json(
     source_assets: list[dict] | None = None,
     profile: str = "guida",
     depth_npz_path: str | None = None,
+    depth_results: list[dict] | None = None,
     calibrations: dict | None = None,
     annotation_results: list[dict] | None = None,
 ) -> dict:
@@ -51,6 +52,10 @@ def build_segment_json(
     每个 annotation_result 应包含:
       - stream_id, uri, modality, source_asset_id
       - ground_truth_status (可选), operation (可选), sample_map_uri (可选)
+
+    每个 depth_result 应包含:
+      - stream_id, uri, dtype, unit, width, height, frames
+      - sample_map_uri, source_asset_id, operation
     """
     data_dir = Path(dataset_path)
     index_path = data_dir / "index.jsonl"
@@ -85,6 +90,12 @@ def build_segment_json(
             },
         ]
 
+    source_asset_ids = {
+        asset.get("source_asset_id")
+        for asset in source_assets
+        if asset.get("source_asset_id")
+    }
+
     # ---- 构建 streams 列表 ----
     streams: list[dict] = []
 
@@ -116,8 +127,42 @@ def build_segment_json(
             },
         })
 
-    # 深度流
-    if depth_npz_path is not None:
+    # Guida 等按原始频率无损写出的深度流
+    for dr in (depth_results or []):
+        streams.append({
+            "stream_id": dr["stream_id"],
+            "role": "observation",
+            "modality": "depth",
+            "uri": dr["uri"],
+            "format": dr.get("format", "png_sequence"),
+            "encoding": dr.get("encoding", "png"),
+            "shape": [dr["height"], dr["width"]],
+            "dtype": dr["dtype"],
+            "unit": dr.get("unit", "unknown"),
+            "unit_status": dr.get("unit_status", "unverified"),
+            "invalid_value": dr.get("invalid_value"),
+            "frame_id": dr.get("frame_id", "depth_optical_frame"),
+            "time": {
+                "clock_id": "segment",
+                "sampling": "irregular",
+                "rate_hz": dr.get("rate_hz"),
+                "start_ns": 0,
+                "end_ns": duration_ns,
+            },
+            "origin": {
+                "kind": "deterministic_transform",
+                "source_asset_id": dr.get("source_asset_id", "raw_depth_0"),
+                "operation": dr.get("operation", "trim_decode_lossless_png"),
+                "sample_map_uri": dr["sample_map_uri"],
+            },
+            "quality_summary": {
+                "zero_ratio": dr.get("zero_ratio"),
+                "invalid_ratio": dr.get("invalid_ratio"),
+            },
+        })
+
+    # 兼容现有 Dunjia FFV1 深度输出
+    if depth_npz_path is not None and not depth_results:
         streams.append({
             "stream_id": "ego_depth",
             "role": "observation",
@@ -172,7 +217,16 @@ def build_segment_json(
             ],
             "origin": {
                 "kind": "deterministic_transform",
-                "source_asset_id": source_assets[0]["source_asset_id"] if source_assets else "raw_imu_0",
+                "source_asset_id": ir.get(
+                    "source_asset_id",
+                    (
+                        "raw_imu_0"
+                        if "raw_imu_0" in source_asset_ids
+                        else source_assets[0]["source_asset_id"]
+                        if source_assets
+                        else "raw_imu_0"
+                    ),
+                ),
                 "operation": "trim_and_unit_normalize",
             },
         })

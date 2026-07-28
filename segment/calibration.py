@@ -38,6 +38,10 @@ def extract_calibration(
                 "parent_frame_id": None,
             },
             {
+                "frame_id": "depth_optical_frame",
+                "parent_frame_id": "ego_camera_optical",
+            },
+            {
                 "frame_id": "imu",
                 "parent_frame_id": "ego_camera_optical",
             },
@@ -54,7 +58,19 @@ def extract_calibration(
                     "cx": color["intrinsics"]["cx"],
                     "cy": color["intrinsics"]["cy"],
                 },
-            }
+            },
+            {
+                "stream_id": "ego_depth",
+                "frame_id": "depth_optical_frame",
+                "model": "pinhole",
+                "resolution": [depth["width"], depth["height"]],
+                "intrinsics": {
+                    "fx": depth.get("intrinsics", {}).get("fx"),
+                    "fy": depth.get("intrinsics", {}).get("fy"),
+                    "cx": depth.get("intrinsics", {}).get("cx"),
+                    "cy": depth.get("intrinsics", {}).get("cy"),
+                },
+            },
         ],
         "depth_to_color": {
             "rotation": depth.get("extrinsics_to_color", {}).get("rotation", []),
@@ -93,7 +109,6 @@ def extract_calibration_from_mcap(
     # 判断 multi_cam 键的风格：遁甲用 camera0/camera1/camera2，UMI 用 robot0/robot1
     is_umi = multi_cam and any(k.startswith("robot") for k in multi_cam)
 
-    k = calib_data.get("K", [0]*9)
     main_stream_id = (
         "robot0_camera0" if is_umi
         else "ego_rgb_center" if multi_cam
@@ -113,16 +128,48 @@ def extract_calibration_from_mcap(
                         _build_camera_entry(multi_cam[robot_id], stream_id=stream_id)
                     )
         else:
-            # 遁甲风格：添加 camera1/camera2
-            for cam_name in ["camera1", "camera2"]:
+            # 遁甲风格：添加左右 RGB 和正式 Depth 相机
+            for cam_name in ["camera1", "camera2", "depth"]:
                 if cam_name in multi_cam:
-                    stream_id = (
-                        "ego_rgb_left" if cam_name == "camera1"
-                        else "ego_rgb_right"
-                    )
+                    stream_ids = {
+                        "camera1": "ego_rgb_left",
+                        "camera2": "ego_rgb_right",
+                        "depth": "ego_depth",
+                    }
                     cameras.append(
-                        _build_camera_entry(multi_cam[cam_name], stream_id=stream_id)
+                        _build_camera_entry(
+                            multi_cam[cam_name],
+                            stream_id=stream_ids[cam_name],
+                        )
                     )
+
+    frames = [
+        {
+            "frame_id": calib_data.get(
+                "frame_id",
+                "headcam_center_optical_frame",
+            ),
+            "parent_frame_id": None,
+        },
+        {
+            "frame_id": "imu",
+            "parent_frame_id": calib_data.get(
+                "frame_id",
+                "headcam_center_optical_frame",
+            ),
+        },
+    ]
+    if multi_cam and not is_umi and "depth" in multi_cam:
+        frames.append(
+            {
+                "frame_id": multi_cam["depth"].get(
+                    "frame_id",
+                    "headcam_depth_optical_frame",
+                ),
+                "parent_frame_id": None,
+                "extrinsics_status": "unavailable",
+            }
+        )
 
     return {
         "calibration_id": calibration_id,
@@ -132,16 +179,7 @@ def extract_calibration_from_mcap(
             "format": "foxglove.CameraCalibration",
         },
         "calibrations": multi_cam,  # 传递完整多相机标定
-        "frames": [
-            {
-                "frame_id": calib_data.get("frame_id", "headcam_center_optical_frame"),
-                "parent_frame_id": None,
-            },
-            {
-                "frame_id": "imu",
-                "parent_frame_id": calib_data.get("frame_id", "headcam_center_optical_frame"),
-            },
-        ],
+        "frames": frames,
         "cameras": cameras,
         "depth_to_color": {
             "status": "unavailable",

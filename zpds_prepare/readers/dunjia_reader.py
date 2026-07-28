@@ -16,8 +16,8 @@ MCAP 内部使用 foxglove protobuf schema：
   - 深度 PNG 的 dtype、invalid 值和物理单位必须实测。
 """
 
+import hashlib
 import os
-import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,6 @@ import numpy as np
 import pandas as pd
 from mcap.reader import make_reader
 from mcap_protobuf.decoder import DecoderFactory
-
 
 # ---- topic 名称 ----
 TOPIC_CAMERA0 = "/robot0/sensor/camera0/compressed"
@@ -67,7 +66,7 @@ def _open_mcap(mcap_path: str):
         raise FileNotFoundError(f"MCAP 文件不存在: {mcap_path}")
     if not path.is_file():
         raise ValueError(f"路径不是文件: {mcap_path}")
-    fh = open(str(path), "rb")
+    fh = open(str(path), "rb")  # noqa: SIM115 - caller closes returned handle
     reader = make_reader(fh, decoder_factories=[DecoderFactory()])
     return reader, fh
 
@@ -238,7 +237,7 @@ def reconstruct_video(
     Args:
         mcap_path: MCAP 文件路径
         topic: 视频 topic，默认 camera0
-        output_path: 输出 .mp4 路径，默认 MCAP 同目录下 <topic短名>.cache.mp4
+        output_path: 输出 .mp4 路径。未指定时写入项目输出缓存，不写 MCAP 目录。
 
     Returns:
         写入的 .mp4 文件路径
@@ -249,14 +248,15 @@ def reconstruct_video(
     reader, fh = _open_mcap(mcap_path)
     try:
         if output_path is None:
+            cache_dir = _default_cache_dir(mcap_path)
             # 生成短名: camera0→cam0, camera1→cam1, etc.
             for cam_name, t in CAMERA_TOPICS.items():
                 if t == topic:
                     short = cam_name.replace("camera", "cam").replace("depth", "depth")
-                    output_path = str(Path(mcap_path).parent / f"{Path(mcap_path).stem}.{short}.cache.mp4")
+                    output_path = str(cache_dir / f"{short}.mp4")
                     break
             else:
-                output_path = str(Path(mcap_path).with_suffix(".cache.mp4"))
+                output_path = str(cache_dir / "video.mp4")
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -277,7 +277,7 @@ def reconstruct_video(
         result = subprocess.run(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
              "-i", raw_h264, "-c", "copy", output_path],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg 重封装失败 ({topic}): {result.stderr.strip()}")
@@ -292,26 +292,55 @@ def reconstruct_video(
         fh.close()
 
 
-def get_color_video(dataset_path: str) -> str:
+def _default_cache_dir(dataset_path: str) -> Path:
+    """返回源目录之外的稳定缓存目录。"""
+    source = Path(dataset_path).resolve()
+    cache_key = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:12]
+    return Path.cwd() / "output" / ".cache" / "dunjia" / (
+        f"{source.stem}-{cache_key}"
+    )
+
+
+def get_color_video(
+    dataset_path: str,
+    cache_dir: str | Path | None = None,
+) -> str:
     """返回主相机 camera0 的 .mp4 缓存路径（向后兼容）。"""
-    return get_video_for_topic(dataset_path, TOPIC_CAMERA0)
+    return get_video_for_topic(dataset_path, TOPIC_CAMERA0, cache_dir=cache_dir)
 
 
-def get_video_for_topic(dataset_path: str, topic: str | None = None) -> str:
-    """返回指定 topic 的 .mp4 缓存路径，不存在则重建。"""
+def get_video_for_topic(
+    dataset_path: str,
+    topic: str | None = None,
+    cache_dir: str | Path | None = None,
+) -> str:
+    """返回指定 topic 的 .mp4 缓存路径，不存在则在独立缓存目录重建。"""
     if topic is None:
         topic = TOPIC_CAMERA0
+    cache_root = (
+        Path(cache_dir)
+        if cache_dir is not None
+        else _default_cache_dir(dataset_path)
+    )
+    cache_root = cache_root.resolve()
+    source_parent = Path(dataset_path).resolve().parent
+    if cache_root == source_parent or cache_root.is_relative_to(source_parent):
+        raise ValueError("Dunjia 缓存目录不能位于原始 MCAP 目录内")
+
     # 生成缓存路径
     for cam_name, t in CAMERA_TOPICS.items():
         if t == topic:
             short = cam_name.replace("camera", "cam").replace("depth", "depth")
-            cache_path = str(Path(dataset_path).parent
-                             / f"{Path(dataset_path).stem}.{short}.cache.mp4")
+            cache_path = str(cache_root / f"{short}.mp4")
             if Path(cache_path).exists():
                 return cache_path
             return reconstruct_video(dataset_path, topic, cache_path)
     # fallback
-    return reconstruct_video(dataset_path, topic)
+    return reconstruct_video(
+        dataset_path,
+        topic,
+        str(cache_root / "video.mp4"),
+    )
 
 
 def get_session_id(dataset_path: str) -> str:
@@ -482,6 +511,11 @@ def transcode_depth_video(
         proc = subprocess.Popen(
             ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
         )
+        if proc.stdin is None or proc.stderr is None:
+            proc.kill()
+            raise RuntimeError("无法创建 FFmpeg 深度编码管道")
+        stdin = proc.stdin
+        stderr_pipe = proc.stderr
 
         total_output = 0
         try:
@@ -491,13 +525,13 @@ def transcode_depth_video(
                     break
                 nearest_idx = int(np.argmin(np.abs(timestamps_arr - target_ts)))
                 frame = images[nearest_idx]
-                proc.stdin.write(frame.tobytes())
+                stdin.write(frame.tobytes())
                 total_output += 1
 
-            proc.stdin.close()
+            stdin.close()
             ret = proc.wait(timeout=120)
             if ret != 0:
-                stderr = proc.stderr.read().decode("utf-8", errors="replace")
+                stderr = stderr_pipe.read().decode("utf-8", errors="replace")
                 raise RuntimeError(f"FFmpeg 深度编码失败: {stderr.strip()}")
         except Exception:
             proc.kill()
@@ -564,7 +598,12 @@ def read_session_bounds(mcap_path: str) -> tuple[int, int]:
 # 导出
 # ================================================================
 
-def read_session(dataset_path: str):
+def read_session(
+    dataset_path: str,
+    cache_dir: str | Path | None = None,
+    include_depth: bool = True,
+    require_depth: bool = False,
+):
     """统一读取 Session 全部流数据。
 
     一次扫描 MCAP，收集所有 camera 视频流 + IMU 流，
@@ -575,7 +614,15 @@ def read_session(dataset_path: str):
           - video_streams: {"camera0": VideoStream, "camera1": ..., "camera2": ...}
           - imu_streams:  {"robot0_imu": ImuStream}
     """
-    from zpds_prepare.readers.session_model import Session, VideoStream, ImuStream
+    if require_depth and not include_depth:
+        raise ValueError("require_depth=True 时不能禁用 include_depth")
+
+    from zpds_prepare.readers.session_model import (
+        DepthStream,
+        ImuStream,
+        Session,
+        VideoStream,
+    )
 
     reader, fh = _open_mcap(dataset_path)
     try:
@@ -585,6 +632,12 @@ def read_session(dataset_path: str):
             cam_data[cam_name] = {"frames": [], "has_calib": False, "width": 0, "height": 0}
 
         imu_rows: list[dict] = []
+        depth_frames: list[dict] = []
+        depth_width = 0
+        depth_height = 0
+        depth_dtype = "unknown"
+        depth_frame_id = CAMERA_IDS["depth"]
+        depth_format = "png"
         camera0_fps = 25.0
         camera0_dropped = 0
         imu_rate = 196.0
@@ -628,6 +681,32 @@ def read_session(dataset_path: str):
                     "gy": decoded.angular_velocity.y,
                     "gz": decoded.angular_velocity.z,
                 })
+
+            # ---- 深度 PNG 消息 ----
+            if include_depth and topic == TOPIC_DEPTH:
+                ts = decoded.timestamp
+                ts_ns = ts.seconds * 1_000_000_000 + ts.nanos
+                depth_frames.append({
+                    "seq": len(depth_frames),
+                    "timestamp_ns": ts_ns,
+                    "log_time_ns": msg.log_time,
+                    "publish_time_ns": msg.publish_time,
+                    "source_frame_position": len(depth_frames),
+                    "encoded_size": len(decoded.data),
+                })
+                if len(depth_frames) == 1:
+                    import cv2
+
+                    image = cv2.imdecode(
+                        np.frombuffer(decoded.data, np.uint8),
+                        cv2.IMREAD_UNCHANGED,
+                    )
+                    if image is None or image.ndim != 2:
+                        raise ValueError("Dunjia 首张深度 PNG 无法解码为单通道图像")
+                    depth_height, depth_width = image.shape
+                    depth_dtype = str(image.dtype)
+                    depth_frame_id = decoded.frame_id or depth_frame_id
+                    depth_format = decoded.format or depth_format
 
         # ---- 计算 camera0 元数据 ----
         c0_frames = cam_data["camera0"]["frames"]
@@ -685,7 +764,11 @@ def read_session(dataset_path: str):
             cam_fps = camera0_fps
 
         # 获取视频路径 (缓存优先)
-        video_path = get_video_for_topic(dataset_path, vid_topics[cam_name])
+        video_path = get_video_for_topic(
+            dataset_path,
+            vid_topics[cam_name],
+            cache_dir=cache_dir,
+        )
 
         video_streams[cam_name] = VideoStream(
             stream_id=cam_name,
@@ -705,7 +788,49 @@ def read_session(dataset_path: str):
         imu_streams["robot0_imu"] = ImuStream(
             stream_id="robot0_imu",
             dataframe=imu_df,
-            sample_rate_hz=meta["imu_sample_rate"],
+            sample_rate_hz=float(meta["imu_sample_rate"]),
+        )
+
+    # ---- 构建正式深度流 ----
+    depth_streams: dict[str, DepthStream] = {}
+    if depth_frames:
+        depth_timestamps = [int(frame["timestamp_ns"]) for frame in depth_frames]
+        if len(depth_timestamps) >= 2:
+            depth_intervals = np.diff(np.array(depth_timestamps, dtype=np.int64))
+            depth_median_ns = float(np.median(depth_intervals))
+            depth_fps = (
+                1_000_000_000 / depth_median_ns
+                if depth_median_ns > 0
+                else 25.0
+            )
+        else:
+            depth_fps = 25.0
+        depth_streams["ego_depth"] = DepthStream(
+            stream_id="ego_depth",
+            timestamps_ns=depth_timestamps,
+            index_frames=depth_frames,
+            source_files=[Path(dataset_path)],
+            source_kind="mcap_compressed_image",
+            fps=round(float(depth_fps), 6),
+            width=depth_width,
+            height=depth_height,
+            frame_count=len(depth_frames),
+            dtype=depth_dtype,
+            unit="unknown",
+            invalid_value=None,
+            frame_id=depth_frame_id,
+            metadata={
+                "topic": TOPIC_DEPTH,
+                "compression_format": depth_format,
+                "unit_status": "unverified",
+                "source_asset_id": "raw_mcap",
+                "operation": "trim_decode_embedded_png",
+                "preserves_log_time": True,
+            },
+        )
+    elif require_depth:
+        raise FileNotFoundError(
+            f"Dunjia MCAP 缺少必需深度 Topic: {TOPIC_DEPTH}"
         )
 
     return Session(
@@ -713,19 +838,33 @@ def read_session(dataset_path: str):
         source_path=dataset_path,
         meta=meta,
         video_streams=video_streams,
+        depth_streams=depth_streams,
         imu_streams=imu_streams,
     )
 
 
 __all__ = [
-    "CAMERA_TOPICS", "CALIB_TOPICS", "CAMERA_IDS",
-    "TOPIC_CAMERA0", "TOPIC_CAMERA1", "TOPIC_CAMERA2",
-    "TOPIC_DEPTH", "TOPIC_IMU",
-    "read_meta", "count_messages",
-    "read_index_frames", "read_index_timestamps",
-    "read_imu", "read_session",
-    "get_color_video", "get_video_for_topic", "reconstruct_video",
+    "CALIB_TOPICS",
+    "CAMERA_IDS",
+    "CAMERA_TOPICS",
+    "TOPIC_CAMERA0",
+    "TOPIC_CAMERA1",
+    "TOPIC_CAMERA2",
+    "TOPIC_DEPTH",
+    "TOPIC_IMU",
+    "count_messages",
+    "get_color_video",
     "get_session_id",
-    "read_depth_frames", "write_depth_npz", "transcode_depth_video",
-    "read_calibration", "read_session_bounds",
+    "get_video_for_topic",
+    "read_calibration",
+    "read_depth_frames",
+    "read_imu",
+    "read_index_frames",
+    "read_index_timestamps",
+    "read_meta",
+    "read_session",
+    "read_session_bounds",
+    "reconstruct_video",
+    "transcode_depth_video",
+    "write_depth_npz",
 ]

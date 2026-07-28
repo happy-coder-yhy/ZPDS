@@ -3,6 +3,8 @@ datasets/
 .claude/
 .idea/
 .venv/
+.pytest_cache/
+.pytest-tmp*/
 __pycache__/
 *.egg-info/
 clean_report.txt
