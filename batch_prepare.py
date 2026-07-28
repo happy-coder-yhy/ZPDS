@@ -38,6 +38,7 @@ from segment.calibration import (
 )
 from segment.depth_writer import write_depth_stream
 from segment.imu_normalizer import normalize_imu_df, write_imu
+from segment.magnetic_encoder_writer import write_magnetic_encoder_stream
 from segment.mask_normalizer import normalize_masks, write_mask_parquet
 from segment.sample_map import (
     generate_sample_map,
@@ -235,6 +236,20 @@ def generate_segment(
             "rows": len(imu),
         })
 
+    # ---- UMI 磁编码器：保留原始值和 MCAP 双时钟 ----
+    time_series_results = []
+    for stream in session.time_series_streams.values():
+        if stream.modality != "magnetic_encoder":
+            continue
+        time_series_results.append(
+            write_magnetic_encoder_stream(
+                stream=stream,
+                output_dir=output_dir,
+                source_start_ns=source_start_ns,
+                source_end_ns=source_end_ns,
+            )
+        )
+
     # ---- ③a 深度流: 保留原始频率并无损写出 ----
     depth_results = []
     for depth_stream in session.depth_streams.values():
@@ -329,6 +344,11 @@ def generate_segment(
         depth_results=depth_results,
         calibrations=calibration.get("calibrations", None),
         annotation_results=annotation_results if annotation_results else None,
+        time_series_results=(
+            time_series_results
+            if time_series_results
+            else None
+        ),
     )
     write_segment_json(segment, output_dir)
 
@@ -344,6 +364,10 @@ def generate_segment(
         "rgb_frames": video_results[0]["output_frames"] if video_results else 0,
         "imu_samples": sum(ir["rows"] for ir in imu_results),
         "depth_frames": sum(dr["frames"] for dr in depth_results),
+        "time_series_samples": sum(
+            result["rows"]
+            for result in time_series_results
+        ),
         "annotation_rows": sum(
             ar.get("rows", 0) for ar in annotation_results
         ) if annotation_results else 0,
@@ -530,7 +554,12 @@ def main():
 
         # 统一读取 Session
         print("  读取 UMI MCAP Session ...")
-        session = ur.read_session(dataset_path)
+        cache_dir = (
+            Path(args.cache_dir)
+            if args.cache_dir
+            else output_root.parent / ".cache"
+        )
+        session = ur.read_session(dataset_path, cache_dir=cache_dir)
         pv = session.primary_video
         index_frames = pv.index_frames
         timestamps_ns = pv.timestamps_ns
@@ -558,6 +587,13 @@ def main():
         for stream_id, imu_s in session.imu_streams.items():
             print(f"    [{stream_id}] {len(imu_s.dataframe)} 样本, "
                   f"{imu_s.sample_rate_hz} Hz")
+        for stream_id, ts_s in session.time_series_streams.items():
+            print(
+                f"    [{stream_id}] {ts_s.num_samples} 样本, "
+                f"{ts_s.expected_rate_hz} Hz, "
+                f"unit={ts_s.metadata.get('unit')}, "
+                f"semantic={ts_s.metadata.get('semantic_status')}"
+            )
 
         # 提取双端相机标定
         print("  提取双端相机标定 ...")
@@ -737,6 +773,7 @@ def main():
             print(f"    {status_icon} 状态: {result['status'].upper()}")
             print(f"    RGB 帧: {result['rgb_frames']}, "
                   f"IMU 样本: {result['imu_samples']}, "
+                  f"时序样本: {result['time_series_samples']}, "
                   f"耗时: {elapsed:.1f}s")
 
             if result["errors"]:
@@ -764,6 +801,10 @@ def main():
     fail_count = sum(1 for r in results if r["status"] == "fail")
     total_rgb = sum(r.get("rgb_frames", 0) for r in results)
     total_imu = sum(r.get("imu_samples", 0) for r in results)
+    total_time_series = sum(
+        r.get("time_series_samples", 0)
+        for r in results
+    )
 
     print(f"  总数:        {len(results)}")
     print(f"  ✓ 通过:      {pass_count}")
@@ -771,6 +812,7 @@ def main():
         print(f"  ✗ 失败:      {fail_count}")
     print(f"  RGB 总帧:    {total_rgb}")
     print(f"  IMU 总样本:  {total_imu}")
+    print(f"  时序总样本:  {total_time_series}")
     print(f"  总耗时:      {total_elapsed:.1f}s")
     print(f"  输出目录:    {output_root.resolve()}")
 
@@ -788,6 +830,7 @@ def main():
         "fail": fail_count,
         "total_rgb_frames": total_rgb,
         "total_imu_samples": total_imu,
+        "total_time_series_samples": total_time_series,
         "total_elapsed_s": round(total_elapsed, 1),
         "segments": results,
     }

@@ -406,6 +406,308 @@ def validate_depth_streams(seg_dir: Path, segment: dict) -> dict:
     }
 
 
+def _read_source_magnetic_encoders(
+    segment: dict,
+    topics: set[str],
+) -> tuple[dict[str, list[tuple[int, int, int, float]]] | None, str | None]:
+    """Read encoder source rows once when the original MCAP is accessible."""
+    session_uri = segment.get("source_session", {}).get("session_uri")
+    if not session_uri:
+        return None, None
+    source_path = Path(session_uri)
+    if not source_path.is_file() or source_path.suffix.lower() != ".mcap":
+        return None, None
+
+    try:
+        from mcap.reader import make_reader
+        from mcap_protobuf.decoder import DecoderFactory
+
+        source_start_ns = int(segment["source_span"]["start_ns"])
+        source_end_ns = int(segment["source_span"]["end_ns"])
+        rows: dict[str, list[tuple[int, int, int, float]]] = {
+            topic: []
+            for topic in topics
+        }
+        with source_path.open("rb") as source_file:
+            reader = make_reader(
+                source_file,
+                decoder_factories=[DecoderFactory()],
+            )
+            for _schema, channel, message, decoded in (
+                reader.iter_decoded_messages(topics=list(topics))
+            ):
+                timestamp_ns = int(decoded.header.timestamp)
+                if source_start_ns <= timestamp_ns <= source_end_ns:
+                    rows[channel.topic].append(
+                        (
+                            timestamp_ns,
+                            int(message.log_time),
+                            int(message.publish_time),
+                            float(decoded.value),
+                        )
+                    )
+        return rows, None
+    except (ImportError, OSError, ValueError, AttributeError) as exc:
+        return None, str(exc)
+
+
+def validate_magnetic_encoder_streams(
+    seg_dir: Path,
+    segment: dict,
+) -> dict:
+    """Validate dual UMI encoder streams and their Raw MCAP lineage."""
+    encoder_streams = [
+        stream
+        for stream in segment.get("streams", [])
+        if stream.get("modality") == "magnetic_encoder"
+    ]
+    if not encoder_streams:
+        return {
+            "status": "skip",
+            "checks": {"magnetic_encoder_streams": "skip"},
+            "statistics": {},
+            "errors": [],
+        }
+
+    checks: dict[str, str] = {}
+    stats: dict[str, object] = {}
+    errors: list[str] = []
+    source_asset_ids = {
+        asset.get("source_asset_id")
+        for asset in segment.get("source_assets", [])
+    }
+    source_start_ns = int(segment["source_span"]["start_ns"])
+    timeline_end_ns = int(segment["timeline"]["end_ns"])
+    required_columns = {
+        "timestamp_ns",
+        "source_timestamp_ns",
+        "log_time_ns",
+        "publish_time_ns",
+        "raw_value",
+        "robot_id",
+        "source_topic",
+        "unit",
+        "semantic_status",
+    }
+    frames: dict[str, pd.DataFrame] = {}
+    topic_to_stream: dict[str, str] = {}
+    observed_robot_ids: set[str] = set()
+
+    for stream in encoder_streams:
+        stream_id = str(stream.get("stream_id", "unknown_encoder"))
+        stream_errors: list[str] = []
+        path = seg_dir / str(stream.get("uri", ""))
+        if not path.is_file():
+            stream_errors.append(f"[{stream_id}] Missing encoder parquet")
+        else:
+            try:
+                frame = pd.read_parquet(path)
+            except (OSError, ValueError, ImportError, KeyError) as exc:
+                stream_errors.append(
+                    f"[{stream_id}] Encoder parquet unreadable: {exc}"
+                )
+            else:
+                frames[stream_id] = frame
+                missing_columns = sorted(
+                    required_columns - set(frame.columns)
+                )
+                if missing_columns:
+                    stream_errors.append(
+                        f"[{stream_id}] Missing columns: {missing_columns}"
+                    )
+                elif frame.empty:
+                    stream_errors.append(
+                        f"[{stream_id}] Encoder parquet is empty"
+                    )
+                else:
+                    timestamp_ns = frame["timestamp_ns"].to_numpy(
+                        dtype=np.int64,
+                    )
+                    source_timestamp_ns = frame[
+                        "source_timestamp_ns"
+                    ].to_numpy(dtype=np.int64)
+                    log_time_ns = frame["log_time_ns"].to_numpy(
+                        dtype=np.int64,
+                    )
+                    publish_time_ns = frame[
+                        "publish_time_ns"
+                    ].to_numpy(dtype=np.int64)
+                    raw_value = frame["raw_value"].to_numpy(
+                        dtype=np.float64,
+                    )
+
+                    for name, values in {
+                        "timestamp_ns": timestamp_ns,
+                        "source_timestamp_ns": source_timestamp_ns,
+                        "log_time_ns": log_time_ns,
+                        "publish_time_ns": publish_time_ns,
+                    }.items():
+                        if len(values) > 1 and not np.all(
+                            np.diff(values) > 0
+                        ):
+                            stream_errors.append(
+                                f"[{stream_id}] {name} is not monotonic"
+                            )
+
+                    if not np.array_equal(
+                        timestamp_ns,
+                        source_timestamp_ns - source_start_ns,
+                    ):
+                        stream_errors.append(
+                            f"[{stream_id}] Relative timestamps do not "
+                            "match source timestamps"
+                        )
+                    if (
+                        int(timestamp_ns[0]) < 0
+                        or int(timestamp_ns[-1]) > timeline_end_ns
+                    ):
+                        stream_errors.append(
+                            f"[{stream_id}] Timestamps outside Segment"
+                        )
+                    if not np.isfinite(raw_value).all():
+                        stream_errors.append(
+                            f"[{stream_id}] raw_value contains NaN/Inf"
+                        )
+
+                    expected_robot_id = stream_id.removesuffix(
+                        "_magnetic_encoder"
+                    )
+                    robot_ids = set(
+                        frame["robot_id"].astype(str).unique()
+                    )
+                    if robot_ids != {expected_robot_id}:
+                        stream_errors.append(
+                            f"[{stream_id}] Robot rows are mixed: "
+                            f"{sorted(robot_ids)}"
+                        )
+                    observed_robot_ids.update(robot_ids)
+
+                    origin = stream.get("origin", {})
+                    source_topic = str(origin.get("source_topic", ""))
+                    if set(
+                        frame["source_topic"].astype(str).unique()
+                    ) != {source_topic}:
+                        stream_errors.append(
+                            f"[{stream_id}] source_topic mismatch"
+                        )
+                    if (
+                        origin.get("source_asset_id")
+                        not in source_asset_ids
+                    ):
+                        stream_errors.append(
+                            f"[{stream_id}] Unknown source_asset_id"
+                        )
+                    if origin.get("operation") != "trim_preserve_raw_value":
+                        stream_errors.append(
+                            f"[{stream_id}] Unexpected operation"
+                        )
+                    if (
+                        stream.get("unit") != "unknown"
+                        or stream.get("semantic_status")
+                        != "raw_unverified"
+                        or set(frame["unit"].astype(str).unique())
+                        != {"unknown"}
+                        or set(
+                            frame["semantic_status"]
+                            .astype(str)
+                            .unique()
+                        )
+                        != {"raw_unverified"}
+                    ):
+                        stream_errors.append(
+                            f"[{stream_id}] Raw semantic contract violated"
+                        )
+
+                    expected_count = int(stream.get("sample_count", -1))
+                    if expected_count != len(frame):
+                        stream_errors.append(
+                            f"[{stream_id}] sample_count "
+                            f"({expected_count}) != rows ({len(frame)})"
+                        )
+                    stats[f"magnetic_encoder_rows_{stream_id}"] = len(
+                        frame
+                    )
+                    topic_to_stream[source_topic] = stream_id
+
+        errors.extend(stream_errors)
+        checks[f"magnetic_encoder_{stream_id}"] = (
+            "fail" if stream_errors else "pass"
+        )
+
+    expected_robot_ids = {"robot0", "robot1"}
+    if observed_robot_ids != expected_robot_ids:
+        errors.append(
+            "Magnetic encoder robot coverage mismatch: "
+            f"{sorted(observed_robot_ids)}"
+        )
+        checks["magnetic_encoder_dual_robot"] = "fail"
+    else:
+        checks["magnetic_encoder_dual_robot"] = "pass"
+
+    source_rows, source_error = _read_source_magnetic_encoders(
+        segment,
+        set(topic_to_stream),
+    )
+    if source_error:
+        errors.append(f"Magnetic encoder source read failed: {source_error}")
+        checks["magnetic_encoder_source_match"] = "fail"
+    elif source_rows is None:
+        checks["magnetic_encoder_source_match"] = "skip"
+    else:
+        source_match = True
+        for topic, stream_id in topic_to_stream.items():
+            frame = frames[stream_id]
+            raw_rows = source_rows.get(topic, [])
+            if len(raw_rows) != len(frame):
+                source_match = False
+                errors.append(
+                    f"[{stream_id}] Source rows ({len(raw_rows)}) "
+                    f"!= parquet rows ({len(frame)})"
+                )
+                continue
+            if not raw_rows:
+                continue
+            source_matrix = np.asarray(raw_rows, dtype=object)
+            comparisons = [
+                np.array_equal(
+                    frame["source_timestamp_ns"].to_numpy(
+                        dtype=np.int64,
+                    ),
+                    source_matrix[:, 0].astype(np.int64),
+                ),
+                np.array_equal(
+                    frame["log_time_ns"].to_numpy(dtype=np.int64),
+                    source_matrix[:, 1].astype(np.int64),
+                ),
+                np.array_equal(
+                    frame["publish_time_ns"].to_numpy(dtype=np.int64),
+                    source_matrix[:, 2].astype(np.int64),
+                ),
+                np.array_equal(
+                    frame["raw_value"].to_numpy(dtype=np.float64),
+                    source_matrix[:, 3].astype(np.float64),
+                ),
+            ]
+            if not all(comparisons):
+                source_match = False
+                errors.append(
+                    f"[{stream_id}] Parquet values differ from Raw MCAP"
+                )
+        checks["magnetic_encoder_source_match"] = (
+            "pass" if source_match else "fail"
+        )
+
+    checks["magnetic_encoder_streams"] = (
+        "fail" if errors else "pass"
+    )
+    return {
+        "status": "fail" if errors else "pass",
+        "checks": checks,
+        "statistics": stats,
+        "errors": errors,
+    }
+
+
 def validate_segment(output_dir: str) -> dict:
     """对已生成的 Prepared Segment 做写出后验证。
 
@@ -550,7 +852,16 @@ def validate_segment(output_dir: str) -> dict:
             "pass" if min_ts >= 0 and min_ts < 1_000_000_000 else "warn"
         )
 
-    # ---- 8. 标注流验证（按 modality 分发） ----
+    # ---- 8. UMI 磁编码器可追溯性与双路隔离 ----
+    encoder_validation = validate_magnetic_encoder_streams(
+        seg_dir,
+        segment,
+    )
+    checks.update(encoder_validation["checks"])
+    stats.update(encoder_validation["statistics"])
+    errors.extend(encoder_validation["errors"])
+
+    # ---- 9. 标注流验证（按 modality 分发） ----
     annotation_streams = [
         s for s in segment.get("streams", [])
         if s.get("role") == "annotation" or s.get("modality") == "hand_object_detection"
@@ -603,7 +914,7 @@ def validate_segment(output_dir: str) -> dict:
             if ann_result["errors"]:
                 errors.extend(ann_result["errors"])
 
-    # ---- 9. 统计 ----
+    # ---- 10. 统计 ----
     stats["duration_ns"] = segment["timeline"]["end_ns"] - segment["timeline"]["start_ns"]
 
     # ---- 汇总 ----

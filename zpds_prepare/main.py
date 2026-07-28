@@ -236,6 +236,13 @@ def main():
             include_depth=bool(dunjia_depth.get("enabled", True)),
             require_depth=bool(dunjia_depth.get("required", True)),
         )
+    elif profile == "umi":
+        cache_dir = (
+            Path(args.cache_dir)
+            if args.cache_dir
+            else output_dir / ".cache"
+        )
+        session = rd.read_session(dataset_path, cache_dir=cache_dir)
     else:
         session = rd.read_session(dataset_path)
     pv = session.primary_video
@@ -285,6 +292,13 @@ def main():
     for stream_id, imu_s in session.imu_streams.items():
         print(f"    [{stream_id}] {len(imu_s.dataframe)} 样本, "
               f"{imu_s.sample_rate_hz} Hz")
+    for stream_id, ts_s in session.time_series_streams.items():
+        print(
+            f"    [{stream_id}] {ts_s.num_samples} 样本, "
+            f"{ts_s.expected_rate_hz} Hz, "
+            f"unit={ts_s.metadata.get('unit')}, "
+            f"semantic={ts_s.metadata.get('semantic_status')}"
+        )
     for stream_id, ann_s in session.annotation_streams.items():
         print(f"    [{stream_id}] {ann_s.annotation_type}, "
               f"{len(ann_s.records)} 标注帧, "

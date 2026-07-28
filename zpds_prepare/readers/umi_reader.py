@@ -6,8 +6,8 @@
   - /robot{N}/sensor/imu                  (foxglove.IMUMeasurement)
   - /robot{N}/sensor/camera0/camera_info  (foxglove.CameraCalibration)
 
-第一版只实现: 两路 RGB + 两路 IMU + 两套相机标定。
-暂不处理磁编码器和 VIO 位姿。
+已实现: 两路 RGB + 两路 IMU + 两套相机标定 + 两路磁编码器。
+VIO 位姿尚未正式化。
 
 与遁甲的关键差异:
   - 视频消息类型为 CompressedImage (非 CompressedVideo)，但 data 字段同为 H264 字节
@@ -17,6 +17,7 @@
   - 视频时间戳也取自 header.timestamp (arnold.common.Header)，非顶层 Timestamp
 """
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -26,12 +27,13 @@ import pandas as pd
 from mcap.reader import make_reader
 from mcap_protobuf.decoder import DecoderFactory
 
-
 # ---- topic 名称 ----
 TOPIC_ROBOT0_CAMERA = "/robot0/sensor/camera0/compressed"
 TOPIC_ROBOT1_CAMERA = "/robot1/sensor/camera0/compressed"
 TOPIC_ROBOT0_IMU = "/robot0/sensor/imu"
 TOPIC_ROBOT1_IMU = "/robot1/sensor/imu"
+TOPIC_ROBOT0_MAGNETIC_ENCODER = "/robot0/sensor/magnetic_encoder"
+TOPIC_ROBOT1_MAGNETIC_ENCODER = "/robot1/sensor/magnetic_encoder"
 TOPIC_ROBOT0_CALIB = "/robot0/sensor/camera0/camera_info"
 TOPIC_ROBOT1_CALIB = "/robot1/sensor/camera0/camera_info"
 
@@ -43,6 +45,10 @@ CAMERA_TOPICS = {
 IMU_TOPICS = {
     "robot0": TOPIC_ROBOT0_IMU,
     "robot1": TOPIC_ROBOT1_IMU,
+}
+MAGNETIC_ENCODER_TOPICS = {
+    "robot0": TOPIC_ROBOT0_MAGNETIC_ENCODER,
+    "robot1": TOPIC_ROBOT1_MAGNETIC_ENCODER,
 }
 CALIB_TOPICS = {
     "robot0": TOPIC_ROBOT0_CALIB,
@@ -57,7 +63,8 @@ def _open_mcap(mcap_path: str):
         raise FileNotFoundError(f"MCAP 文件不存在: {mcap_path}")
     if not path.is_file():
         raise ValueError(f"路径不是文件: {mcap_path}")
-    fh = open(str(path), "rb")
+    # The caller owns and closes this handle together with the MCAP reader.
+    fh = open(str(path), "rb")  # noqa: SIM115
     reader = make_reader(fh, decoder_factories=[DecoderFactory()])
     return reader, fh
 
@@ -155,6 +162,7 @@ def reconstruct_video(
                 ],
                 capture_output=True, text=True,
                 timeout=120,
+                check=False,
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip())
@@ -192,11 +200,11 @@ def _remux_with_opencv(h264_path: str, mp4_path: str) -> str:
     if fps <= 0:
         fps = 30.0
 
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
+    fourcc = cv2.VideoWriter_fourcc(*"avc1")  # type: ignore[attr-defined]
     writer = cv2.VideoWriter(mp4_path, fourcc, fps, (width, height))
     if not writer.isOpened():
         # 回退 mp4v
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
         writer = cv2.VideoWriter(mp4_path, fourcc, fps, (width, height))
 
     if not writer.isOpened():
@@ -226,16 +234,36 @@ def _remux_with_opencv(h264_path: str, mp4_path: str) -> str:
     return mp4_path
 
 
-def get_video_for_topic(mcap_path: str, topic: str) -> str:
+def _default_cache_dir(dataset_path: str) -> Path:
+    """Return a stable UMI cache directory outside the Raw directory."""
+    source = Path(dataset_path).resolve()
+    cache_key = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:12]
+    return Path.cwd() / "output" / ".cache" / "umi" / (
+        f"{source.stem}-{cache_key}"
+    )
+
+
+def get_video_for_topic(
+    mcap_path: str,
+    topic: str,
+    cache_dir: str | Path | None = None,
+) -> str:
     """返回指定 topic 的 .mp4 缓存路径，不存在则重建。
 
     缓存为 .mp4 容器（ffmpeg 无损重封装，或 OpenCV 重编码回退）。
     """
     robot_id = "robot0" if "robot0" in topic else "robot1"
-    cache_path = str(
-        Path(mcap_path).parent
-        / f"{Path(mcap_path).stem}.{robot_id}_camera0.cache.mp4"
+    cache_root = (
+        Path(cache_dir)
+        if cache_dir is not None
+        else _default_cache_dir(mcap_path)
     )
+    cache_root = cache_root.resolve()
+    source_parent = Path(mcap_path).resolve().parent
+    if cache_root == source_parent or cache_root.is_relative_to(source_parent):
+        raise ValueError("UMI cache directory cannot be inside the Raw directory")
+
+    cache_path = str(cache_root / f"{robot_id}_camera0.mp4")
     if Path(cache_path).exists():
         return cache_path
     return reconstruct_video(mcap_path, topic, cache_path)
@@ -251,20 +279,30 @@ def get_session_id(dataset_path: str) -> str:
 # 统一 Session 读取
 # ================================================================
 
-def read_session(dataset_path: str):
+def read_session(
+    dataset_path: str,
+    cache_dir: str | Path | None = None,
+):
     """统一读取 UMI Session 全部流数据。
 
     一次扫描 MCAP，收集 robot0 + robot1 的:
       - CompressedImage 视频帧 (h264)
       - IMUMeasurement 数据
+      - MagneticEncoderMeasurement 原始值
       - CameraCalibration (分辨率)
 
     Returns:
         Session 对象，包含:
           - video_streams: {"robot0_camera0": VideoStream, "robot1_camera0": VideoStream}
           - imu_streams:  {"robot0_imu": ImuStream, "robot1_imu": ImuStream}
+          - time_series_streams: {"robot0_magnetic_encoder": TimeSeriesStream, ...}
     """
-    from zpds_prepare.readers.session_model import Session, VideoStream, ImuStream
+    from zpds_prepare.readers.session_model import (
+        ImuStream,
+        Session,
+        TimeSeriesStream,
+        VideoStream,
+    )
 
     reader, fh = _open_mcap(dataset_path)
     try:
@@ -274,6 +312,10 @@ def read_session(dataset_path: str):
             "robot1": {"frames": [], "has_calib": False, "width": 0, "height": 0},
         }
         imu_data: dict[str, list[dict]] = {"robot0": [], "robot1": []}
+        encoder_data: dict[str, list[dict]] = {
+            "robot0": [],
+            "robot1": [],
+        }
 
         for _schema, channel, msg, decoded in reader.iter_decoded_messages():
             topic = channel.topic
@@ -328,6 +370,24 @@ def read_session(dataset_path: str):
                     "gx": decoded.angular_velocity.x,
                     "gy": decoded.angular_velocity.y,
                     "gz": decoded.angular_velocity.z,
+                })
+
+            # ---- Magnetic encoder (preserve raw value; semantics unknown) ----
+            elif topic == TOPIC_ROBOT0_MAGNETIC_ENCODER:
+                encoder_data["robot0"].append({
+                    "timestamp_ns": int(decoded.header.timestamp),
+                    "log_time_ns": int(msg.log_time),
+                    "publish_time_ns": int(msg.publish_time),
+                    "raw_value": float(decoded.value),
+                    "frame_id": decoded.frame_id or "",
+                })
+            elif topic == TOPIC_ROBOT1_MAGNETIC_ENCODER:
+                encoder_data["robot1"].append({
+                    "timestamp_ns": int(decoded.header.timestamp),
+                    "log_time_ns": int(msg.log_time),
+                    "publish_time_ns": int(msg.publish_time),
+                    "raw_value": float(decoded.value),
+                    "frame_id": decoded.frame_id or "",
                 })
 
         # ---- 计算 robot0 camera 元数据 (用作 session 主元数据) ----
@@ -387,7 +447,11 @@ def read_session(dataset_path: str):
 
         stream_id = f"{robot_id}_camera0"
         topic = CAMERA_TOPICS[robot_id]
-        video_path = get_video_for_topic(dataset_path, topic)
+        video_path = get_video_for_topic(
+            dataset_path,
+            topic,
+            cache_dir=cache_dir,
+        )
 
         video_streams[stream_id] = VideoStream(
             stream_id=stream_id,
@@ -423,22 +487,107 @@ def read_session(dataset_path: str):
             sample_rate_hz=round(rate, 1),
         )
 
+    # ---- Build magnetic-encoder time-series streams ----
+    time_series_streams: dict[str, TimeSeriesStream] = {}
+    for robot_id in ["robot0", "robot1"]:
+        records = encoder_data[robot_id]
+        if not records:
+            continue
+
+        timestamps_ns = [int(record["timestamp_ns"]) for record in records]
+        if len(timestamps_ns) >= 2:
+            intervals = np.diff(np.asarray(timestamps_ns, dtype=np.int64))
+            positive_intervals = intervals[intervals > 0]
+            rate_hz = (
+                1e9 / float(np.median(positive_intervals))
+                if len(positive_intervals)
+                else 0.0
+            )
+        else:
+            rate_hz = 0.0
+
+        frame_ids = sorted({
+            str(record["frame_id"])
+            for record in records
+            if record["frame_id"]
+        })
+        stream_id = f"{robot_id}_magnetic_encoder"
+        time_series_streams[stream_id] = TimeSeriesStream(
+            stream_id=stream_id,
+            modality="magnetic_encoder",
+            role="sensor",
+            source_path=Path(dataset_path),
+            timestamps_ns=timestamps_ns,
+            rows=pd.DataFrame(
+                {
+                    "log_time_ns": pd.Series(
+                        [record["log_time_ns"] for record in records],
+                        dtype="int64",
+                    ),
+                    "publish_time_ns": pd.Series(
+                        [record["publish_time_ns"] for record in records],
+                        dtype="int64",
+                    ),
+                    "raw_value": pd.Series(
+                        [record["raw_value"] for record in records],
+                        dtype="float64",
+                    ),
+                }
+            ),
+            fields=[
+                {"name": "log_time_ns", "dtype": "int64", "unit": "ns"},
+                {
+                    "name": "publish_time_ns",
+                    "dtype": "int64",
+                    "unit": "ns",
+                },
+                {
+                    "name": "raw_value",
+                    "dtype": "float64",
+                    "unit": "unknown",
+                },
+            ],
+            expected_rate_hz=round(rate_hz, 6),
+            frame_id=frame_ids[0] if len(frame_ids) == 1 else None,
+            metadata={
+                "robot_id": robot_id,
+                "source_topic": MAGNETIC_ENCODER_TOPICS[robot_id],
+                "source_schema": "foxglove.MagneticEncoderMeasurement",
+                "source_field": "value",
+                "source_asset_id": "raw_mcap",
+                "unit": "unknown",
+                "semantic_status": "raw_unverified",
+                "frame_ids": frame_ids,
+                "message_count": len(records),
+            },
+        )
+
     return Session(
         session_id=get_session_id(dataset_path),
         source_path=dataset_path,
         meta=meta,
         video_streams=video_streams,
         imu_streams=imu_streams,
+        time_series_streams=time_series_streams,
     )
 
 
 __all__ = [
-    "CAMERA_TOPICS", "CALIB_TOPICS", "IMU_TOPICS",
-    "TOPIC_ROBOT0_CAMERA", "TOPIC_ROBOT1_CAMERA",
-    "TOPIC_ROBOT0_IMU", "TOPIC_ROBOT1_IMU",
-    "TOPIC_ROBOT0_CALIB", "TOPIC_ROBOT1_CALIB",
-    "read_calibration",
-    "get_video_for_topic", "reconstruct_video",
+    "CALIB_TOPICS",
+    "CAMERA_TOPICS",
+    "IMU_TOPICS",
+    "MAGNETIC_ENCODER_TOPICS",
+    "TOPIC_ROBOT0_CALIB",
+    "TOPIC_ROBOT0_CAMERA",
+    "TOPIC_ROBOT0_IMU",
+    "TOPIC_ROBOT0_MAGNETIC_ENCODER",
+    "TOPIC_ROBOT1_CALIB",
+    "TOPIC_ROBOT1_CAMERA",
+    "TOPIC_ROBOT1_IMU",
+    "TOPIC_ROBOT1_MAGNETIC_ENCODER",
     "get_session_id",
+    "get_video_for_topic",
+    "read_calibration",
     "read_session",
+    "reconstruct_video",
 ]

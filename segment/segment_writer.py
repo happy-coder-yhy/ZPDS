@@ -38,6 +38,7 @@ def build_segment_json(
     depth_results: list[dict] | None = None,
     calibrations: dict | None = None,
     annotation_results: list[dict] | None = None,
+    time_series_results: list[dict] | None = None,
 ) -> dict:
     """构建 segment.json 内容。
 
@@ -56,6 +57,10 @@ def build_segment_json(
     每个 depth_result 应包含:
       - stream_id, uri, dtype, unit, width, height, frames
       - sample_map_uri, source_asset_id, operation
+
+    每个 time_series_result 应包含:
+      - stream_id, uri, modality, role, rows
+      - source_asset_id, source_topic, operation, fields
     """
     data_dir = Path(dataset_path)
     index_path = data_dir / "index.jsonl"
@@ -229,6 +234,43 @@ def build_segment_json(
                 ),
                 "operation": "trim_and_unit_normalize",
             },
+        })
+
+    # 通用时序流（UMI 磁编码器、后续 VIO 等）
+    for tr in (time_series_results or []):
+        streams.append({
+            "stream_id": tr["stream_id"],
+            "role": tr.get("role", "sensor"),
+            "modality": tr["modality"],
+            "uri": tr["uri"],
+            "format": "parquet",
+            "frame_id": tr.get("frame_id"),
+            "unit": tr.get("unit", "unknown"),
+            "semantic_status": tr.get(
+                "semantic_status",
+                "raw_unverified",
+            ),
+            "time": {
+                "clock_id": "segment",
+                "sampling": "irregular",
+                "rate_hz": tr.get("rate_hz"),
+                "timestamp_column": "timestamp_ns",
+            },
+            "fields": tr.get("fields", []),
+            "origin": {
+                "kind": "deterministic_transform",
+                "source_asset_id": tr.get(
+                    "source_asset_id",
+                    "raw_mcap",
+                ),
+                "source_topic": tr["source_topic"],
+                "source_field": tr.get("source_field"),
+                "operation": tr.get(
+                    "operation",
+                    "trim_preserve_raw_value",
+                ),
+            },
+            "sample_count": tr.get("rows", 0),
         })
 
     # 标注流 — 每个 annotation_result 生成一个 stream entry
