@@ -4,5 +4,46 @@ profile: epic100
 stage1_structure:
   check_pkl_integrity: true
 
+stage3_visual:
+  # D13 过曝检测
+  overexposure:
+    enabled: true
+    mean_threshold: 230             # EPIC 厨房场景可能较亮
+    overexposure_ratio: 0.90
+    saturated_ratio: 0.30
+    p95_threshold: 248
+    p99_threshold: 252
+    consecutive_min: 3
+    sample_interval: 1
+
+  # D14 模糊检测
+  blur:
+    enabled: true
+    laplacian_threshold: 100.0
+    consecutive_min: 3
+    sample_interval: 1
+
+stage5_depth:
+  # EPIC 无深度流
+  enabled: false
+
+stage6_imu:
+  # EPIC 无 IMU
+  enabled: false
+
 stage10_semantic:
   vlm_model: "claude-sonnet-5"
+
+stage11_dedup:
+  # D18 近重复检测
+  exact_hash:
+    enabled: true
+    algorithm: sha256
+  phash:
+    enabled: true
+    hamming_max: 8                  # EPIC 同类厨房场景，更严格
+    sample_count: 10
+  trajectory:
+    enabled: false                  # EPIC 无机器人轨迹
+    correlation_min: 0.95
+    n_bins: 20

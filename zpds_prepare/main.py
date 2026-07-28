@@ -46,10 +46,8 @@ def _get_reader(profile: str):
         from zpds_prepare.readers import dunjia_reader as rd
     elif profile == "umi":
         from zpds_prepare.readers import umi_reader as rd
-    elif profile == "epic":
-        from zpds_prepare.readers import epic_reader as rd
     else:
-        raise ValueError(f"未知 profile: {profile}，可选: guida, dunjia, umi, epic")
+        raise ValueError(f"未知 profile: {profile}，可选: guida, dunjia, umi")
     return rd
 
 

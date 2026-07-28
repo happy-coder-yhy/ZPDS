@@ -8,9 +8,64 @@ stage3_visual:
   black_threshold: 5
   overexposure_ratio: 0.95
 
-stage6_imu:
-  max_gap_s: 0.03
-  sample_rate_hz: 196
+  # D13 过曝检测
+  overexposure:
+    enabled: true
+    mean_threshold: 220
+    overexposure_ratio: 0.95
+    saturated_ratio: 0.30
+    p95_threshold: 245
+    p99_threshold: 250
+    consecutive_min: 3
+    sample_interval: 1
+
+  # D14 模糊检测
+  blur:
+    enabled: true
+    # 多分辨率自适应（见 stage3_visual.BLUR_THRESHOLD_BY_RESOLUTION）
+    laplacian_threshold: null    # null = auto-select by resolution
+    consecutive_min: 3
+    sample_interval: 1
 
 stage4_video_timing:
   vfr_tolerance: 0.01
+
+stage5_depth:
+  # D15 深度有效性
+  zero_ratio_max: 0.55           # 遁甲深度有较多无效区域
+  invalid_ratio_max: 0.65
+  valid_ratio_min: 0.35
+  frozen_consecutive_min: 3
+  rgb_depth_pairing:
+    max_offset_ns: 50000000      # 50ms
+
+stage6_imu:
+  max_gap_s: 0.03
+  sample_rate_hz: 196
+  # D16 IMU 异常
+  interval:
+    expected_interval_s: 0.0051  # ~196 Hz
+    gap_factor: 3.0
+  spike:
+    enabled: true
+    std_factor: 6.0
+  freeze:
+    enabled: true
+    consecutive_min: 10
+  static_bias:
+    enabled: true
+    static_window_s: 1.0
+
+stage11_dedup:
+  # D18 近重复检测
+  exact_hash:
+    enabled: true
+    algorithm: sha256
+  phash:
+    enabled: true
+    hamming_max: 10
+    sample_count: 10
+  trajectory:
+    enabled: false               # Dunjia 无机器人轨迹
+    correlation_min: 0.95
+    n_bins: 20
