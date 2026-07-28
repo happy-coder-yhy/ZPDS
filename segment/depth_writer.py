@@ -236,6 +236,124 @@ def _swap_directory(staging_dir: Path, final_dir: Path) -> None:
             shutil.rmtree(backup_dir)
 
 
+def _build_depth_result(
+    stream: DepthStream,
+    sample_map: pd.DataFrame,
+    *,
+    dtype: str,
+    width: int,
+    height: int,
+    zero_ratio: float | None,
+    invalid_ratio: float | None,
+) -> dict[str, Any]:
+    timestamps = sample_map["source_timestamp_ns"].to_numpy(dtype=np.int64)
+    if len(timestamps) >= 2:
+        median_interval_ns = float(np.median(np.diff(timestamps)))
+        rate_hz = (
+            1_000_000_000 / median_interval_ns
+            if median_interval_ns > 0
+            else stream.fps
+        )
+    else:
+        rate_hz = stream.fps
+
+    return {
+        "stream_id": stream.stream_id,
+        "uri": f"data/depth/{stream.stream_id}/",
+        "format": "png_sequence",
+        "encoding": "png",
+        "dtype": dtype,
+        "unit": stream.unit,
+        "unit_status": stream.metadata.get("unit_status", "unverified"),
+        "invalid_value": stream.invalid_value,
+        "width": width,
+        "height": height,
+        "frames": len(sample_map),
+        "rate_hz": round(float(rate_hz), 6),
+        "frame_id": stream.frame_id,
+        "sample_map_uri": f"maps/{stream.stream_id}_sample_map.parquet",
+        "source_asset_id": stream.metadata.get(
+            "source_asset_id",
+            "raw_depth_0",
+        ),
+        "operation": stream.metadata.get(
+            "operation",
+            "trim_decode_lossless_png",
+        ),
+        "zero_ratio": zero_ratio,
+        "invalid_ratio": invalid_ratio,
+    }
+
+
+def _reuse_existing_depth(
+    stream: DepthStream,
+    final_dir: Path,
+    sample_map_path: Path,
+    expected_map: pd.DataFrame,
+) -> dict[str, Any] | None:
+    """在目录和 sample map 完整一致时复用已生成的深度产物。"""
+    if not final_dir.is_dir() or not sample_map_path.is_file():
+        return None
+    try:
+        saved_map = pd.read_parquet(sample_map_path)
+        compare_columns = [
+            "output_frame_index",
+            "source_frame_index",
+            "source_timestamp_ns",
+            "output_file",
+        ]
+        if any(
+            column not in saved_map.columns or column not in expected_map.columns
+            for column in compare_columns
+        ):
+            return None
+        if len(saved_map) != len(expected_map):
+            return None
+        if not saved_map[compare_columns].reset_index(drop=True).equals(
+            expected_map[compare_columns].reset_index(drop=True)
+        ):
+            return None
+
+        dtypes: set[str] = set()
+        resolutions: set[tuple[int, int]] = set()
+        zero_pixels = 0
+        invalid_pixels = 0
+        total_pixels = 0
+        for row in saved_map.itertuples(index=False):
+            image_path = final_dir / str(row.output_file)
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None or image.ndim != 2:
+                return None
+            dtypes.add(str(image.dtype))
+            resolutions.add((int(image.shape[1]), int(image.shape[0])))
+            total_pixels += int(image.size)
+            zero_pixels += int(np.count_nonzero(image == 0))
+            if stream.invalid_value is not None:
+                invalid_pixels += int(
+                    np.count_nonzero(image == stream.invalid_value)
+                )
+
+        if len(dtypes) != 1 or len(resolutions) != 1 or total_pixels <= 0:
+            return None
+        dtype = next(iter(dtypes))
+        if stream.dtype != "unknown" and dtype != stream.dtype:
+            return None
+        width, height = next(iter(resolutions))
+        result = _build_depth_result(
+            stream,
+            saved_map,
+            dtype=dtype,
+            width=width,
+            height=height,
+            zero_ratio=zero_pixels / total_pixels,
+            invalid_ratio=invalid_pixels / total_pixels,
+        )
+        result["cached"] = True
+        return result
+    except (OSError, ValueError, KeyError, ImportError):
+        return None
+
+
 def write_depth_stream(
     stream: DepthStream,
     output_dir: str,
@@ -247,15 +365,24 @@ def write_depth_stream(
     depth_parent = segment_dir / "data" / "depth"
     depth_parent.mkdir(parents=True, exist_ok=True)
     final_dir = depth_parent / stream.stream_id
-    staging_dir = Path(
-        tempfile.mkdtemp(prefix=f".{stream.stream_id}.", dir=str(depth_parent))
-    )
     sample_map = build_depth_sample_map(stream, source_start_ns, source_end_ns)
 
     maps_dir = segment_dir / "maps"
     maps_dir.mkdir(parents=True, exist_ok=True)
     sample_map_path = maps_dir / f"{stream.stream_id}_sample_map.parquet"
     sample_map_staging = maps_dir / f".{stream.stream_id}_sample_map.parquet.tmp"
+    cached_result = _reuse_existing_depth(
+        stream,
+        final_dir,
+        sample_map_path,
+        sample_map,
+    )
+    if cached_result is not None:
+        return cached_result
+
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix=f".{stream.stream_id}.", dir=str(depth_parent))
+    )
 
     decoded_dirs: dict[int, Path] = {}
     dtypes: set[str] = set()
@@ -351,39 +478,15 @@ def write_depth_stream(
         raise
 
     width, height = next(iter(resolutions))
-    timestamps = sample_map["source_timestamp_ns"].to_numpy(dtype=np.int64)
-    if len(timestamps) >= 2:
-        median_interval_ns = float(np.median(np.diff(timestamps)))
-        rate_hz = 1_000_000_000 / median_interval_ns if median_interval_ns > 0 else stream.fps
-    else:
-        rate_hz = stream.fps
-
-    return {
-        "stream_id": stream.stream_id,
-        "uri": f"data/depth/{stream.stream_id}/",
-        "format": "png_sequence",
-        "encoding": "png",
-        "dtype": next(iter(dtypes)),
-        "unit": stream.unit,
-        "unit_status": stream.metadata.get("unit_status", "unverified"),
-        "invalid_value": stream.invalid_value,
-        "width": width,
-        "height": height,
-        "frames": len(sample_map),
-        "rate_hz": round(float(rate_hz), 6),
-        "frame_id": stream.frame_id,
-        "sample_map_uri": f"maps/{stream.stream_id}_sample_map.parquet",
-        "source_asset_id": stream.metadata.get(
-            "source_asset_id",
-            "raw_depth_0",
-        ),
-        "operation": stream.metadata.get(
-            "operation",
-            "trim_decode_lossless_png",
-        ),
-        "zero_ratio": zero_pixels / total_pixels if total_pixels else None,
-        "invalid_ratio": invalid_pixels / total_pixels if total_pixels else None,
-    }
+    return _build_depth_result(
+        stream,
+        sample_map,
+        dtype=next(iter(dtypes)),
+        width=width,
+        height=height,
+        zero_ratio=zero_pixels / total_pixels if total_pixels else None,
+        invalid_ratio=invalid_pixels / total_pixels if total_pixels else None,
+    )
 
 
 __all__ = ["build_depth_sample_map", "write_depth_stream"]

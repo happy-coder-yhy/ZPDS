@@ -136,6 +136,31 @@ def test_write_and_validate_guida_depth_stream(tmp_path: Path) -> None:
     assert output.dtype == np.uint16
 
 
+def test_write_depth_reuses_complete_existing_output(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    stream = _build_session(raw_dir).depth_streams["ego_depth"]
+    segment_dir = tmp_path / "prepared" / "seg_000001"
+
+    first = write_depth_stream(
+        stream,
+        output_dir=str(segment_dir),
+        source_start_ns=1_000_000_000,
+        source_end_ns=1_200_000_000,
+    )
+    second = write_depth_stream(
+        stream,
+        output_dir=str(segment_dir),
+        source_start_ns=1_000_000_000,
+        source_end_ns=1_200_000_000,
+    )
+
+    assert first.get("cached") is None
+    assert second["cached"] is True
+    assert second["frames"] == first["frames"] == 3
+    assert second["zero_ratio"] == first["zero_ratio"]
+
+
 def test_write_depth_rejects_declared_dtype_mismatch(tmp_path: Path) -> None:
     session = _build_session(tmp_path, dtype="uint8")
     stream = session.depth_streams["ego_depth"]
