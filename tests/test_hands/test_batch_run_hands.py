@@ -123,7 +123,7 @@ def test_existing_complete_output_can_be_skipped(tmp_path: Path) -> None:
     )
 
     assert can_skip is True
-    assert "pass" in reason
+    assert "warn" in reason
 
 
 def test_changed_max_frames_prevents_skip(tmp_path: Path) -> None:

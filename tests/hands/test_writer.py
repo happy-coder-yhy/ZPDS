@@ -1,6 +1,7 @@
 """test_writer — 验证 Writer 输出 Parquet 结构和数据往返。"""
 
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -10,8 +11,10 @@ from zpds.hands.schemas import HandObservation
 from zpds.hands.validator import validate_hands_parquet
 from zpds.hands.writer import (
     compute_config_sha256,
+    estimator_provenance,
     write_hand_observations,
     write_hands_parquet,
+    write_hands_run_report,
 )
 
 
@@ -65,6 +68,8 @@ class TestWriter:
             assert len(row["keypoints_z_relative"]) == 21
             assert row["model_name"] == "mediapipe"
             assert row["checkpoint_sha256"] == "abc123"
+            assert not row["keypoints_any_clipped"]
+            assert row["keypoints_clipped_count"] == 0
 
     def test_write_two_hands_one_frame(self):
         left = _make_hand("Left", 0.9)
@@ -138,6 +143,12 @@ class TestWriter:
                 prep_revision="r0002",
                 checkpoint_sha256="model-hash",
                 config_sha256="config-hash",
+                run_meta={
+                    "backend_requested": "auto",
+                    "backend_active": "tasks_hand_landmarker",
+                    "backend_fallback_used": False,
+                    "backend_delegate": "cpu",
+                },
             )
             row = pd.read_parquet(path).iloc[0]
 
@@ -146,6 +157,7 @@ class TestWriter:
             assert pd.isna(row["source_frame_index"])
             assert row["checkpoint_sha256"] == "model-hash"
             assert row["config_sha256"] == "config-hash"
+            assert row["backend_active"] == "tasks_hand_landmarker"
             assert len(row["keypoints_2d"]) == 21
 
     def test_write_empty_pipeline_observations(self):
@@ -175,8 +187,46 @@ class TestWriter:
                 "bbox_y2",
                 "keypoints_2d",
                 "keypoints_z_relative",
+                "keypoints_any_clipped",
+                "keypoints_clipped_count",
                 "model_name",
                 "model_version",
                 "checkpoint_sha256",
                 "config_sha256",
+                "backend_requested",
+                "backend_active",
+                "backend_fallback_used",
+                "backend_fallback_reason",
+                "backend_delegate",
             ]
+
+    def test_estimator_provenance_and_run_report(self):
+        @dataclass
+        class _ModelInfo:
+            sha256: str = "model-sha"
+
+        @dataclass
+        class _BackendInfo:
+            requested_backend: str = "auto"
+            active_backend: str = "solutions_hands"
+            fallback_used: bool = True
+            fallback_reason: str = "Tasks unavailable"
+            delegate: str = ""
+
+        @dataclass
+        class _Stats:
+            total_frames: int = 2
+
+        class _Estimator:
+            model_info = _ModelInfo()
+            backend_info = _BackendInfo()
+            session_stats = _Stats()
+
+        metadata, report = estimator_provenance(_Estimator(), {"hands": {"backend": "auto"}})
+        assert metadata["model_name"] == "mediapipe_solutions_hands"
+        assert metadata["backend_fallback_used"]
+        assert report["model"]["sha256"] == "model-sha"
+
+        with tempfile.TemporaryDirectory() as td:
+            path = write_hands_run_report(report, str(Path(td) / "run.json"))
+            assert "solutions_hands" in Path(path).read_text(encoding="utf-8")

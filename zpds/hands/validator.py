@@ -109,6 +109,7 @@ def validate_hands_parquet(
     kp_bad_rows = []
     kp_oob_rows = []
     normalized_kp_rows = []
+    clipped_rows = []
     for i, row in df.iterrows():
         kp = row["keypoints_2d"]
         if not isinstance(kp, (list, np.ndarray)) or len(kp) != 21:
@@ -132,6 +133,8 @@ def validate_hands_parquet(
         kp_array = np.array(kp_points, dtype=np.float32)
         if _is_normalized_points(kp_array):
             normalized_kp_rows.append(i)
+        if bool(row.get("keypoints_any_clipped", False)):
+            clipped_rows.append(i)
         if image_width is not None and image_height is not None:
             xs = kp_array[:, 0]
             ys = kp_array[:, 1]
@@ -154,6 +157,27 @@ def validate_hands_parquet(
     else:
         checks["keypoints_coordinate_space"] = "pass"
     stats["keypoints_dim"] = "21×2"
+    if "keypoints_any_clipped" in df.columns or "keypoints_clipped_count" in df.columns:
+        clipped_counts = pd.to_numeric(
+            df.get("keypoints_clipped_count", pd.Series(0, index=df.index)), errors="coerce"
+        )
+        clipped_flags = df.get(
+            "keypoints_any_clipped", pd.Series(False, index=df.index)
+        ).astype(bool)
+        clipped_metadata_ok = (
+            clipped_counts.notna().all()
+            and ((clipped_counts >= 0) & (clipped_counts <= 21)).all()
+            and (clipped_flags == (clipped_counts > 0)).all()
+        )
+        checks["keypoint_clipping_metadata"] = "pass" if clipped_metadata_ok else "fail"
+        if not clipped_metadata_ok:
+            errors.append("Invalid keypoint clipping metadata")
+        stats["clipped_hand_rows"] = int(clipped_flags.sum())
+        stats["clipped_keypoints"] = int(clipped_counts.sum())
+        if clipped_rows:
+            warnings.append(
+                f"Keypoints were clipped to image bounds in {len(clipped_rows)} hand rows"
+            )
 
     # keypoints_z_relative
     z_ok = True
@@ -260,6 +284,25 @@ def validate_hands_parquet(
             warnings.append("Model provenance fields are empty")
     else:
         checks["provenance_complete"] = "fail"
+
+    backend_fields = [
+        "backend_requested",
+        "backend_active",
+        "backend_fallback_used",
+        "backend_fallback_reason",
+        "backend_delegate",
+    ]
+    present_backend_fields = [field for field in backend_fields if field in df.columns]
+    if present_backend_fields:
+        required_backend_fields = ["backend_requested", "backend_active", "backend_fallback_used"]
+        backend_complete = all(field in df.columns for field in required_backend_fields)
+        if backend_complete:
+            backend_complete = not (
+                (df["backend_requested"] == "").any() | (df["backend_active"] == "").any()
+            )
+        checks["backend_provenance"] = "pass" if backend_complete else "warn"
+        if not backend_complete:
+            warnings.append("Backend provenance is incomplete")
 
     # ---- 汇总 ----
     all_pass = len(errors) == 0

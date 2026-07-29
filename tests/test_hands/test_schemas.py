@@ -93,6 +93,14 @@ def test_hand_observation_rejects_nonfinite_values() -> None:
         _observation(keypoints_2d=keypoints)
 
 
+def test_hand_observation_rejects_inconsistent_clipping_metadata() -> None:
+    with pytest.raises(ValueError, match="保持一致"):
+        _observation(
+            keypoints_any_clipped=False,
+            keypoints_clipped_count=1,
+        )
+
+
 def test_prepared_frame_accepts_rgb_uint8_contract() -> None:
     frame = PreparedFrame(
         frame_rgb=np.zeros((24, 32, 3), dtype=np.uint8),

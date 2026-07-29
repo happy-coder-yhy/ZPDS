@@ -115,6 +115,26 @@ class TestValidator:
             result = validate_hands_parquet(path)
             assert result["status"] == "warn"
 
+    def test_clipped_keypoints_are_reported_not_out_of_bounds(self):
+        row = _valid_row()
+        row["keypoints_any_clipped"] = True
+        row["keypoints_clipped_count"] = 2
+        with tempfile.TemporaryDirectory() as td:
+            path = _make_parquet(Path(td) / "hands.parquet", [row])
+            result = validate_hands_parquet(path, image_width=1280, image_height=720)
+            assert result["status"] == "warn"
+            assert result["checks"]["keypoint_clipping_metadata"] == "pass"
+            assert result["statistics"]["clipped_keypoints"] == 2
+
+    def test_invalid_clipping_metadata_fails(self):
+        row = _valid_row()
+        row["keypoints_any_clipped"] = False
+        row["keypoints_clipped_count"] = 1
+        with tempfile.TemporaryDirectory() as td:
+            path = _make_parquet(Path(td) / "hands.parquet", [row])
+            result = validate_hands_parquet(path)
+            assert result["status"] == "fail"
+
     def test_nonexistent_file_fails(self):
         result = validate_hands_parquet("/nonexistent/path.parquet")
         assert result["status"] == "fail"

@@ -299,6 +299,8 @@ class HandObservation:
     keypoints_z_relative: list[float]
     model_name: str
     model_version: str
+    keypoints_any_clipped: bool = False
+    keypoints_clipped_count: int = 0
 
     def __post_init__(self) -> None:
         if not self.segment_id:
@@ -336,6 +338,14 @@ class HandObservation:
                 raise ValueError("keypoints_2d 中的每个点必须包含 x、y 两个值")
             _require_finite(point, "keypoints_2d")
         _require_finite(self.keypoints_z_relative, "keypoints_z_relative")
+        if not 0 <= self.keypoints_clipped_count <= HAND_KEYPOINT_COUNT:
+            raise ValueError(
+                f"keypoints_clipped_count 必须在 [0, {HAND_KEYPOINT_COUNT}] 范围内"
+            )
+        if self.keypoints_any_clipped != (self.keypoints_clipped_count > 0):
+            raise ValueError(
+                "keypoints_any_clipped 必须与 keypoints_clipped_count 保持一致"
+            )
         if not self.model_name:
             raise ValueError("model_name 不能为空")
         if not self.model_version:

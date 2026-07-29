@@ -217,6 +217,8 @@ class HandsPipeline:
             keypoints_z_relative=[float(z) for _, _, z in raw_result.keypoints.normalized],
             model_name=self._model_name,
             model_version=self._model_version,
+            keypoints_any_clipped=raw_result.keypoints.any_clipped,
+            keypoints_clipped_count=raw_result.keypoints.clipped_count,
         )
 
     @staticmethod

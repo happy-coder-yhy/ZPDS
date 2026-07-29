@@ -199,6 +199,22 @@ def run(args: argparse.Namespace) -> int:
     config_sha256 = runtime_config.config_sha256
 
     with MediaPipeHandEstimator.from_config(runtime_config.estimator) as estimator:
+        backend_info = estimator.backend_info
+        run_meta = {
+            "backend_requested": (
+                backend_info.requested_backend if backend_info else ""
+            ),
+            "backend_active": (
+                backend_info.active_backend if backend_info else ""
+            ),
+            "backend_fallback_used": (
+                backend_info.fallback_used if backend_info else False
+            ),
+            "backend_fallback_reason": (
+                backend_info.fallback_reason if backend_info else ""
+            ),
+            "backend_delegate": backend_info.delegate if backend_info else "",
+        }
         pipeline = HandsPipeline(
             reader,
             estimator,
@@ -212,6 +228,7 @@ def run(args: argparse.Namespace) -> int:
             prep_revision=prep_revision,
             checkpoint_sha256=estimator.model_info.sha256,
             config_sha256=config_sha256,
+            run_meta=run_meta,
         )
         backend_name = (
             estimator.backend_info.active_backend
