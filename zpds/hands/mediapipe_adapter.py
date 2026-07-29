@@ -29,7 +29,7 @@ from typing import Optional
 
 import numpy as np
 
-from zpds.hands.base import BackendInfo, RawHandResult
+from zpds.hands.base import BackendInfo, ModelInfo, RawHandResult, SessionStats
 
 
 # ---- 配置 ----
@@ -207,12 +207,34 @@ class MediaPipeHandEstimator:
             ),
         )
 
+        # 模型文件校验与记录
+        t_init_start = time.perf_counter()
+        self._model_info = ModelInfo.from_file(self._config.tasks.model_path)
+        if not self._model_info.exists:
+            print(
+                f"[MediaPipeHandEstimator] 模型文件不存在: {self._model_info.path}",
+                file=sys.stderr,
+            )
+            print(
+                f"[MediaPipeHandEstimator] 下载命令: "
+                f"curl -L \"{self._model_info.download_url}\" "
+                f"-o \"{self._model_info.path}\"",
+                file=sys.stderr,
+            )
+
         self._backend_info: Optional[BackendInfo] = None
         self._last_timestamp_ms: int = -1
         self._timing_history: list[InferenceTiming] = []
 
+        # 会话统计
+        self._session_stats = SessionStats(model_info=self._model_info)
+
         # 初始化后端（含 fallback 逻辑）
         self._backend = self._create_backend()
+
+        # 记录初始化耗时
+        self._session_stats.init_time_ms = (time.perf_counter() - t_init_start) * 1000
+        self._session_stats.backend_info = self._backend_info
 
     # ---- 后端创建与选择 ----
 
@@ -348,9 +370,19 @@ class MediaPipeHandEstimator:
         return self._config
 
     @property
+    def model_info(self) -> ModelInfo:
+        """模型文件信息（含 SHA-256）。"""
+        return self._model_info
+
+    @property
     def backend_info(self) -> Optional[BackendInfo]:
         """实际使用的后端信息（含 fallback 记录）。"""
         return self._backend_info
+
+    @property
+    def session_stats(self) -> SessionStats:
+        """当前会话统计。"""
+        return self._session_stats
 
     @property
     def timing_history(self) -> list[InferenceTiming]:
@@ -390,8 +422,16 @@ class MediaPipeHandEstimator:
         """
         t_start = time.perf_counter()
 
+        # ---- 会话统计 ----
+        self._session_stats.total_frames += 1
+
         # ---- 输入校验 ----
-        self._validate_input(frame_rgb, timestamp_ms)
+        try:
+            self._validate_input(frame_rgb, timestamp_ms)
+        except ValueError:
+            self._session_stats.empty_frames += 1
+            self._session_stats.exception_frames += 1
+            raise
 
         # ---- 预处理 ----
         t_pre = time.perf_counter()
@@ -400,7 +440,11 @@ class MediaPipeHandEstimator:
 
         # ---- 后端推理 ----
         t_inf_start = time.perf_counter()
-        raw_result = self._backend.infer(frame_rgb, timestamp_ms)
+        try:
+            raw_result = self._backend.infer(frame_rgb, timestamp_ms)
+        except Exception:
+            self._session_stats.exception_frames += 1
+            raise
         t_inf_end = time.perf_counter()
 
         # ---- 后处理：统一转换为 RawHandResult ----
@@ -408,14 +452,32 @@ class MediaPipeHandEstimator:
 
         t_end = time.perf_counter()
 
+        # ---- 无手检测统计 ----
+        if len(results) == 0:
+            self._session_stats.no_hand_frames += 1
+        else:
+            self._session_stats.hand_frames += 1
+
+        # ---- 坐标校验（问题 4：确保像素坐标 / 归一化坐标不混淆） ----
+        self._validate_coordinate_convention(results, w, h)
+
         # ---- 记录耗时 ----
+        total_ms = (t_end - t_start) * 1000
         timing = InferenceTiming(
             preprocess_ms=(t_pre_end - t_pre) * 1000,
             inference_ms=(t_inf_end - t_inf_start) * 1000,
             postprocess_ms=(t_end - t_inf_end) * 1000,
-            total_ms=(t_end - t_start) * 1000,
+            total_ms=total_ms,
         )
         self._timing_history.append(timing)
+
+        # 累计推理耗时
+        self._session_stats.total_inference_ms += total_ms
+        if self._session_stats.total_frames > 0:
+            self._session_stats.avg_inference_ms = (
+                self._session_stats.total_inference_ms
+                / self._session_stats.total_frames
+            )
 
         self._last_timestamp_ms = timestamp_ms
 
@@ -448,6 +510,70 @@ class MediaPipeHandEstimator:
                 f"时间戳必须严格递增: "
                 f"当前 {timestamp_ms}ms ≤ 上一次 {self._last_timestamp_ms}ms"
             )
+
+    @staticmethod
+    def _validate_coordinate_convention(
+        results: list[RawHandResult],
+        image_width: int,
+        image_height: int,
+    ):
+        """校验坐标约定（问题 4）：确保像素/归一化坐标各司其职。
+
+        - pixel 坐标必须在 [0, image_width) / [0, image_height) 范围内
+        - normalized 坐标必须在 [0, 1] 范围内（允许微小浮点误差）
+        - 禁止将归一化坐标误写入 pixel 字段
+
+        校验失败时打印 stderr 警告，不抛异常。
+        """
+        for i, r in enumerate(results):
+            kp = r.keypoints
+            violation = False
+
+            # 像素坐标应在图像范围内
+            for j, (px, py) in enumerate(kp.pixel):
+                if px < -1 or px > image_width + 1 or py < -1 or py > image_height + 1:
+                    print(
+                        f"[MediaPipeHandEstimator] 坐标异常: "
+                        f"手#{i} kp[{j}] pixel=({px:.1f}, {py:.1f}) "
+                        f"超出图像范围 ({image_width}x{image_height})",
+                        file=sys.stderr,
+                    )
+                    violation = True
+
+            # 归一化坐标应在 [0,1] 范围
+            for j, (nx, ny, _nz) in enumerate(kp.normalized):
+                if nx < -0.01 or nx > 1.01 or ny < -0.01 or ny > 1.01:
+                    print(
+                        f"[MediaPipeHandEstimator] 坐标异常: "
+                        f"手#{i} kp[{j}] normalized=({nx:.4f}, {ny:.4f}) "
+                        f"超出 [0,1] 范围",
+                        file=sys.stderr,
+                    )
+                    violation = True
+
+            # 检测是否误将归一化坐标写入 pixel
+            pixel_values = [v for pt in kp.pixel for v in pt]
+            all_in_01 = all(0 <= v <= 1 for v in pixel_values)
+            if all_in_01 and (image_width > 2 and image_height > 2):
+                print(
+                    f"[MediaPipeHandEstimator] 坐标约定警告: "
+                    f"手#{i} 所有 pixel 坐标都在 [0,1] 内，"
+                    f"可能误将归一化坐标写入了 pixel 字段。",
+                    file=sys.stderr,
+                )
+
+            # 检测是否误将像素坐标写入 normalized
+            if (
+                kp.normalized
+                and abs(kp.normalized[0][0]) > 2.0
+                and abs(kp.normalized[0][1]) > 2.0
+            ):
+                print(
+                    f"[MediaPipeHandEstimator] 坐标约定警告: "
+                    f"手#{i} normalized 坐标值较大，"
+                    f"可能误将像素坐标写入了 normalized 字段。",
+                    file=sys.stderr,
+                )
 
     # ---- 统一结果转换 ----
 

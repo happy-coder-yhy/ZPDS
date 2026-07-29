@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 
@@ -27,6 +29,8 @@ class HandKeypoints:
     pixel: list[tuple[float, float]]                # 21× (px_x, px_y)
     has_visibility: bool = False
     visibility: list[float] = field(default_factory=list)  # 21×
+    any_clipped: bool = False                       # 是否有像素关键点被裁剪到图像边界
+    clipped_count: int = 0                          # 被裁剪的关键点数量
 
     def __post_init__(self):
         if len(self.normalized) != 21:
@@ -135,9 +139,14 @@ class RawHandResult:
 
             px = nx * image_width
             py = ny * image_height
-            pixel.append((px, py))
-            xs.append(px)
-            ys.append(py)
+
+            # 裁剪到图像边界（保留原始预测 + 记录 clipped flag）
+            px_clipped = max(0.0, min(float(image_width - 1), px))
+            py_clipped = max(0.0, min(float(image_height - 1), py))
+
+            pixel.append((px_clipped, py_clipped))
+            xs.append(px_clipped)
+            ys.append(py_clipped)
 
             # MediaPipe NormalizedLandmark 有 visibility 字段
             if hasattr(lm, "visibility") and lm.visibility is not None:
@@ -173,6 +182,12 @@ class RawHandResult:
         hand_label = handedness.category_name if handedness.category_name else "Unknown"
         hand_score = float(handedness.score) if handedness.score else 0.0
 
+        # ---- 检测关键点裁剪 ----
+        clipped_count = 0
+        for px, py in pixel:
+            if px <= 0 or px >= image_width - 1 or py <= 0 or py >= image_height - 1:
+                clipped_count += 1
+
         return cls(
             handedness=hand_label,
             handedness_score=hand_score,
@@ -181,6 +196,8 @@ class RawHandResult:
                 pixel=pixel,
                 has_visibility=has_visibility,
                 visibility=visibility,
+                any_clipped=clipped_count > 0,
+                clipped_count=clipped_count,
             ),
             bbox=bbox,
             detection_score=hand_score,
@@ -208,3 +225,80 @@ class BackendInfo:
     fallback_used: bool = False
     fallback_reason: str = ""
     delegate: str = ""
+
+
+@dataclass
+class ModelInfo:
+    """模型文件元信息。
+
+    Attributes:
+        path: 模型文件路径。
+        sha256: SHA-256 校验和。
+        size_bytes: 文件大小。
+        download_url: 官方下载地址。
+        exists: 文件是否存在。
+    """
+
+    path: str = ""
+    sha256: str = ""
+    size_bytes: int = 0
+    download_url: str = (
+        "https://storage.googleapis.com/mediapipe-models/"
+        "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+    )
+    exists: bool = False
+
+    @classmethod
+    def from_file(cls, model_path: str | Path) -> "ModelInfo":
+        """从模型文件路径构造，自动计算 SHA-256 和文件大小。
+
+        Args:
+            model_path: .task 模型文件路径。
+
+        Returns:
+            ModelInfo，exists=False 时 sha256 和 size_bytes 为 0。
+        """
+        path = Path(model_path)
+        if not path.is_file():
+            return cls(
+                path=str(path.resolve()),
+                exists=False,
+            )
+
+        size = path.stat().st_size
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        return cls(
+            path=str(path.resolve()),
+            sha256=sha,
+            size_bytes=size,
+            exists=True,
+        )
+
+
+@dataclass
+class SessionStats:
+    """单次推理会话统计。
+
+    Attributes:
+        total_frames: 总推理帧数。
+        empty_frames: 输入为空帧次数。
+        no_hand_frames: 无手检测帧数。
+        hand_frames: 检测到手帧数。
+        exception_frames: 异常帧数。
+        init_time_ms: 模型初始化耗时（毫秒）。
+        total_inference_ms: 累计推理耗时（毫秒）。
+        avg_inference_ms: 平均每帧推理耗时（毫秒）。
+        model_info: 模型文件信息。
+        backend_info: 后端运行信息。
+    """
+
+    total_frames: int = 0
+    empty_frames: int = 0
+    no_hand_frames: int = 0
+    hand_frames: int = 0
+    exception_frames: int = 0
+    init_time_ms: float = 0.0
+    total_inference_ms: float = 0.0
+    avg_inference_ms: float = 0.0
+    model_info: Optional[ModelInfo] = None
+    backend_info: Optional[BackendInfo] = None

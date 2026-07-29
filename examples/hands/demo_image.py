@@ -100,6 +100,18 @@ def main():
     print(f"  最大手数:     {estimator.config.num_hands}")
     print(f"  BBox 边距:    {estimator.config.bbox_padding_ratio}")
 
+    # ---- 打印模型信息 ----
+    mi = estimator.model_info
+    print(f"\n模型信息:")
+    print(f"  文件:         {mi.path}")
+    print(f"  存在:         {mi.exists}")
+    if mi.exists:
+        print(f"  大小:         {mi.size_bytes / 1024 / 1024:.1f} MB")
+        print(f"  SHA-256:      {mi.sha256[:16]}...")
+    else:
+        print(f"  下载地址:     {mi.download_url}")
+    print(f"  初始化耗时:   {estimator.session_stats.init_time_ms:.0f} ms")
+
     # ---- 加载/生成图片 ----
     if args.image:
         frame = cv2.imread(args.image)
@@ -145,6 +157,16 @@ def main():
     vis_bgr = cv2.cvtColor(vis_frame, cv2.COLOR_RGB2BGR)
     cv2.imwrite(str(output_path), vis_bgr)
     print(f"\n可视化结果: {output_path}")
+
+    # ---- 会话统计 ----
+    stats = estimator.session_stats
+    print(f"\n会话统计:")
+    print(f"  总帧数:       {stats.total_frames}")
+    print(f"  有手帧:       {stats.hand_frames}")
+    print(f"  无手帧:       {stats.no_hand_frames}")
+    print(f"  异常帧:       {stats.exception_frames}")
+    print(f"  总推理耗时:   {stats.total_inference_ms:.1f} ms")
+    print(f"  平均耗时:     {stats.avg_inference_ms:.1f} ms")
 
     estimator.close()
     print("完成。")
