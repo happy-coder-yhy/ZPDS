@@ -3,6 +3,8 @@ datasets/
 .claude/
 .idea/
 .venv/
+.uv-cache/
+.cache/
 .pytest_cache/
 .pytest-tmp*/
 __pycache__/

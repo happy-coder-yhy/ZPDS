@@ -37,7 +37,7 @@ mcap = [
     "foxglove-schemas-protobuf>=0.1",
 ]
 hdf5 = ["h5py>=3.9"]
-hands = ["torch>=2.0", "torchvision>=0.15"]
+hands = ["mediapipe>=0.10"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
