@@ -160,7 +160,7 @@ def generate_hands_preview(
     Args:
         segment_dir: Prepared Segment 目录 (包含 segment.json)
         hands_parquet_path: hands_2d.parquet 文件路径
-        output_path: 输出 MP4 路径，默认 segment_dir/previews/hands_preview.mp4
+        output_path: 输出 MP4 路径，默认 output/hand_preview/<segment>_hands_preview.mp4
         video_stream_id: 视频流 ID，默认自动选择第一个 rgb 流
         target_fps: 输出帧率，默认使用源视频帧率
 

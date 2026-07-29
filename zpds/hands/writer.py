@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict, is_dataclass
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -37,10 +40,17 @@ PARQUET_COLUMNS = [
     "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
     "keypoints_2d",
     "keypoints_z_relative",
+    "keypoints_any_clipped",
+    "keypoints_clipped_count",
     "model_name",
     "model_version",
     "checkpoint_sha256",
     "config_sha256",
+    "backend_requested",
+    "backend_active",
+    "backend_fallback_used",
+    "backend_fallback_reason",
+    "backend_delegate",
 ]
 
 # 手部关键点连线（MediaPipe Hand Landmarks 官方拓扑），用于可视化。
@@ -61,6 +71,7 @@ def _dict_to_row(
     detection_id: int,
     prep_revision: str,
     model_meta: dict | None = None,
+    run_meta: dict | None = None,
 ) -> dict:
     """将单只手的检测结果展平为一行 Parquet 数据。"""
     kp_pixel = hand.keypoints.pixel          # [(x, y), ...] 21个
@@ -83,10 +94,17 @@ def _dict_to_row(
         "bbox_y2": float(hand.bbox.y2),
         "keypoints_2d": [[float(x), float(y)] for (x, y) in kp_pixel],
         "keypoints_z_relative": [float(z) for (_, _, z) in kp_normalized],
+        "keypoints_any_clipped": bool(hand.keypoints.any_clipped),
+        "keypoints_clipped_count": int(hand.keypoints.clipped_count),
         "model_name": (model_meta or {}).get("model_name", ""),
         "model_version": (model_meta or {}).get("model_version", ""),
         "checkpoint_sha256": (model_meta or {}).get("checkpoint_sha256", ""),
         "config_sha256": (model_meta or {}).get("config_sha256", ""),
+        "backend_requested": (run_meta or {}).get("backend_requested", ""),
+        "backend_active": (run_meta or {}).get("backend_active", ""),
+        "backend_fallback_used": bool((run_meta or {}).get("backend_fallback_used", False)),
+        "backend_fallback_reason": (run_meta or {}).get("backend_fallback_reason", ""),
+        "backend_delegate": (run_meta or {}).get("backend_delegate", ""),
     }
     return row
 
@@ -96,6 +114,7 @@ def write_hands_parquet(
     output_path: str,
     prep_revision: str = "r0001",
     model_meta: dict | None = None,
+    run_meta: dict | None = None,
 ) -> str:
     """将逐帧检测结果写入 hands_2d.parquet。
 
@@ -117,6 +136,8 @@ def write_hands_parquet(
         output_path: 输出 .parquet 文件路径
         prep_revision: Prepared Revision 标识
         model_meta: {"model_name", "model_version", "checkpoint_sha256", "config_sha256"}
+        run_meta: {"backend_requested", "backend_active", "backend_fallback_used",
+            "backend_fallback_reason", "backend_delegate"}
 
     Returns:
         写入的文件路径
@@ -126,7 +147,9 @@ def write_hands_parquet(
         frame_meta = obs["frame_meta"]
         hands = obs.get("hands", [])
         for det_id, hand in enumerate(hands):
-            rows.append(_dict_to_row(frame_meta, hand, det_id, prep_revision, model_meta))
+            rows.append(
+                _dict_to_row(frame_meta, hand, det_id, prep_revision, model_meta, run_meta)
+            )
 
     df = pd.DataFrame(rows, columns=PARQUET_COLUMNS)
 
@@ -145,3 +168,68 @@ def compute_config_sha256(config: dict) -> str:
     """计算配置字典的 SHA-256 摘要（用于可追溯性）。"""
     raw = json.dumps(config, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def estimator_provenance(estimator: Any, config: dict | None = None) -> tuple[dict, dict]:
+    """Build Parquet and run-report provenance from a MediaPipe estimator.
+
+    The estimator deliberately remains duck-typed here so Writer does not depend on
+    a particular backend implementation.  This permits an alternative estimator to
+    provide the same public ``model_info`` and ``backend_info`` properties.
+    """
+    model_info = _as_plain_dict(getattr(estimator, "model_info", None))
+    backend_info = _as_plain_dict(getattr(estimator, "backend_info", None))
+    session_stats = _as_plain_dict(getattr(estimator, "session_stats", None))
+
+    model_meta = {
+        "model_name": _model_name(backend_info.get("active_backend", "")),
+        "model_version": _mediapipe_version(),
+        "checkpoint_sha256": model_info.get("sha256", ""),
+        "config_sha256": compute_config_sha256(config) if config is not None else "",
+    }
+    run_meta = {
+        "backend_requested": backend_info.get("requested_backend", ""),
+        "backend_active": backend_info.get("active_backend", ""),
+        "backend_fallback_used": backend_info.get("fallback_used", False),
+        "backend_fallback_reason": backend_info.get("fallback_reason", ""),
+        "backend_delegate": backend_info.get("delegate", ""),
+    }
+    report = {
+        "model": model_info,
+        "backend": backend_info,
+        "session_statistics": session_stats,
+        "config_sha256": model_meta["config_sha256"],
+    }
+    return {**model_meta, **run_meta}, report
+
+
+def write_hands_run_report(report: dict, output_path: str) -> str:
+    """Write segment-level estimator provenance and timing statistics as JSON."""
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return str(out.resolve())
+
+
+def _as_plain_dict(value: Any) -> dict:
+    if value is None:
+        return {}
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, dict):
+        return dict(value)
+    raise TypeError(f"Expected a dataclass or dict, got {type(value).__name__}")
+
+
+def _model_name(active_backend: str) -> str:
+    return f"mediapipe_{active_backend}" if active_backend else "mediapipe"
+
+
+def _mediapipe_version() -> str:
+    try:
+        return version("mediapipe")
+    except PackageNotFoundError:
+        return ""
