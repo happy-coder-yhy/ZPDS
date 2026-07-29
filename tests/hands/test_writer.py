@@ -6,7 +6,12 @@ from pathlib import Path
 import pandas as pd
 
 from zpds.hands.base import HandBBox, HandKeypoints, RawHandResult
-from zpds.hands.writer import compute_config_sha256, write_hands_parquet
+from zpds.hands.schemas import HandObservation
+from zpds.hands.writer import (
+    compute_config_sha256,
+    write_hand_observations,
+    write_hands_parquet,
+)
 
 
 def _make_hand(handedness="Right", score=0.95):
@@ -103,3 +108,73 @@ class TestWriter:
         h3 = compute_config_sha256({"hands": {"num_hands": 2, "model": "mediapipe"}})
         assert h1 == h2
         assert h1 == h3  # sort_keys 保证顺序无关
+
+    def test_write_pipeline_observation(self):
+        observation = HandObservation(
+            segment_id="seg_000001",
+            video_stream_id="ego_rgb",
+            output_frame_index=7,
+            timestamp_ns=233_333_331,
+            source_frame_index=None,
+            source_timestamp_ns=None,
+            detection_id=0,
+            handedness="left",
+            handedness_score=0.92,
+            bbox_xyxy=(80.0, 180.0, 320.0, 380.0),
+            keypoints_2d=[
+                (100.0 + index * 5, 200.0 + index * 5)
+                for index in range(21)
+            ],
+            keypoints_z_relative=[-index / 100.0 for index in range(21)],
+            model_name="mediapipe",
+            model_version="0.10.14",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            path = write_hand_observations(
+                [observation],
+                Path(td) / "hands_2d.parquet",
+                prep_revision="r0002",
+                checkpoint_sha256="model-hash",
+                config_sha256="config-hash",
+            )
+            row = pd.read_parquet(path).iloc[0]
+
+            assert row["prep_revision"] == "r0002"
+            assert row["handedness"] == "Left"
+            assert pd.isna(row["source_frame_index"])
+            assert row["checkpoint_sha256"] == "model-hash"
+            assert row["config_sha256"] == "config-hash"
+            assert len(row["keypoints_2d"]) == 21
+
+    def test_write_empty_pipeline_observations(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = write_hand_observations(
+                [],
+                Path(td) / "hands_2d.parquet",
+            )
+
+            df = pd.read_parquet(path)
+            assert df.empty
+            assert list(df.columns) == [
+                "prep_revision",
+                "segment_id",
+                "video_stream_id",
+                "output_frame_index",
+                "timestamp_ns",
+                "source_frame_index",
+                "source_timestamp_ns",
+                "detection_id",
+                "handedness",
+                "handedness_score",
+                "bbox_x1",
+                "bbox_y1",
+                "bbox_x2",
+                "bbox_y2",
+                "keypoints_2d",
+                "keypoints_z_relative",
+                "model_name",
+                "model_version",
+                "checkpoint_sha256",
+                "config_sha256",
+            ]

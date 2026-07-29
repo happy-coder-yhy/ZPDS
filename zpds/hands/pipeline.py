@@ -92,15 +92,19 @@ class HandsPipeline:
         *,
         model_name: str,
         model_version: str,
+        max_frames: int | None = None,
     ) -> None:
         if not model_name.strip():
             raise ValueError("model_name 不能为空")
         if not model_version.strip():
             raise ValueError("model_version 不能为空")
+        if max_frames is not None and max_frames <= 0:
+            raise ValueError("max_frames 必须大于 0")
         self._reader = reader
         self._estimator = estimator
         self._model_name = model_name
         self._model_version = model_version
+        self._max_frames = max_frames
         self._stats = PipelineStats()
         self._started = False
 
@@ -125,6 +129,11 @@ class HandsPipeline:
 
         try:
             for frame in self._reader:
+                if (
+                    self._max_frames is not None
+                    and frames_processed >= self._max_frames
+                ):
+                    break
                 timestamp_ms = self._model_timestamp_ms(
                     frame.timestamp_ns,
                     previous_timestamp_ms,

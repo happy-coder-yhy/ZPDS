@@ -121,6 +121,34 @@ def test_pipeline_handles_frames_without_hands() -> None:
     assert pipeline.stats.average_fps > 0
 
 
+def test_pipeline_stops_after_max_frames() -> None:
+    frames = [_frame(index, index * 33_333_333) for index in range(4)]
+    estimator = FakeEstimator([[], [], [], []])
+    pipeline = HandsPipeline(
+        reader=FakeReader(frames),
+        estimator=estimator,
+        model_name="mediapipe",
+        model_version="hand_landmarker_v1",
+        max_frames=2,
+    )
+
+    assert list(pipeline) == []
+    assert estimator.timestamps_ms == [0, 33]
+    assert pipeline.stats.frames_processed == 2
+
+
+@pytest.mark.parametrize("max_frames", [0, -1])
+def test_pipeline_rejects_invalid_max_frames(max_frames: int) -> None:
+    with pytest.raises(ValueError, match="max_frames"):
+        HandsPipeline(
+            reader=FakeReader([_frame(0, 0)]),
+            estimator=FakeEstimator([[]]),
+            model_name="mediapipe",
+            model_version="hand_landmarker_v1",
+            max_frames=max_frames,
+        )
+
+
 def test_pipeline_converts_raw_result_and_preserves_provenance() -> None:
     pipeline, _ = _pipeline(
         [

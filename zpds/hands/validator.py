@@ -8,7 +8,7 @@ Hands Validator。
   2. 必需字段存在且类型正确
   3. keypoints_2d 为 21×2 向量，无 NaN/Inf
   4. BBox 坐标合法 (x1<x2, y1<y2)
-  5. handedness ∈ {Left, Right}
+  5. handedness ∈ {Left, Right, Unknown}
   6. 置信度 ∈ [0, 1]
   7. output_frame_index 非负且有限
   8. timestamp_ns 在 Segment 范围内 (若提供 segment.json)
@@ -211,7 +211,7 @@ def validate_hands_parquet(
     stats["bbox_count"] = int((~df[["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]].isna().any(axis=1)).sum())
 
     # ---- 5. handedness 合法 ----
-    valid_hands = df["handedness"].isin(["Left", "Right"])
+    valid_hands = df["handedness"].isin(["Left", "Right", "Unknown"])
     checks["handedness_valid"] = "pass" if valid_hands.all() else "fail"
     if not valid_hands.all():
         bad = df.loc[~valid_hands, "handedness"].unique().tolist()
@@ -234,7 +234,7 @@ def validate_hands_parquet(
             f"output_frame_index invalid: min={ofi.min()}, "
             f"has_nan={ofi.isna().any()}"
         )
-    stats["frame_range"] = [int(ofi.min()), int(ofi.max())]
+    stats["frame_range"] = None if df.empty else [int(ofi.min()), int(ofi.max())]
 
     # ---- 8. timestamp_ns 范围 ----
     if segment_json_path and Path(segment_json_path).exists():

@@ -74,6 +74,14 @@ class TestValidator:
             result = validate_hands_parquet(path)
             assert result["status"] == "fail"
 
+    def test_unknown_handedness_is_valid(self):
+        row = _valid_row()
+        row["handedness"] = "Unknown"
+        with tempfile.TemporaryDirectory() as td:
+            path = _make_parquet(Path(td) / "hands.parquet", [row])
+            result = validate_hands_parquet(path)
+            assert result["checks"]["handedness_valid"] == "pass"
+
     def test_score_out_of_range_fails(self):
         row = _valid_row()
         row["handedness_score"] = 1.5
