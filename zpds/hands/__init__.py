@@ -1,5 +1,6 @@
 """手部与操作检测。"""
 
+from zpds.hands.config import HandsOutputPaths, HandsPipelineConfig
 from zpds.hands.pipeline import (
     HandEstimator,
     HandsPipeline,
@@ -31,7 +32,9 @@ __all__ = [
     "HandKeypoints",
     "HandObservation",
     "Handedness",
+    "HandsOutputPaths",
     "HandsPipeline",
+    "HandsPipelineConfig",
     "HandsPipelineError",
     "PipelineStats",
     "PreparedFrame",

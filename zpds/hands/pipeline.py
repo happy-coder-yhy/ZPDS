@@ -112,6 +112,14 @@ class HandsPipeline:
     def stats(self) -> PipelineStats:
         return self._stats
 
+    def run_to_list(self) -> list[HandObservation]:
+        """完整运行 Pipeline 并返回截图约定的 ``list[HandObservation]``。
+
+        大数据生产写出仍建议直接把 Pipeline 作为迭代器交给 Writer，以减少
+        中间结果驻留内存。
+        """
+        return list(self)
+
     def __iter__(self) -> Iterator[HandObservation]:
         if self._started:
             raise HandsPipelineError(

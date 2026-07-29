@@ -121,6 +121,19 @@ def test_pipeline_handles_frames_without_hands() -> None:
     assert pipeline.stats.average_fps > 0
 
 
+def test_pipeline_can_return_observation_list() -> None:
+    pipeline, _ = _pipeline(
+        [_frame(0, 0)],
+        [[_raw_hand("Left")]],
+    )
+
+    observations = pipeline.run_to_list()
+
+    assert isinstance(observations, list)
+    assert len(observations) == 1
+    assert observations[0].handedness == "left"
+
+
 def test_pipeline_stops_after_max_frames() -> None:
     frames = [_frame(index, index * 33_333_333) for index in range(4)]
     estimator = FakeEstimator([[], [], [], []])

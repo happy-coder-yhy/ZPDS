@@ -8,18 +8,19 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import cv2
 import mediapipe
-import yaml
 
+from zpds.hands.config import HandsOutputPaths, HandsPipelineConfig
+from zpds.hands.experience import write_hands_experience_manifest
 from zpds.hands.mediapipe_adapter import (
-    HandEstimatorConfig,
     MediaPipeHandEstimator,
 )
 from zpds.hands.pipeline import HandsPipeline
 from zpds.hands.preview import generate_hands_preview
 from zpds.hands.segment_reader import PreparedSegmentReader
 from zpds.hands.validator import validate_hands_parquet
-from zpds.hands.writer import compute_config_sha256, write_hand_observations
+from zpds.hands.writer import write_hand_observations
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,6 +36,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖配置文件中的模型后端",
     )
     parser.add_argument("--output", help="hands_2d.parquet 输出路径")
+    parser.add_argument(
+        "--experience-dir",
+        help="按 Experience 标准目录写出；不能与各类 --*-output 同时使用",
+    )
+    parser.add_argument(
+        "--experience-version",
+        help="Experience 版本；默认使用 --experience-dir 目录名",
+    )
     parser.add_argument("--prep-revision", help="覆盖 Prepared Revision")
     parser.add_argument(
         "--max-frames",
@@ -59,16 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--preview-output",
         help="预览视频路径，默认与 Parquet 同目录",
     )
+    parser.add_argument(
+        "--manifest-output",
+        help="运行清单路径，默认与 Parquet 同目录",
+    )
     return parser
-
-
-def _load_yaml(path: str | Path) -> dict[str, Any]:
-    config_path = Path(path)
-    with config_path.open(encoding="utf-8") as file:
-        data = yaml.safe_load(file)
-    if not isinstance(data, dict):
-        raise TypeError(f"配置文件顶层必须是对象: {config_path}")
-    return data
 
 
 def _read_segment_json(segment_dir: Path) -> dict[str, Any]:
@@ -96,6 +100,7 @@ def _default_output_path(
 def _image_dimensions(
     segment: dict[str, Any],
     video_stream_id: str,
+    segment_dir: Path | None = None,
 ) -> tuple[int | None, int | None]:
     stream = next(
         (
@@ -107,23 +112,41 @@ def _image_dimensions(
     )
     if not isinstance(stream, dict):
         return None, None
+    if segment_dir is not None:
+        uri = stream.get("uri")
+        if isinstance(uri, str):
+            capture = cv2.VideoCapture(str(segment_dir / uri))
+            try:
+                width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            finally:
+                capture.release()
+            if width > 0 and height > 0:
+                return width, height
     shape = stream.get("shape")
     if not isinstance(shape, list) or len(shape) < 2:
         return None, None
     return int(shape[1]), int(shape[0])
 
 
+def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
+    """原子写入 JSON，避免任务中断留下半份报告。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_path.write_text(
+        json.dumps(document, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
 def run(args: argparse.Namespace) -> int:
     segment_dir = Path(args.segment).expanduser().resolve()
     config_path = Path(args.config).expanduser().resolve()
-    config_data = _load_yaml(config_path)
-    estimator_config = HandEstimatorConfig.from_yaml(config_path)
-    if args.backend:
-        estimator_config.backend = args.backend
-        hands_config = config_data.setdefault("hands", {})
-        if not isinstance(hands_config, dict):
-            raise ValueError("配置中的 hands 必须是对象")
-        hands_config["backend"] = args.backend
+    runtime_config = HandsPipelineConfig.load(
+        config_path,
+        backend_override=args.backend,
+    )
 
     reader = PreparedSegmentReader(
         segment_dir,
@@ -134,13 +157,48 @@ def run(args: argparse.Namespace) -> int:
         args.prep_revision
         or str(segment.get("record_revision") or "r0001")
     )
-    output_path = (
-        Path(args.output).expanduser()
-        if args.output
-        else _default_output_path(reader.segment_id, reader.video_stream_id)
-    ).resolve()
+    experience_dir_value = getattr(args, "experience_dir", None)
+    experience_version = getattr(args, "experience_version", None)
+    if experience_dir_value:
+        conflicting_outputs = [
+            name
+            for name in (
+                "output",
+                "report_output",
+                "preview_output",
+                "manifest_output",
+            )
+            if getattr(args, name, None)
+        ]
+        if conflicting_outputs:
+            option_names = [
+                f"--{name.replace('_', '-')}"
+                for name in conflicting_outputs
+            ]
+            raise ValueError(
+                "--experience-dir 不能与以下参数同时使用: "
+                f"{', '.join(option_names)}"
+            )
+        output_paths = HandsOutputPaths.experience(experience_dir_value)
+    else:
+        output_path = (
+            Path(args.output).expanduser()
+            if args.output
+            else _default_output_path(
+                reader.segment_id,
+                reader.video_stream_id,
+            )
+        ).resolve()
+        output_paths = HandsOutputPaths(
+            parquet=output_path,
+            validation_report=output_path.with_name("hands_validation.json"),
+            preview=output_path.with_name("hands_preview.mp4"),
+            run_manifest=output_path.with_name("hands_run.json"),
+        )
+    output_path = output_paths.parquet
+    config_sha256 = runtime_config.config_sha256
 
-    with MediaPipeHandEstimator.from_config(estimator_config) as estimator:
+    with MediaPipeHandEstimator.from_config(runtime_config.estimator) as estimator:
         pipeline = HandsPipeline(
             reader,
             estimator,
@@ -153,7 +211,7 @@ def run(args: argparse.Namespace) -> int:
             output_path,
             prep_revision=prep_revision,
             checkpoint_sha256=estimator.model_info.sha256,
-            config_sha256=compute_config_sha256(config_data),
+            config_sha256=config_sha256,
         )
         backend_name = (
             estimator.backend_info.active_backend
@@ -169,13 +227,27 @@ def run(args: argparse.Namespace) -> int:
             f"frames_with_hands={pipeline.stats.frames_with_hands}, "
             f"fps={pipeline.stats.average_fps:.2f}"
         )
+        run_statistics = {
+            "frames_processed": pipeline.stats.frames_processed,
+            "observations_created": pipeline.stats.observations_created,
+            "frames_with_hands": pipeline.stats.frames_with_hands,
+            "average_fps": pipeline.stats.average_fps,
+        }
+        checkpoint_sha256 = estimator.model_info.sha256
 
     validation_status: str | None = None
+    report_path: Path | None = None
+    declared_image_dimensions = _image_dimensions(
+        segment,
+        reader.video_stream_id,
+    )
+    actual_image_dimensions = _image_dimensions(
+        segment,
+        reader.video_stream_id,
+        segment_dir,
+    )
     if args.validate:
-        image_width, image_height = _image_dimensions(
-            segment,
-            reader.video_stream_id,
-        )
+        image_width, image_height = actual_image_dimensions
         report = validate_hands_parquet(
             parquet_path,
             segment_json_path=str(segment_dir / "segment.json"),
@@ -185,22 +257,19 @@ def run(args: argparse.Namespace) -> int:
         report_path = (
             Path(args.report_output).expanduser()
             if args.report_output
-            else output_path.with_name("hands_validation.json")
+            else output_paths.validation_report
         ).resolve()
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(
-            json.dumps(report, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_json_atomic(report_path, report)
         validation_status = str(report["status"])
         print(f"Validation: {validation_status}")
         print(f"Report: {report_path}")
 
+    generated_preview: str | None = None
     if args.preview:
         preview_path = (
             Path(args.preview_output).expanduser()
             if args.preview_output
-            else output_path.with_name("hands_preview.mp4")
+            else output_paths.preview
         ).resolve()
         preview_path.parent.mkdir(parents=True, exist_ok=True)
         generated_preview = generate_hands_preview(
@@ -211,7 +280,60 @@ def run(args: argparse.Namespace) -> int:
         )
         print(f"Preview: {generated_preview}")
 
-    return 2 if validation_status == "fail" else 0
+    manifest_path = (
+        Path(args.manifest_output).expanduser()
+        if args.manifest_output
+        else output_paths.run_manifest
+    ).resolve()
+    exit_code = 2 if validation_status == "fail" else 0
+    _write_json_atomic(
+        manifest_path,
+        {
+            "schema_version": 1,
+            "completed": exit_code == 0,
+            "segment_id": reader.segment_id,
+            "video_stream_id": reader.video_stream_id,
+            "prep_revision": prep_revision,
+            "backend": backend_name,
+            "config_sha256": config_sha256,
+            "checkpoint_sha256": checkpoint_sha256,
+            "max_frames": args.max_frames,
+            "image_dimensions": {
+                "declared_width": declared_image_dimensions[0],
+                "declared_height": declared_image_dimensions[1],
+                "actual_width": actual_image_dimensions[0],
+                "actual_height": actual_image_dimensions[1],
+                "metadata_matches_video": (
+                    declared_image_dimensions == actual_image_dimensions
+                ),
+            },
+            "statistics": run_statistics,
+            "validation_status": validation_status,
+            "outputs": {
+                "parquet": parquet_path,
+                "validation_report": str(report_path) if report_path else None,
+                "preview": generated_preview,
+            },
+        },
+    )
+    print(f"Manifest: {manifest_path}")
+    if experience_dir_value:
+        manifest = write_hands_experience_manifest(
+            experience_dir=experience_dir_value,
+            experience_version=(
+                experience_version
+                or Path(experience_dir_value).expanduser().resolve().name
+            ),
+            segment_id=reader.segment_id,
+            video_stream_id=reader.video_stream_id,
+            outputs=output_paths,
+            prep_revision=prep_revision,
+            config_sha256=config_sha256,
+            checkpoint_sha256=checkpoint_sha256,
+            validation_status=validation_status,
+        )
+        print(f"Experience: {manifest}")
+    return exit_code
 
 
 def main(argv: list[str] | None = None) -> int:

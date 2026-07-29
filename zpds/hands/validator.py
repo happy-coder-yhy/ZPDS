@@ -238,7 +238,7 @@ def validate_hands_parquet(
 
     # ---- 8. timestamp_ns 范围 ----
     if segment_json_path and Path(segment_json_path).exists():
-        with open(segment_json_path) as f:
+        with open(segment_json_path, encoding="utf-8") as f:
             seg = json.load(f)
         timeline_end = seg["timeline"]["end_ns"]
         ts = df["timestamp_ns"]
@@ -254,7 +254,7 @@ def validate_hands_parquet(
     source_fields = ["model_name", "model_version", "checkpoint_sha256", "config_sha256"]
     has_source = all(f in df.columns for f in source_fields)
     if has_source:
-        missing_source = (df["model_name"] == "").all()
+        missing_source = not df.empty and (df["model_name"] == "").all()
         checks["provenance_complete"] = "warn" if missing_source else "pass"
         if missing_source:
             warnings.append("Model provenance fields are empty")

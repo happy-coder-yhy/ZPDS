@@ -118,3 +118,24 @@ class TestValidator:
     def test_nonexistent_file_fails(self):
         result = validate_hands_parquet("/nonexistent/path.parquet")
         assert result["status"] == "fail"
+
+    def test_segment_json_is_read_as_utf8(self):
+        row = _valid_row()
+        with tempfile.TemporaryDirectory() as td:
+            parquet_path = _make_parquet(
+                Path(td) / "hands.parquet",
+                [row],
+            )
+            segment_path = Path(td) / "segment.json"
+            segment_path.write_text(
+                '{"source_session":{"session_id":"机械臂"},'
+                '"timeline":{"end_ns":1000000000}}',
+                encoding="utf-8",
+            )
+
+            result = validate_hands_parquet(
+                parquet_path,
+                segment_json_path=str(segment_path),
+            )
+
+            assert result["checks"]["timestamp_in_segment"] == "pass"

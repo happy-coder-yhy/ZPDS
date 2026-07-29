@@ -7,6 +7,7 @@ import pandas as pd
 
 from zpds.hands.base import HandBBox, HandKeypoints, RawHandResult
 from zpds.hands.schemas import HandObservation
+from zpds.hands.validator import validate_hands_parquet
 from zpds.hands.writer import (
     compute_config_sha256,
     write_hand_observations,
@@ -156,6 +157,7 @@ class TestWriter:
 
             df = pd.read_parquet(path)
             assert df.empty
+            assert validate_hands_parquet(path)["status"] == "pass"
             assert list(df.columns) == [
                 "prep_revision",
                 "segment_id",
