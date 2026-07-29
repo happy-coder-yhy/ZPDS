@@ -18,12 +18,10 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
 from zpds.hands.base import RawHandResult
-
 
 # ---- 配置 ----
 
@@ -50,7 +48,7 @@ class HandEstimatorConfig:
     bbox_padding_ratio: float = 0.10
 
     @classmethod
-    def from_yaml(cls, yaml_path: str | Path) -> "HandEstimatorConfig":
+    def from_yaml(cls, yaml_path: str | Path) -> HandEstimatorConfig:
         """从 YAML 配置文件加载。期望顶层 ``hands:`` 键。"""
         import yaml
 
@@ -168,6 +166,7 @@ class MediaPipeHandEstimator:
         options = mp.tasks.vision.HandLandmarkerOptions(
             base_options=mp.tasks.BaseOptions(
                 model_asset_path=str(self._model_path.resolve()),
+                delegate=mp.tasks.BaseOptions.Delegate.CPU,
             ),
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
             num_hands=num_hands,
@@ -280,7 +279,7 @@ class MediaPipeHandEstimator:
         if frame_rgb is None:
             raise ValueError("输入帧为 None")
         if not isinstance(frame_rgb, np.ndarray):
-            raise ValueError(f"输入帧不是 numpy 数组，类型: {type(frame_rgb)}")
+            raise TypeError(f"输入帧不是 numpy 数组，类型: {type(frame_rgb)}")
         if frame_rgb.size == 0:
             raise ValueError("输入帧为空（size=0）")
         if frame_rgb.ndim != 3:
@@ -360,7 +359,7 @@ class MediaPipeHandEstimator:
             )
 
     @classmethod
-    def from_config(cls, config: HandEstimatorConfig) -> "MediaPipeHandEstimator":
+    def from_config(cls, config: HandEstimatorConfig) -> MediaPipeHandEstimator:
         """从 HandEstimatorConfig 实例构造。"""
         return cls(
             model_path=config.model_path,
@@ -372,7 +371,7 @@ class MediaPipeHandEstimator:
         )
 
     @classmethod
-    def from_yaml(cls, yaml_path: str | Path) -> "MediaPipeHandEstimator":
+    def from_yaml(cls, yaml_path: str | Path) -> MediaPipeHandEstimator:
         """从 YAML 配置文件构造。"""
         config = HandEstimatorConfig.from_yaml(yaml_path)
         return cls.from_config(config)
