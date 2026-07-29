@@ -48,13 +48,24 @@ dunjia:
 
 # ---- 手部检测 ----
 hands:
-  model: mediapipe
-  model_path: models/mediapipe/hand_landmarker.task
+  backend: tasks_hand_landmarker      # auto / tasks_hand_landmarker / solutions_hands
+  fallback_backend: solutions_hands  # auto 模式回退目标
+
   num_hands: 2
   min_hand_detection_confidence: 0.5
   min_hand_presence_confidence: 0.5
   min_tracking_confidence: 0.5
   bbox_padding_ratio: 0.10
+
+  # Tasks API 后端（新版，需 .task 模型文件）
+  tasks:
+    model_path: models/mediapipe/hand_landmarker.task
+    delegate: cpu                   # cpu / gpu
+
+  # Solutions 经典后端（兼容性好，不需额外模型文件）
+  solutions:
+    model_complexity: 1             # 0=轻量, 1=完整
+    input_mirrored: false           # 非自拍画面设为 false
 
 # ---- Segment 约束 ----
 segment:

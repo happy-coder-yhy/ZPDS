@@ -186,3 +186,25 @@ class RawHandResult:
             detection_score=hand_score,
             label=f"hand_{hand_index}",
         )
+
+
+@dataclass
+class BackendInfo:
+    """后端运行时信息。
+
+    记录本次推理实际使用的后端及 fallback 情况，
+    便于事后分析不同后端的输出差异。
+
+    Attributes:
+        requested_backend: 配置请求的后端名称。
+        active_backend: 实际激活的后端名称。
+        fallback_used: 是否触发了 fallback。
+        fallback_reason: fallback 原因（未触发时为空）。
+        delegate: Tasks 后端使用的 delegate 类型。
+    """
+
+    requested_backend: str = ""
+    active_backend: str = ""
+    fallback_used: bool = False
+    fallback_reason: str = ""
+    delegate: str = ""

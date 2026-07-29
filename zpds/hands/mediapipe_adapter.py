@@ -1,14 +1,21 @@
 """
-MediaPipe Hand Landmarker 适配器。
+MediaPipe 手部检测统一适配层。
 
-将 MediaPipe Tasks API 的输出统一转换为 RawHandResult，
-提供配置驱动的初始化、单帧推理和资源管理。
+根据配置选择后端（Tasks / Solutions），对上层提供单一接口：
+
+    estimator.estimate(frame_rgb, timestamp_ms) → list[RawHandResult]
+
+支持三种后端模式：
+- tasks_hand_landmarker: 强制使用新版 Tasks API
+- solutions_hands: 强制使用经典 legacy API
+- auto: 优先 Tasks，初始化失败时自动回退到 Solutions
 
 用法:
     from zpds.hands.mediapipe_adapter import MediaPipeHandEstimator
 
-    estimator = MediaPipeHandEstimator(model_path="models/mediapipe/hand_landmarker.task")
+    estimator = MediaPipeHandEstimator.from_yaml("config.yaml")
     results = estimator.estimate(frame_rgb, timestamp_ms=0)
+    print(estimator.backend_info)  # 查看实际使用的后端
     estimator.close()
 """
 
@@ -16,12 +23,14 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
-from zpds.hands.base import RawHandResult
+from zpds.hands.base import BackendInfo, RawHandResult
+
 
 # ---- 配置 ----
 
@@ -30,25 +39,34 @@ class HandEstimatorConfig:
     """手部估计器配置。
 
     Attributes:
-        model: 模型后端名称（"mediapipe"）。
-        model_path: .task 模型文件路径。
+        backend: 后端选择 ("auto" | "tasks_hand_landmarker" | "solutions_hands")。
+        fallback_backend: auto 模式回退目标（当前仅 "solutions_hands"）。
         num_hands: 最大检测手数。
         min_hand_detection_confidence: 手掌检测最低置信度。
-        min_hand_presence_confidence: 手部存在最低置信度。
-        min_tracking_confidence: 手部跟踪最低置信度。
-        bbox_padding_ratio: BBox 边距扩展比例。
+        min_hand_presence_confidence: 手部存在最低置信度（仅 Tasks 支持）。
+        min_tracking_confidence: 跟踪最低置信度。
+        bbox_padding_ratio: BBox 边距比例。
+        tasks: Tasks 后端专属配置。
+        solutions: Solutions 后端专属配置。
     """
 
-    model: str = "mediapipe"
-    model_path: str = "models/mediapipe/hand_landmarker.task"
+    # ---- 后端选择 ----
+    backend: str = "auto"
+    fallback_backend: str = "solutions_hands"
+
+    # ---- 通用参数 ----
     num_hands: int = 2
     min_hand_detection_confidence: float = 0.5
     min_hand_presence_confidence: float = 0.5
     min_tracking_confidence: float = 0.5
     bbox_padding_ratio: float = 0.10
 
+    # ---- 后端专属 ----
+    tasks: _TasksConfig = field(default_factory=lambda: _TasksConfig())
+    solutions: _SolutionsConfig = field(default_factory=lambda: _SolutionsConfig())
+
     @classmethod
-    def from_yaml(cls, yaml_path: str | Path) -> HandEstimatorConfig:
+    def from_yaml(cls, yaml_path: str | Path) -> "HandEstimatorConfig":
         """从 YAML 配置文件加载。期望顶层 ``hands:`` 键。"""
         import yaml
 
@@ -63,9 +81,14 @@ class HandEstimatorConfig:
             raise ValueError(f"配置文件为空: {path.resolve()}")
 
         hands_cfg = data.get("hands", data)
+
+        # 解析子配置
+        tasks_cfg = hands_cfg.get("tasks", {})
+        solutions_cfg = hands_cfg.get("solutions", {})
+
         return cls(
-            model=hands_cfg.get("model", "mediapipe"),
-            model_path=hands_cfg.get("model_path", "models/mediapipe/hand_landmarker.task"),
+            backend=hands_cfg.get("backend", "auto"),
+            fallback_backend=hands_cfg.get("fallback_backend", "solutions_hands"),
             num_hands=int(hands_cfg.get("num_hands", 2)),
             min_hand_detection_confidence=float(
                 hands_cfg.get("min_hand_detection_confidence", 0.5)
@@ -77,7 +100,31 @@ class HandEstimatorConfig:
                 hands_cfg.get("min_tracking_confidence", 0.5)
             ),
             bbox_padding_ratio=float(hands_cfg.get("bbox_padding_ratio", 0.10)),
+            tasks=_TasksConfig(
+                model_path=tasks_cfg.get(
+                    "model_path", "models/mediapipe/hand_landmarker.task"
+                ),
+                delegate=tasks_cfg.get("delegate", "cpu"),
+            ),
+            solutions=_SolutionsConfig(
+                model_complexity=int(solutions_cfg.get("model_complexity", 1)),
+                input_mirrored=bool(solutions_cfg.get("input_mirrored", False)),
+            ),
         )
+
+
+@dataclass
+class _TasksConfig:
+    """Tasks 后端专属配置。"""
+    model_path: str = "models/mediapipe/hand_landmarker.task"
+    delegate: str = "cpu"
+
+
+@dataclass
+class _SolutionsConfig:
+    """Solutions 后端专属配置。"""
+    model_complexity: int = 1
+    input_mirrored: bool = False
 
 
 # ---- 推理耗时统计 ----
@@ -97,87 +144,187 @@ class InferenceTiming:
         return 1000.0 / self.total_ms if self.total_ms > 0 else 0.0
 
 
-# ---- MediaPipe 适配器 ----
+# ---- 统一适配器 ----
 
 class MediaPipeHandEstimator:
-    """MediaPipe Hand Landmarker VIDEO 模式封装。
+    """MediaPipe 手部检测统一适配层。
 
-    使用 VIDEO 模式（detect_for_video）利用帧间跟踪，
-    比 IMAGE 模式逐帧独立检测更快更稳定。
+    根据配置自动选择/回退后端，对上层保持相同接口。
 
     用法::
 
-        estimator = MediaPipeHandEstimator(
-            model_path="models/mediapipe/hand_landmarker.task",
-            num_hands=2,
-        )
-        results = estimator.estimate(frame_rgb, timestamp_ms=33)
-        # ... 继续推理 ...
-        estimator.close()
+        # 方式 1：构造函数
+        estimator = MediaPipeHandEstimator(backend="solutions_hands")
 
-        # 或用作上下文管理器：
-        with MediaPipeHandEstimator() as estimator:
-            results = estimator.estimate(frame, 0)
+        # 方式 2：YAML 配置
+        estimator = MediaPipeHandEstimator.from_yaml("config.yaml")
+
+        # 方式 3：Config 对象
+        config = HandEstimatorConfig(backend="auto")
+        estimator = MediaPipeHandEstimator.from_config(config)
+
+        results = estimator.estimate(frame_rgb, timestamp_ms=0)
+        estimator.close()
     """
 
     def __init__(
         self,
-        model_path: str | Path = "models/mediapipe/hand_landmarker.task",
+        # 后端选择
+        backend: str = "auto",
+        fallback_backend: str = "solutions_hands",
+        # 通用参数
         num_hands: int = 2,
         min_hand_detection_confidence: float = 0.5,
         min_hand_presence_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
         bbox_padding_ratio: float = 0.10,
+        # Tasks 后端专属
+        model_path: str | Path = "models/mediapipe/hand_landmarker.task",
+        delegate: str = "cpu",
+        # Solutions 后端专属
+        model_complexity: int = 1,
+        input_mirrored: bool = False,
     ):
-        """初始化 MediaPipe Hand Landmarker。
+        """初始化适配器。
 
-        Args:
-            model_path: .task 模型文件路径。
-            num_hands: 最大检测手数。
-            min_hand_detection_confidence: 手掌检测最低置信度 [0, 1]。
-            min_hand_presence_confidence: 手部存在最低置信度 [0, 1]。
-            min_tracking_confidence: 跟踪最低置信度 [0, 1]。
-            bbox_padding_ratio: BBox 边距比例。
+        所有参数既可通过构造函数传入，也可通过 from_config / from_yaml 配置。
 
         Raises:
-            FileNotFoundError: 模型文件不存在。
-            RuntimeError: MediaPipe 初始化失败。
+            ValueError: 后端名称不合法或配置冲突。
         """
         self._config = HandEstimatorConfig(
-            model="mediapipe",
-            model_path=str(model_path),
+            backend=backend,
+            fallback_backend=fallback_backend,
             num_hands=num_hands,
             min_hand_detection_confidence=min_hand_detection_confidence,
             min_hand_presence_confidence=min_hand_presence_confidence,
             min_tracking_confidence=min_tracking_confidence,
             bbox_padding_ratio=bbox_padding_ratio,
-        )
-
-        self._model_path = Path(model_path)
-        if not self._model_path.is_file():
-            raise FileNotFoundError(
-                f"找不到 MediaPipe 模型文件: {self._model_path.resolve()}"
-            )
-
-        import mediapipe as mp
-
-        self._mp = mp
-
-        options = mp.tasks.vision.HandLandmarkerOptions(
-            base_options=mp.tasks.BaseOptions(
-                model_asset_path=str(self._model_path.resolve()),
-                delegate=mp.tasks.BaseOptions.Delegate.CPU,
+            tasks=_TasksConfig(model_path=str(model_path), delegate=delegate),
+            solutions=_SolutionsConfig(
+                model_complexity=model_complexity,
+                input_mirrored=input_mirrored,
             ),
-            running_mode=mp.tasks.vision.RunningMode.VIDEO,
-            num_hands=num_hands,
-            min_hand_detection_confidence=min_hand_detection_confidence,
-            min_hand_presence_confidence=min_hand_presence_confidence,
-            min_tracking_confidence=min_tracking_confidence,
         )
 
-        self._landmarker = mp.tasks.vision.HandLandmarker.create_from_options(options)
+        self._backend_info: Optional[BackendInfo] = None
         self._last_timestamp_ms: int = -1
         self._timing_history: list[InferenceTiming] = []
+
+        # 初始化后端（含 fallback 逻辑）
+        self._backend = self._create_backend()
+
+    # ---- 后端创建与选择 ----
+
+    def _create_backend(self):
+        """根据配置创建后端实例，处理 auto fallback 逻辑。
+
+        Fallback 策略：
+        - 仅捕获 RuntimeError（环境/初始化失败），不吞代码错误。
+        - 模型文件不存在直接抛出 FileNotFoundError，不触发 fallback。
+        - backend 明确指定时不回退，直接报错。
+        """
+        cfg = self._config
+        requested = cfg.backend
+        fallback_reason = ""
+        fallback_used = False
+
+        # ---- 强制模式 ----
+        if requested == "tasks_hand_landmarker":
+            backend = self._init_tasks()
+            active_backend_name = "tasks_hand_landmarker"
+
+        elif requested == "solutions_hands":
+            backend = self._init_solutions()
+            active_backend_name = "solutions_hands"
+
+        # ---- 自动模式 ----
+        elif requested == "auto":
+            backend, fallback_used, fallback_reason = self._try_auto()
+            active_backend_name = (
+                "solutions_hands" if fallback_used else "tasks_hand_landmarker"
+            )
+
+        else:
+            raise ValueError(
+                f"不支持的后端类型: {requested!r}，"
+                f"可选: auto / tasks_hand_landmarker / solutions_hands"
+            )
+
+        # 记录后端信息
+        self._backend_info = BackendInfo(
+            requested_backend=requested,
+            active_backend=active_backend_name,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            delegate=cfg.tasks.delegate
+            if active_backend_name == "tasks_hand_landmarker"
+            else "",
+        )
+
+        if fallback_used:
+            print(
+                f"[MediaPipeHandEstimator] 注意: {fallback_reason}",
+                file=sys.stderr,
+            )
+
+        return backend
+
+    def _init_tasks(self):
+        """初始化 Tasks 后端。"""
+        from zpds.hands.backends.tasks_hand_landmarker import (
+            TasksHandLandmarkerBackend,
+        )
+
+        return TasksHandLandmarkerBackend(
+            model_path=self._config.tasks.model_path,
+            num_hands=self._config.num_hands,
+            min_hand_detection_confidence=self._config.min_hand_detection_confidence,
+            min_hand_presence_confidence=self._config.min_hand_presence_confidence,
+            min_tracking_confidence=self._config.min_tracking_confidence,
+            delegate=self._config.tasks.delegate,
+        )
+
+    def _init_solutions(self):
+        """初始化 Solutions 后端。"""
+        from zpds.hands.backends.solutions_hands import SolutionsHandsBackend
+
+        return SolutionsHandsBackend(
+            num_hands=self._config.num_hands,
+            min_detection_confidence=self._config.min_hand_detection_confidence,
+            min_tracking_confidence=self._config.min_tracking_confidence,
+            model_complexity=self._config.solutions.model_complexity,
+            input_mirrored=self._config.solutions.input_mirrored,
+        )
+
+    def _try_auto(self):
+        """auto 模式：优先 Tasks，失败回退 Solutions。
+
+        Returns:
+            (backend_instance, fallback_used, fallback_reason)
+        """
+        # 1) 尝试 Tasks
+        try:
+            backend = self._init_tasks()
+            return backend, False, ""
+        except FileNotFoundError:
+            raise  # 模型不存在不触发 fallback
+        except RuntimeError as exc:
+            tasks_error = str(exc)
+
+        # 2) 回退到 Solutions
+        try:
+            backend = self._init_solutions()
+            reason = (
+                f"Tasks 初始化失败，自动回退到 solutions_hands。"
+                f"Tasks 错误: {tasks_error}"
+            )
+            return backend, True, reason
+        except Exception as exc:
+            raise RuntimeError(
+                f"Tasks 和 Solutions 后端均初始化失败。"
+                f"Tasks 错误: {tasks_error}; Solutions 错误: {exc}"
+            ) from exc
 
     # ---- 上下文管理器 ----
 
@@ -189,16 +336,21 @@ class MediaPipeHandEstimator:
         return False
 
     def close(self):
-        """释放 MediaPipe 资源。"""
-        if hasattr(self, "_landmarker") and self._landmarker is not None:
-            self._landmarker.close()
-            self._landmarker = None  # type: ignore[assignment]
+        """释放后端资源。"""
+        if hasattr(self, "_backend") and self._backend is not None:
+            self._backend.close()
+            self._backend = None  # type: ignore[assignment]
 
     # ---- 属性 ----
 
     @property
     def config(self) -> HandEstimatorConfig:
         return self._config
+
+    @property
+    def backend_info(self) -> Optional[BackendInfo]:
+        """实际使用的后端信息（含 fallback 记录）。"""
+        return self._backend_info
 
     @property
     def timing_history(self) -> list[InferenceTiming]:
@@ -228,10 +380,10 @@ class MediaPipeHandEstimator:
 
         Args:
             frame_rgb: RGB uint8 图像 (H, W, 3)。
-            timestamp_ms: 帧时间戳（毫秒），VIDEO 模式下必须严格递增。
+            timestamp_ms: 帧时间戳（毫秒），必须严格递增。
 
         Returns:
-            RawHandResult 列表，每只手一个。无检测时为空列表。
+            RawHandResult 列表，每只手一个。无检测时返回空列表。
 
         Raises:
             ValueError: 输入帧为空、形状不正确或时间戳未递增。
@@ -243,18 +395,16 @@ class MediaPipeHandEstimator:
 
         # ---- 预处理 ----
         t_pre = time.perf_counter()
-        mp_image = self._preprocess(frame_rgb)
+        h, w = frame_rgb.shape[:2]
         t_pre_end = time.perf_counter()
 
-        # ---- MediaPipe 推理 ----
+        # ---- 后端推理 ----
         t_inf_start = time.perf_counter()
-
-        detection_result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
-
+        raw_result = self._backend.infer(frame_rgb, timestamp_ms)
         t_inf_end = time.perf_counter()
 
-        # ---- 后处理：转换 → RawHandResult ----
-        results = self._postprocess(detection_result, frame_rgb)
+        # ---- 后处理：统一转换为 RawHandResult ----
+        results = self._convert_to_hand_results(raw_result, w, h)
 
         t_end = time.perf_counter()
 
@@ -271,75 +421,85 @@ class MediaPipeHandEstimator:
 
         return results
 
-    # ---- 内部方法 ----
+    # ---- 输入校验 ----
 
     def _validate_input(self, frame_rgb: np.ndarray, timestamp_ms: int):
         """校验输入帧和时间戳。"""
-        # 空帧检测
         if frame_rgb is None:
             raise ValueError("输入帧为 None")
         if not isinstance(frame_rgb, np.ndarray):
-            raise TypeError(f"输入帧不是 numpy 数组，类型: {type(frame_rgb)}")
+            raise ValueError(f"输入帧不是 numpy 数组，类型: {type(frame_rgb)}")
         if frame_rgb.size == 0:
             raise ValueError("输入帧为空（size=0）")
         if frame_rgb.ndim != 3:
-            raise ValueError(f"输入帧应为 3 维 (H,W,3)，实际 {frame_rgb.ndim} 维，形状 {frame_rgb.shape}")
+            raise ValueError(
+                f"输入帧应为 3 维 (H,W,3)，实际 {frame_rgb.ndim} 维，"
+                f"形状 {frame_rgb.shape}"
+            )
         if frame_rgb.shape[2] != 3:
-            raise ValueError(f"输入帧通道数应为 3 (RGB)，实际 {frame_rgb.shape[2]}，形状 {frame_rgb.shape}")
+            raise ValueError(
+                f"输入帧通道数应为 3 (RGB)，实际 {frame_rgb.shape[2]}，"
+                f"形状 {frame_rgb.shape}"
+            )
 
         # 时间戳单调递增校验
         if timestamp_ms <= self._last_timestamp_ms:
             raise ValueError(
-                f"VIDEO 模式时间戳必须严格递增: "
+                f"时间戳必须严格递增: "
                 f"当前 {timestamp_ms}ms ≤ 上一次 {self._last_timestamp_ms}ms"
             )
 
-    def _preprocess(self, frame_rgb: np.ndarray):
-        """预处理：numpy → MediaPipe Image。"""
-        # MediaPipe Image 创建本身会做格式转换如果需要
-        return self._mp.Image(
-            image_format=self._mp.ImageFormat.SRGB,
-            data=frame_rgb,
-        )
+    # ---- 统一结果转换 ----
 
-    def _postprocess(
+    def _convert_to_hand_results(
         self,
-        detection_result,
-        frame_rgb: np.ndarray,
+        raw_result,
+        image_width: int,
+        image_height: int,
     ) -> list[RawHandResult]:
-        """将 MediaPipe 检测结果转换为 RawHandResult 列表。
+        """将后端原始输出统一转换为 RawHandResult 列表。
 
-        处理：
-        - 无检测 → 空列表
-        - 关键点越界 → 裁剪到 [0, 1]
-        - 超过配置手数 → 截断到 num_hands
+        处理两个后端的差异：
+        - Tasks: result.hand_landmarks / result.handedness
+        - Solutions: result.multi_hand_landmarks / result.multi_handedness
+          + 根据 input_mirrored 纠正左右手
         """
-        if detection_result is None:
+        # 提取关键点和左右手（使用后端自身的静态方法）
+        landmarks_list = self._backend.extract_landmarks(raw_result)
+        handedness_list = self._backend.extract_handedness(raw_result)
+
+        if not landmarks_list:
             return []
 
-        hand_landmarks_list = detection_result.hand_landmarks
-        handedness_list = detection_result.handedness
-
-        if not hand_landmarks_list:
-            return []
-
-        h, w = frame_rgb.shape[:2]
         max_hands = self._config.num_hands
-
         results: list[RawHandResult] = []
 
-        for i in range(min(len(hand_landmarks_list), max_hands)):
-            landmarks = hand_landmarks_list[i]
-            handedness = handedness_list[i][0]  # 每只手一个 Category，取 score 最高的
+        for i in range(min(len(landmarks_list), max_hands)):
+            landmarks = landmarks_list[i]
 
-            # 关键点数量校验 + 越界裁剪
-            self._validate_keypoints(landmarks, i)
+            # 获取 handedness
+            if i < len(handedness_list) and handedness_list[i]:
+                hc = handedness_list[i][0]  # 取最高分分类
+                raw_hand_label = hc.category_name if hc.category_name else "Unknown"
+                hand_score = float(hc.score) if hc.score else 0.0
+            else:
+                raw_hand_label = "Unknown"
+                hand_score = 0.0
+
+            # Solutions 后端：根据 input_mirrored 纠正左右手
+            if self._backend.name == "solutions_hands":
+                hand_label = self._backend.normalize_handedness(
+                    raw_hand_label,
+                    self._config.solutions.input_mirrored,
+                )
+            else:
+                hand_label = raw_hand_label
 
             result = RawHandResult.from_mediapipe(
                 hand_landmarks=landmarks,
-                handedness=handedness,
-                image_width=w,
-                image_height=h,
+                handedness=_FakeHandedness(hand_label, hand_score),
+                image_width=image_width,
+                image_height=image_height,
                 bbox_padding_ratio=self._config.bbox_padding_ratio,
                 hand_index=i,
             )
@@ -347,31 +507,37 @@ class MediaPipeHandEstimator:
 
         return results
 
-    @staticmethod
-    def _validate_keypoints(landmarks, hand_index: int):
-        """校验关键点数量和合法性。"""
-        if len(landmarks) != 21:
-            # 不抛异常 — 记录并跳过越界关键点在后处理中处理
-            print(
-                f"[MediaPipeHandEstimator] 警告: 手 #{hand_index} "
-                f"关键点数={len(landmarks)}（期望 21）",
-                file=sys.stderr,
-            )
+    # ---- 工厂方法 ----
 
     @classmethod
-    def from_config(cls, config: HandEstimatorConfig) -> MediaPipeHandEstimator:
+    def from_config(cls, config: HandEstimatorConfig) -> "MediaPipeHandEstimator":
         """从 HandEstimatorConfig 实例构造。"""
         return cls(
-            model_path=config.model_path,
+            backend=config.backend,
+            fallback_backend=config.fallback_backend,
             num_hands=config.num_hands,
             min_hand_detection_confidence=config.min_hand_detection_confidence,
             min_hand_presence_confidence=config.min_hand_presence_confidence,
             min_tracking_confidence=config.min_tracking_confidence,
             bbox_padding_ratio=config.bbox_padding_ratio,
+            model_path=config.tasks.model_path,
+            delegate=config.tasks.delegate,
+            model_complexity=config.solutions.model_complexity,
+            input_mirrored=config.solutions.input_mirrored,
         )
 
     @classmethod
-    def from_yaml(cls, yaml_path: str | Path) -> MediaPipeHandEstimator:
+    def from_yaml(cls, yaml_path: str | Path) -> "MediaPipeHandEstimator":
         """从 YAML 配置文件构造。"""
         config = HandEstimatorConfig.from_yaml(yaml_path)
         return cls.from_config(config)
+
+
+# ---- 内部辅助 ----
+
+class _FakeHandedness:
+    """模拟 MediaPipe Category 对象，统一转换用。"""
+
+    def __init__(self, category_name: str, score: float):
+        self.category_name = category_name
+        self.score = score
