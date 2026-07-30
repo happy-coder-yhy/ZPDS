@@ -7,7 +7,9 @@
 from zpds.hands.schemas import (
     BackendInfo,
     HandBBox,
+    HandFrameResult,
     HandKeypoints,
+    ModelAttemptResult,
     ModelInfo,
     RawHandResult,
     SessionStats,
@@ -16,7 +18,9 @@ from zpds.hands.schemas import (
 __all__ = [
     "BackendInfo",
     "HandBBox",
+    "HandFrameResult",
     "HandKeypoints",
+    "ModelAttemptResult",
     "ModelInfo",
     "RawHandResult",
     "SessionStats",

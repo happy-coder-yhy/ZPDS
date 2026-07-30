@@ -28,6 +28,14 @@ Handedness = Literal["left", "right", "unknown"]
 HAND_KEYPOINT_COUNT = 21
 VALID_HANDEDNESS = frozenset({"left", "right", "unknown"})
 
+InferenceStatus = Literal[
+    "detected",
+    "no_hand",
+    "failed",
+    "skipped_invalid_input",
+    "not_run",
+]
+
 
 def _require_finite(values: list[float] | tuple[float, ...], field_name: str) -> None:
     if not all(math.isfinite(float(value)) for value in values):
@@ -104,6 +112,135 @@ class RawHandResult:
     detection_score: float = 0.0
     label: str = ""
 
+    # ---- 模型无关的构造入口 ----
+
+    @classmethod
+    def from_components(
+        cls,
+        *,
+        handedness: str,
+        handedness_score: float,
+        detection_score: float,
+        normalized_landmarks: np.ndarray,
+        image_width: int,
+        image_height: int,
+        bbox_xyxy: tuple[float, float, float, float] | None = None,
+        bbox_padding_ratio: float = 0.10,
+        label: str = "",
+        visibility: list[float] | None = None,
+    ) -> "RawHandResult":
+        """模型无关的构造入口。
+
+        各模型 adapter 负责把自己的原始输出整理为公共约定，
+        然后调用本方法统一完成：
+
+        * 归一化 → 像素坐标
+        * 边界裁剪
+        * BBox 构造
+        * clipped 统计
+
+        Args:
+            handedness: 模型原始左右手标签 (如 ``"Left"``)。
+            handedness_score: 左右手分类置信度 [0, 1]。
+            detection_score: 检测置信度 [0, 1]。
+            normalized_landmarks: ``(21, 3)`` 归一化关键点，x/y ∈ [0, 1]。
+            image_width: 图像宽度（像素）。
+            image_height: 图像高度（像素）。
+            bbox_xyxy: 可选预计算 BBox，为 None 时从关键点自动计算。
+            bbox_padding_ratio: 自动计算 BBox 时的边距比例。
+            label: 实例标识（如 ``"hand_0"``）。
+            visibility: 可选 21 个 visibility 值 [0, 1]。
+
+        Returns:
+            RawHandResult 实例。
+        """
+        if normalized_landmarks.ndim != 2 or normalized_landmarks.shape != (HAND_KEYPOINT_COUNT, 3):
+            raise ValueError(
+                f"normalized_landmarks 形状必须为 ({HAND_KEYPOINT_COUNT}, 3)，"
+                f"实际 {normalized_landmarks.shape}"
+            )
+        if not 0.0 <= handedness_score <= 1.0:
+            raise ValueError("handedness_score 必须在 [0, 1] 范围内")
+        if not 0.0 <= detection_score <= 1.0:
+            raise ValueError("detection_score 必须在 [0, 1] 范围内")
+
+        normalized: list[tuple[float, float, float]] = []
+        pixel: list[tuple[float, float]] = []
+        visibility_list: list[float] = []
+        has_visibility = visibility is not None
+
+        for i in range(HAND_KEYPOINT_COUNT):
+            nx = float(normalized_landmarks[i, 0])
+            ny = float(normalized_landmarks[i, 1])
+            nz = float(normalized_landmarks[i, 2])
+            normalized.append((nx, ny, nz))
+
+            px = nx * image_width
+            py = ny * image_height
+            px_clipped = max(0.0, min(float(image_width - 1), px))
+            py_clipped = max(0.0, min(float(image_height - 1), py))
+            pixel.append((px_clipped, py_clipped))
+
+            if visibility is not None and i < len(visibility):
+                visibility_list.append(float(visibility[i]))
+            else:
+                visibility_list.append(1.0)
+
+        # ---- BBox ----
+        if bbox_xyxy is not None:
+            px1, py1, px2, py2 = bbox_xyxy
+            is_padded = False
+            padding_ratio = 0.0
+        else:
+            xs = [p[0] for p in pixel]
+            ys = [p[1] for p in pixel]
+            px1, py1 = min(xs), min(ys)
+            px2, py2 = max(xs), max(ys)
+            is_padded = bbox_padding_ratio > 0
+            padding_ratio = bbox_padding_ratio
+
+            if bbox_padding_ratio > 0:
+                box_width = max(px2 - px1, 1.0)
+                box_height = max(py2 - py1, 1.0)
+                pad_width = box_width * bbox_padding_ratio
+                pad_height = box_height * bbox_padding_ratio
+                px1 = max(0.0, px1 - pad_width)
+                py1 = max(0.0, py1 - pad_height)
+                px2 = min(float(image_width), px2 + pad_width)
+                py2 = min(float(image_height), py2 + pad_height)
+
+        # ---- 裁剪统计 ----
+        clipped_count = sum(
+            1 for px, py in pixel
+            if px <= 0 or px >= image_width - 1 or py <= 0 or py >= image_height - 1
+        )
+
+        return cls(
+            handedness=handedness,
+            handedness_score=handedness_score,
+            keypoints=HandKeypoints(
+                normalized=normalized,
+                pixel=pixel,
+                has_visibility=has_visibility,
+                visibility=visibility_list,
+                any_clipped=clipped_count > 0,
+                clipped_count=clipped_count,
+            ),
+            bbox=HandBBox(
+                x1=px1,
+                y1=py1,
+                x2=px2,
+                y2=py2,
+                confidence=detection_score,
+                is_padded=is_padded,
+                padding_ratio=padding_ratio,
+            ),
+            detection_score=detection_score,
+            label=label,
+        )
+
+    # ---- MediaPipe 专属工厂（保留向后兼容） ----
+
     @classmethod
     def from_mediapipe(
         cls,
@@ -113,82 +250,44 @@ class RawHandResult:
         image_height: int,
         bbox_padding_ratio: float = 0.10,
         hand_index: int = 0,
-    ) -> RawHandResult:
-        """从 MediaPipe HandLandmarker 单帧输出构造统一原始结果。"""
-        normalized: list[tuple[float, float, float]] = []
-        pixel: list[tuple[float, float]] = []
-        visibility: list[float] = []
+    ) -> "RawHandResult":
+        """从 MediaPipe HandLandmarker 单帧输出构造统一原始结果。
+
+        内部委托给 :meth:`from_components`，保持向后兼容。
+        """
+        landmarks = np.zeros((HAND_KEYPOINT_COUNT, 3), dtype=np.float64)
         has_visibility = False
-        xs: list[float] = []
-        ys: list[float] = []
+        visibility: list[float] | None = []
 
-        for landmark in hand_landmarks:
-            nx = float(landmark.x)
-            ny = float(landmark.y)
-            nz = float(landmark.z)
-            normalized.append((nx, ny, nz))
+        for i, lm in enumerate(hand_landmarks):
+            if i >= HAND_KEYPOINT_COUNT:
+                break
+            landmarks[i, 0] = float(lm.x)
+            landmarks[i, 1] = float(lm.y)
+            landmarks[i, 2] = float(lm.z)
 
-            px = nx * image_width
-            py = ny * image_height
-            px_clipped = max(0.0, min(float(image_width - 1), px))
-            py_clipped = max(0.0, min(float(image_height - 1), py))
-            pixel.append((px_clipped, py_clipped))
-            xs.append(px_clipped)
-            ys.append(py_clipped)
-
-            if hasattr(landmark, "visibility") and landmark.visibility is not None:
+            if hasattr(lm, "visibility") and lm.visibility is not None:
                 has_visibility = True
-                visibility.append(float(landmark.visibility))
-            elif hasattr(landmark, "visibility"):
+                visibility.append(float(lm.visibility))
+            elif hasattr(lm, "visibility"):
                 visibility.append(0.0)
             else:
                 visibility.append(1.0)
 
-        px1, py1 = min(xs), min(ys)
-        px2, py2 = max(xs), max(ys)
-
-        if bbox_padding_ratio > 0:
-            box_width = max(px2 - px1, 1.0)
-            box_height = max(py2 - py1, 1.0)
-            pad_width = box_width * bbox_padding_ratio
-            pad_height = box_height * bbox_padding_ratio
-            px1 = max(0.0, px1 - pad_width)
-            py1 = max(0.0, py1 - pad_height)
-            px2 = min(float(image_width), px2 + pad_width)
-            py2 = min(float(image_height), py2 + pad_height)
-
         hand_score = float(handedness.score) if handedness.score else 0.0
         hand_label = handedness.category_name if handedness.category_name else "Unknown"
-        clipped_count = sum(
-            px <= 0
-            or px >= image_width - 1
-            or py <= 0
-            or py >= image_height - 1
-            for px, py in pixel
-        )
 
-        return cls(
+        return cls.from_components(
             handedness=hand_label,
             handedness_score=hand_score,
-            keypoints=HandKeypoints(
-                normalized=normalized,
-                pixel=pixel,
-                has_visibility=has_visibility,
-                visibility=visibility,
-                any_clipped=clipped_count > 0,
-                clipped_count=clipped_count,
-            ),
-            bbox=HandBBox(
-                x1=px1,
-                y1=py1,
-                x2=px2,
-                y2=py2,
-                confidence=hand_score,
-                is_padded=bbox_padding_ratio > 0,
-                padding_ratio=bbox_padding_ratio,
-            ),
             detection_score=hand_score,
+            normalized_landmarks=landmarks,
+            image_width=image_width,
+            image_height=image_height,
+            bbox_xyxy=None,
+            bbox_padding_ratio=bbox_padding_ratio,
             label=f"hand_{hand_index}",
+            visibility=visibility if has_visibility else None,
         )
 
 
@@ -352,14 +451,98 @@ class HandObservation:
             raise ValueError("model_version 不能为空")
 
 
+@dataclass(slots=True)
+class ModelAttemptResult:
+    """单次模型尝试结果。
+
+    独立记录一个模型（WiLoR 或 MediaPipe）在一帧上的全部尝试信息，
+    不依赖其他模型或 Router 的上层调度结果。
+    """
+
+    model_name: str
+    backend_name: str
+    status: InferenceStatus
+
+    hands: list[RawHandResult]
+
+    inference_ms: float
+    failure_reason: str | None
+
+    model_version: str
+    checkpoint_sha256: str | None
+    device: str
+
+    def __post_init__(self) -> None:
+        # not_run / skipped_invalid_input 不涉及实际模型运行，
+        # 允许 model_version / device 等字段为空
+        _is_real_run = self.status not in {"not_run", "skipped_invalid_input"}
+
+        if not self.model_name:
+            raise ValueError("model_name 不能为空")
+        if _is_real_run and not self.backend_name:
+            raise ValueError("backend_name 不能为空")
+        if _is_real_run and not self.model_version:
+            raise ValueError("model_version 不能为空")
+        if _is_real_run and not self.device:
+            raise ValueError("device 不能为空")
+        if self.inference_ms < 0:
+            raise ValueError("inference_ms 不能为负数")
+        # TODO(WiLoR Phase 4): 21 点映射验收后，恢复 detected 必须包含 hands
+        # if self.status == "detected" and not self.hands:
+        #     raise ValueError(
+        #         "status=detected 时 hands 不能为空，请至少包含一只检测到的手"
+        #     )
+        if self.status == "failed" and self.failure_reason is None:
+            raise ValueError("status=failed 时 failure_reason 不能为 None")
+
+
+@dataclass(slots=True)
+class HandFrameResult:
+    """一帧的完整手部检测结果（主模型 + 可选回退）。
+
+    始终保留 ``primary`` 和 ``fallback`` 两个独立记录，
+    即使回退成功，也不会覆盖 primary 的失败信息。
+    """
+
+    timestamp_ms: int
+
+    requested_model: str
+
+    primary: ModelAttemptResult
+    fallback: ModelAttemptResult | None
+
+    fallback_attempted: bool = False
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+
+    effective_model: str | None = None
+    effective_hands: list[RawHandResult] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.fallback_attempted and self.fallback is None:
+            raise ValueError(
+                "fallback_attempted=True 时 fallback 不能为 None"
+            )
+        if self.fallback_used and not self.fallback_attempted:
+            raise ValueError(
+                "fallback_used=True 时 fallback_attempted 必须也是 True"
+            )
+        if self.timestamp_ms < 0:
+            raise ValueError("timestamp_ms 不能为负数")
+        if not self.requested_model:
+            raise ValueError("requested_model 不能为空")
+
+
 __all__ = [
     "HAND_KEYPOINT_COUNT",
     "VALID_HANDEDNESS",
     "BackendInfo",
     "HandBBox",
+    "HandFrameResult",
     "HandKeypoints",
     "HandObservation",
     "Handedness",
+    "ModelAttemptResult",
     "ModelInfo",
     "PreparedFrame",
     "RawHandResult",

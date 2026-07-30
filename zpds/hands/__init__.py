@@ -12,10 +12,16 @@ from zpds.hands.schemas import (
     HAND_KEYPOINT_COUNT,
     HandBBox,
     Handedness,
+    HandFrameResult,
     HandKeypoints,
     HandObservation,
+    ModelAttemptResult,
     PreparedFrame,
     RawHandResult,
+)
+from zpds.hands.model_router import (
+    HandModelRouter,
+    create_hand_model_router,
 )
 from zpds.hands.segment_reader import (
     PreparedSegmentError,
@@ -29,13 +35,16 @@ __all__ = [
     "HAND_KEYPOINT_COUNT",
     "HandBBox",
     "HandEstimator",
+    "HandFrameResult",
     "HandKeypoints",
+    "HandModelRouter",
     "HandObservation",
     "Handedness",
     "HandsOutputPaths",
     "HandsPipeline",
     "HandsPipelineConfig",
     "HandsPipelineError",
+    "ModelAttemptResult",
     "PipelineStats",
     "PreparedFrame",
     "PreparedFrameSource",
@@ -45,4 +54,5 @@ __all__ = [
     "SampleMapValidationError",
     "StreamNotFoundError",
     "VideoDecodeError",
+    "create_hand_model_router",
 ]

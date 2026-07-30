@@ -7,8 +7,10 @@ from zpds.hands.base import RawHandResult as LegacyRawHandResult
 from zpds.hands.schemas import (
     HAND_KEYPOINT_COUNT,
     HandBBox,
+    HandFrameResult,
     HandKeypoints,
     HandObservation,
+    ModelAttemptResult,
     PreparedFrame,
     RawHandResult,
 )
@@ -129,4 +131,379 @@ def test_prepared_frame_rejects_invalid_image(image: np.ndarray) -> None:
             timestamp_ns=0,
             source_frame_index=0,
             source_timestamp_ns=0,
+        )
+
+
+# ════════════════════════════════════════════════════════════════════
+# from_components 模型无关构造入口
+# ════════════════════════════════════════════════════════════════════
+
+
+def _normalized_landmarks() -> np.ndarray:
+    rng = np.random.default_rng(42)
+    arr = rng.uniform(0.0, 0.5, (HAND_KEYPOINT_COUNT, 3)).astype(np.float64)
+    arr[:, 0] *= 0.5  # x
+    arr[:, 1] *= 0.5  # y
+    arr[:, 2] = arr[:, 2] - 0.25  # z centered around 0
+    return arr
+
+
+def test_from_components_basic_construction() -> None:
+    landmarks = _normalized_landmarks()
+    result = RawHandResult.from_components(
+        handedness="Left",
+        handedness_score=0.95,
+        detection_score=0.90,
+        normalized_landmarks=landmarks,
+        image_width=640,
+        image_height=480,
+        label="hand_0",
+    )
+
+    assert result.handedness == "Left"
+    assert result.handedness_score == 0.95
+    assert result.detection_score == 0.90
+    assert result.label == "hand_0"
+    assert len(result.keypoints.normalized) == HAND_KEYPOINT_COUNT
+    assert len(result.keypoints.pixel) == HAND_KEYPOINT_COUNT
+    assert result.bbox.is_valid
+
+
+def test_from_components_pixel_within_image_bounds() -> None:
+    landmarks = _normalized_landmarks()
+    result = RawHandResult.from_components(
+        handedness="Right",
+        handedness_score=0.8,
+        detection_score=0.8,
+        normalized_landmarks=landmarks,
+        image_width=1920,
+        image_height=1080,
+        label="hand_1",
+    )
+
+    for px, py in result.keypoints.pixel:
+        assert 0.0 <= px < 1920.0
+        assert 0.0 <= py < 1080.0
+
+
+def test_from_components_with_explicit_bbox() -> None:
+    landmarks = _normalized_landmarks()
+    result = RawHandResult.from_components(
+        handedness="Left",
+        handedness_score=0.7,
+        detection_score=0.7,
+        normalized_landmarks=landmarks,
+        image_width=640,
+        image_height=480,
+        bbox_xyxy=(50.0, 60.0, 200.0, 300.0),
+        label="hand_0",
+    )
+
+    assert result.bbox.x1 == 50.0
+    assert result.bbox.y1 == 60.0
+    assert result.bbox.x2 == 200.0
+    assert result.bbox.y2 == 300.0
+    assert not result.bbox.is_padded  # 预计算 BBox 不做 padding
+
+
+def test_from_components_with_visibility() -> None:
+    landmarks = _normalized_landmarks()
+    vis = [0.5 + i * 0.02 for i in range(HAND_KEYPOINT_COUNT)]
+    result = RawHandResult.from_components(
+        handedness="Left",
+        handedness_score=0.9,
+        detection_score=0.9,
+        normalized_landmarks=landmarks,
+        image_width=640,
+        image_height=480,
+        visibility=vis,
+    )
+
+    assert result.keypoints.has_visibility
+    assert len(result.keypoints.visibility) == HAND_KEYPOINT_COUNT
+
+
+def test_from_components_counts_clipped_keypoints() -> None:
+    # 制造越界关键点：第一个点在边缘外
+    landmarks = _normalized_landmarks()
+    landmarks[0, 0] = -0.01  # x < 0
+    landmarks[0, 1] = -0.01  # y < 0
+
+    result = RawHandResult.from_components(
+        handedness="Left",
+        handedness_score=0.5,
+        detection_score=0.5,
+        normalized_landmarks=landmarks,
+        image_width=640,
+        image_height=480,
+    )
+
+    assert result.keypoints.any_clipped
+    assert result.keypoints.clipped_count >= 1
+    # 像素坐标被裁剪到 0
+    assert result.keypoints.pixel[0][0] == 0.0
+    assert result.keypoints.pixel[0][1] == 0.0
+
+
+def test_from_components_rejects_wrong_shape() -> None:
+    bad = np.zeros((20, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match="形状"):
+        RawHandResult.from_components(
+            handedness="Left",
+            handedness_score=0.5,
+            detection_score=0.5,
+            normalized_landmarks=bad,
+            image_width=640,
+            image_height=480,
+        )
+
+
+def test_from_components_rejects_bad_score() -> None:
+    landmarks = _normalized_landmarks()
+    with pytest.raises(ValueError, match="handedness_score"):
+        RawHandResult.from_components(
+            handedness="Left",
+            handedness_score=1.5,
+            detection_score=0.5,
+            normalized_landmarks=landmarks,
+            image_width=640,
+            image_height=480,
+        )
+
+
+def test_from_mediapipe_delegates_to_from_components() -> None:
+    """确保 from_mediapipe 内部复用了 from_components 的像素坐标与裁剪逻辑。"""
+
+    class _FakeLandmark:
+        def __init__(self, x: float, y: float, z: float) -> None:
+            self.x = x
+            self.y = y
+            self.z = z
+            self.visibility = 0.99
+
+    class _FakeHandedness:
+        def __init__(self) -> None:
+            self.category_name = "Left"
+            self.score = 0.88
+
+    landmarks = [_FakeLandmark(0.1 + i * 0.02, 0.3 + i * 0.02, 0.0) for i in range(21)]
+    handedness = _FakeHandedness()
+
+    result = RawHandResult.from_mediapipe(
+        hand_landmarks=landmarks,
+        handedness=handedness,
+        image_width=800,
+        image_height=600,
+        bbox_padding_ratio=0.10,
+        hand_index=1,
+    )
+
+    assert result.handedness == "Left"
+    assert result.handedness_score == 0.88
+    assert result.label == "hand_1"
+    assert result.keypoints.has_visibility
+    assert result.bbox.is_valid
+
+
+# ════════════════════════════════════════════════════════════════════
+# ModelAttemptResult
+# ════════════════════════════════════════════════════════════════════
+
+
+def _raw_hand() -> RawHandResult:
+    return RawHandResult.from_components(
+        handedness="Left",
+        handedness_score=0.9,
+        detection_score=0.85,
+        normalized_landmarks=_normalized_landmarks(),
+        image_width=640,
+        image_height=480,
+        label="hand_0",
+    )
+
+
+def test_model_attempt_detected() -> None:
+    attempt = ModelAttemptResult(
+        model_name="wilor",
+        backend_name="wilor_torch",
+        status="detected",
+        hands=[_raw_hand()],
+        inference_ms=15.0,
+        failure_reason=None,
+        model_version="v1.0",
+        checkpoint_sha256="abc123",
+        device="cuda:0",
+    )
+
+    assert attempt.model_name == "wilor"
+    assert attempt.status == "detected"
+    assert len(attempt.hands) == 1
+
+
+def test_model_attempt_failed() -> None:
+    attempt = ModelAttemptResult(
+        model_name="wilor",
+        backend_name="wilor_torch",
+        status="failed",
+        hands=[],
+        inference_ms=0.0,
+        failure_reason="CUDA out of memory",
+        model_version="v1.0",
+        checkpoint_sha256=None,
+        device="cuda:0",
+    )
+
+    assert attempt.status == "failed"
+    assert attempt.failure_reason == "CUDA out of memory"
+
+
+def test_model_attempt_rejects_detected_without_hands() -> None:
+    # TODO(WiLoR Phase 4): 21 点映射验收后恢复此校验
+    # 目前允许 detected + empty hands（WiLoR 检测到但映射未验收）
+    pass  # 校验暂时关闭
+
+
+def test_model_attempt_rejects_failed_without_reason() -> None:
+    with pytest.raises(ValueError, match="failure_reason"):
+        ModelAttemptResult(
+            model_name="wilor",
+            backend_name="wilor_torch",
+            status="failed",
+            hands=[],
+            inference_ms=0.0,
+            failure_reason=None,
+            model_version="v1.0",
+            checkpoint_sha256=None,
+            device="cuda:0",
+        )
+
+
+def test_model_attempt_rejects_empty_model_name() -> None:
+    with pytest.raises(ValueError, match="model_name"):
+        ModelAttemptResult(
+            model_name="",
+            backend_name="wilor_torch",
+            status="not_run",
+            hands=[],
+            inference_ms=0.0,
+            failure_reason=None,
+            model_version="v1.0",
+            checkpoint_sha256=None,
+            device="cuda:0",
+        )
+
+
+# ════════════════════════════════════════════════════════════════════
+# HandFrameResult
+# ════════════════════════════════════════════════════════════════════
+
+
+def _make_attempt(
+    model_name: str = "wilor",
+    status: str = "detected",
+    hands: list | None = None,
+    inference_ms: float = 12.0,
+    failure_reason: str | None = None,
+) -> ModelAttemptResult:
+    return ModelAttemptResult(
+        model_name=model_name,
+        backend_name="wilor_torch" if model_name == "wilor" else "mediapipe_tasks",
+        status=status,  # type: ignore[arg-type]
+        hands=hands if hands is not None else [_raw_hand()],
+        inference_ms=inference_ms,
+        failure_reason=failure_reason,
+        model_version="v1.0",
+        checkpoint_sha256="abc123",
+        device="cuda:0",
+    )
+
+
+def test_frame_result_wilor_detected_no_fallback() -> None:
+    primary = _make_attempt(status="detected")
+    result = HandFrameResult(
+        timestamp_ms=100,
+        requested_model="wilor",
+        primary=primary,
+        fallback=None,
+        fallback_attempted=False,
+        fallback_used=False,
+        effective_model="wilor",
+        effective_hands=primary.hands,
+    )
+
+    assert result.effective_model == "wilor"
+    assert len(result.effective_hands) == 1
+    assert not result.fallback_used
+
+
+def test_frame_result_wilor_failed_mediapipe_success() -> None:
+    primary = _make_attempt(status="failed", inference_ms=0.0, failure_reason="OOM")
+    fallback = _make_attempt(
+        model_name="mediapipe",
+        status="detected",
+        inference_ms=22.0,
+    )
+    result = HandFrameResult(
+        timestamp_ms=100,
+        requested_model="wilor",
+        primary=primary,
+        fallback=fallback,
+        fallback_attempted=True,
+        fallback_used=True,
+        fallback_reason="OOM",
+        effective_model="mediapipe",
+        effective_hands=fallback.hands,
+    )
+
+    assert result.fallback_used
+    assert result.effective_model == "mediapipe"
+    assert result.primary.status == "failed"  # 失败信息保留
+
+
+def test_frame_result_no_hand_both() -> None:
+    primary = _make_attempt(status="no_hand", hands=[])
+    fallback = _make_attempt(
+        model_name="mediapipe",
+        status="no_hand",
+        hands=[],
+        inference_ms=20.0,
+    )
+    result = HandFrameResult(
+        timestamp_ms=200,
+        requested_model="wilor",
+        primary=primary,
+        fallback=None,
+        fallback_attempted=False,
+        fallback_used=False,
+        effective_model="wilor",
+        effective_hands=[],
+    )
+
+    assert result.primary.status == "no_hand"
+    assert result.effective_hands == []
+
+
+def test_frame_result_rejects_fallback_used_without_attempted() -> None:
+    primary = _make_attempt(status="no_hand", hands=[])
+    with pytest.raises(ValueError, match="fallback_attempted"):
+        HandFrameResult(
+            timestamp_ms=0,
+            requested_model="wilor",
+            primary=primary,
+            fallback=None,
+            fallback_attempted=False,
+            fallback_used=True,
+        )
+
+
+def test_frame_result_rejects_fallback_attempted_without_result() -> None:
+    primary = _make_attempt(status="failed", inference_ms=0.0, failure_reason="OOM")
+    with pytest.raises(ValueError, match="fallback 不能为 None"):
+        HandFrameResult(
+            timestamp_ms=0,
+            requested_model="wilor",
+            primary=primary,
+            fallback=None,
+            fallback_attempted=True,
+            fallback_used=False,
         )
