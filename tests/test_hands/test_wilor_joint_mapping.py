@@ -245,8 +245,11 @@ def test_convert_with_identity_mapping() -> None:
     assert result.handedness == "Right"
     assert result.handedness_score == 0.9
     assert result.detection_score == 0.85
-    assert result.bbox.x1 == 100.0  # 使用预计算 BBox
-    assert result.bbox.y1 == 150.0
+    # BBox = YOLO box ∪ keypoint bounds (kp min from crop x1=50, y1=60)
+    assert result.bbox.x1 == 50.0
+    assert result.bbox.y1 == 60.0
+    assert result.bbox.x2 == 300.0
+    assert result.bbox.y2 == 400.0
     assert len(result.keypoints.normalized) == HAND_KEYPOINT_COUNT
     assert len(result.keypoints.pixel) == HAND_KEYPOINT_COUNT
     # 关键点应该在原图范围内

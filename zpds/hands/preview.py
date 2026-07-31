@@ -177,7 +177,7 @@ def generate_hands_preview(
     seg_path = seg_dir / "segment.json"
     if not seg_path.exists():
         raise FileNotFoundError(f"segment.json not found: {seg_path}")
-    with open(seg_path) as f:
+    with open(seg_path, encoding="utf-8") as f:
         segment = json.load(f)
 
     # ---- 找到视频流 ----

@@ -296,6 +296,20 @@ def convert_wilor_to_raw_hand_result(
             if wilor_idx < joints_3d.shape[0]:
                 normalized[mp_idx, 2] = float(joints_3d[wilor_idx, 2])
 
+    # BBox 取 YOLO 检测框与投影关键点范围框的并集，
+    # 确保所有关键点（含手腕）在 BBox 内，消除 reprojection_consistency 校验失败。
+    yolo_x1, yolo_y1, yolo_x2, yolo_y2 = detection.bbox_xyxy_px
+    kp_x1 = float(reordered[:, 0].min())
+    kp_y1 = float(reordered[:, 1].min())
+    kp_x2 = float(reordered[:, 0].max())
+    kp_y2 = float(reordered[:, 1].max())
+    merged_bbox = (
+        min(yolo_x1, kp_x1),
+        min(yolo_y1, kp_y1),
+        max(yolo_x2, kp_x2),
+        max(yolo_y2, kp_y2),
+    )
+
     return RawHandResult.from_components(
         handedness=detection.handedness,
         handedness_score=detection.handedness_score,
@@ -303,7 +317,7 @@ def convert_wilor_to_raw_hand_result(
         normalized_landmarks=normalized,
         image_width=image_width,
         image_height=image_height,
-        bbox_xyxy=detection.bbox_xyxy_px,
+        bbox_xyxy=merged_bbox,
         label="hand_0",
     )
 
