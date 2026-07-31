@@ -213,11 +213,58 @@ def convert_wilor_to_raw_hand_result(
 
     # 使用 WiLoR 相机投影得到 2D 像素关节
     joints_3d = detection.raw_keypoints_3d
-    cam_t = detection.cam_t
-    focal = detection.focal
 
-    if joints_3d is None or cam_t is None:
-        # 回退：尝试使用 detection.raw_keypoints_2d
+    # ---- 投影路径选择 ----
+    # Path 1 (preferred): pred_cam + batch context → cam_crop_to_full → project_full_img
+    # Path 2 (fallback): pred_cam_t (crop space) → naive pinhole projection
+    # Path 3 (last resort): raw_keypoints_2d → inverse_project_joints_to_original
+
+    pred_cam = detection.pred_cam
+    box_center = detection.box_center
+    box_size = detection.box_size
+    sfl = detection.scaled_focal_length
+
+    if (
+        joints_3d is not None
+        and pred_cam is not None
+        and box_center is not None
+        and box_size is not None
+        and sfl is not None
+    ):
+        # ---- Path 1: 正确的 crop→full 投影 ----
+        if joints_3d.ndim != 2 or joints_3d.shape[0] < HAND_KEYPOINT_COUNT:
+            return None
+
+        # 左右手 mirroring（WiLoR demo: joints/verts x-mirror + pred_cam y-mirror）
+        if detection.handedness == "Left":
+            pred_cam = pred_cam.copy()
+            pred_cam[1] *= -1.0                # y-mirror pred_cam
+            joints_3d = joints_3d.copy()
+            joints_3d[:, 0] *= -1.0             # x-mirror joints/verts
+
+        full_cam_t = _cam_crop_to_full_np(
+            pred_cam, box_center, box_size,
+            float(image_width), float(image_height), sfl,
+        )
+        joints_pixel = _project_full_img_np(
+            joints_3d, full_cam_t, sfl,
+            float(image_width), float(image_height),
+        )
+
+    elif joints_3d is not None and detection.cam_t is not None:
+        # ---- Path 2: 旧回退路径（pred_cam_t，crop 空间，有偏移） ----
+        if joints_3d.ndim != 2 or joints_3d.shape[0] < HAND_KEYPOINT_COUNT:
+            return None
+
+        cam_t = detection.cam_t
+        focal = detection.focal
+        fl = float(focal[0]) if hasattr(focal, "__len__") else float(focal)
+        joints_pixel = _project_3d_to_2d(
+            joints_3d, cam_t, fl, image_width, image_height,
+        )
+
+    else:
+        # ---- Path 3: 2D 关键点回退 ----
         joints_2d = detection.raw_keypoints_2d
         if joints_2d is None:
             return None
@@ -230,15 +277,6 @@ def convert_wilor_to_raw_hand_result(
             )
         else:
             joints_pixel = joints_2d
-    else:
-        # 使用 3D + 相机参数投影
-        if joints_3d.ndim != 2 or joints_3d.shape[0] < HAND_KEYPOINT_COUNT:
-            return None
-
-        fl = float(focal[0]) if hasattr(focal, "__len__") else float(focal)
-        joints_pixel = _project_3d_to_2d(
-            joints_3d, cam_t, fl, image_width, image_height,
-        )
 
     # 按映射重排
     reordered = np.zeros((HAND_KEYPOINT_COUNT, 2), dtype=np.float64)
@@ -270,6 +308,54 @@ def convert_wilor_to_raw_hand_result(
     )
 
 
+def _cam_crop_to_full_np(
+    cam_bbox: np.ndarray,       # (3,)  pred_cam (s, tx, ty) in crop space
+    box_center: np.ndarray,     # (2,)  BBox center in full image (pixels)
+    box_size: float,            # scalar  BBox size (with rescale_factor)
+    img_w: float,               # full image width
+    img_h: float,               # full image height
+    focal_length: float,        # scaled_focal_length
+) -> np.ndarray:
+    """Numpy reimplementation of WiLoR's ``cam_crop_to_full``.
+
+    Converts weak-perspective camera parameters from the crop coordinate
+    frame to the full-image coordinate frame.
+
+    Reference: :file:`WiLoR/wilor/utils/renderer.py:12`
+    """
+    cx, cy = box_center[0], box_center[1]
+    b = box_size
+    w_2, h_2 = img_w / 2.0, img_h / 2.0
+    bs = b * cam_bbox[0] + 1e-9
+    tz = 2.0 * focal_length / bs
+    tx = (2.0 * (cx - w_2) / bs) + cam_bbox[1]
+    ty = (2.0 * (cy - h_2) / bs) + cam_bbox[2]
+    return np.array([tx, ty, tz], dtype=np.float64)
+
+
+def _project_full_img_np(
+    points: np.ndarray,         # (N, 3)  3D keypoints in camera space
+    cam_trans: np.ndarray,      # (3,)    full-image camera translation
+    focal_length: float,        # scaled_focal_length
+    img_w: float,               # full image width
+    img_h: float,               # full image height
+) -> np.ndarray:
+    """Numpy reimplementation of WiLoR's ``project_full_img``.
+
+    Projects 3D points from camera space to 2D pixel coordinates
+    using a pinhole camera model.
+
+    Reference: :file:`WiLoR/demo.py:134`
+    """
+    camera_center = np.array([img_w / 2.0, img_h / 2.0], dtype=np.float64)
+    points_cam = points + cam_trans  # (N, 3)
+    z = points_cam[:, 2]
+    z_safe = np.where(np.abs(z) < 1e-9, np.sign(z) * 1e-9, z)
+    x_2d = focal_length * points_cam[:, 0] / z_safe + camera_center[0]
+    y_2d = focal_length * points_cam[:, 1] / z_safe + camera_center[1]
+    return np.column_stack([x_2d, y_2d])
+
+
 def _project_3d_to_2d(
     keypoints_3d: np.ndarray,
     cam_t: np.ndarray,
@@ -277,9 +363,10 @@ def _project_3d_to_2d(
     image_width: int,
     image_height: int,
 ) -> np.ndarray:
-    """WiLoR 相机投影：3D 关节 → 2D 像素。
+    """Fallback: naive pinhole projection using raw ``pred_cam_t``.
 
-    复现 WiLoR demo 的 project_full_img 逻辑。
+    仅在 batch context 不可用时作为回退路径使用。
+    注意：此路径未做 crop→full 坐标转换，关键点会有偏移。
     """
     cx = image_width / 2.0
     cy = image_height / 2.0
@@ -324,6 +411,8 @@ __all__ = [
     "MAPPING_VERSION",
     "WILOR_JOINT_NAMES",
     "WILOR_TO_HANDS_V1_V1",
+    "_cam_crop_to_full_np",
+    "_project_full_img_np",
     "convert_wilor_to_raw_hand_result",
     "get_mapping_summary",
     "inverse_project_joints_to_original",

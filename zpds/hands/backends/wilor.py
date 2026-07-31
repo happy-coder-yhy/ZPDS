@@ -156,6 +156,8 @@ class WiLoRBackend:
 
     def _load_wilor_modules(self) -> None:
         """加载 WiLoR 模型和 YOLO 检测器。"""
+        import os as _os
+
         source = self._config.wilor_source_path
         if source:
             sys.path.insert(0, source)
@@ -168,11 +170,17 @@ class WiLoRBackend:
         self._ViTDetDataset = ViTDetDataset
         self._recursive_to = recursive_to
 
-        # 加载模型
-        self._model, self._model_cfg = load_wilor(
-            checkpoint_path=self._config.checkpoint_path,
-            cfg_path=self._config.model_config_path,
-        )
+        # WiLoR 内部使用相对路径（./mano_data/），切换到源码目录加载
+        _prev_cwd = _os.getcwd()
+        try:
+            if source:
+                _os.chdir(source)
+            self._model, self._model_cfg = load_wilor(
+                checkpoint_path=self._config.checkpoint_path,
+                cfg_path=self._config.model_config_path,
+            )
+        finally:
+            _os.chdir(_prev_cwd)
 
         # 加载检测器
         detector_path = self._config.detector_path
@@ -209,11 +217,13 @@ class WiLoRBackend:
 
         bboxes: list = []
         is_right: list = []
+        box_confidences: list = []
 
         for det in detections:
             b = det.boxes.data.cpu().detach().squeeze().numpy()
             is_right.append(det.boxes.cls.cpu().detach().squeeze().item())
             bboxes.append(b[:4].tolist())
+            box_confidences.append(float(b[4]))
 
         if len(bboxes) == 0:
             return {
@@ -227,6 +237,10 @@ class WiLoRBackend:
                 "focal_length": None,
                 "boxes": [],
                 "is_right": [],
+                "box_confidences": [],
+                "box_center": [],
+                "box_size": [],
+                "scaled_focal_length": [],
             }
 
         boxes = np.stack(bboxes)
@@ -248,9 +262,15 @@ class WiLoRBackend:
         all_cam_t = []
         all_focal = []
         all_mano = []
-        all_boxes = []
+        all_box_center = []
+        all_box_size = []
         all_right = []
         all_batch_info = []
+        all_scaled_focal = []
+
+        # WiLoR config constants for cam_crop_to_full
+        _focal_length_cfg = self._model_cfg.EXTRA.FOCAL_LENGTH
+        _image_size_cfg = self._model_cfg.MODEL.IMAGE_SIZE
 
         for batch in dataloader:
             batch = self._recursive_to(batch, self._device)
@@ -270,10 +290,22 @@ class WiLoRBackend:
                     "global_orient": out["pred_mano_params"]["global_orient"][n].cpu().numpy(),
                     "hand_pose": out["pred_mano_params"]["hand_pose"][n].cpu().numpy(),
                 })
-                all_boxes.append(batch["box_center"][n].cpu().numpy() if "box_center" in batch else None)
+
+                # ---- batch context for cam_crop_to_full ----
+                _bc = batch["box_center"][n].cpu().numpy() if "box_center" in batch else None
+                _bsz = batch["box_size"][n].cpu().item() if "box_size" in batch else None
+                _isz = batch["img_size"][n].cpu().numpy() if "img_size" in batch else None
+                _sfl = float(
+                    _focal_length_cfg / _image_size_cfg * _isz.max()
+                ) if _isz is not None else None
+
+                all_box_center.append(_bc)
+                all_box_size.append(_bsz)
+                all_scaled_focal.append(_sfl)
+
                 all_right.append(batch["right"][n].cpu().numpy() if "right" in batch else None)
                 all_batch_info.append({
-                    "img_size": batch["img_size"][n].cpu().numpy() if "img_size" in batch else None,
+                    "img_size": _isz,
                 })
 
         return {
@@ -287,6 +319,10 @@ class WiLoRBackend:
             "focal_length": all_focal,
             "boxes": boxes,
             "is_right": right,
+            "box_confidences": box_confidences,
+            "box_center": all_box_center,
+            "box_size": all_box_size,
+            "scaled_focal_length": all_scaled_focal,
             "batch_info": all_batch_info,
         }
 

@@ -329,8 +329,14 @@ class WiLoRDetection:
 
     # 3D 关键点 + 相机参数（WiLoR 完整推理输出，可选）
     raw_keypoints_3d: np.ndarray | None = None  # (N, 3) MANO 顺序
-    cam_t: np.ndarray | None = None  # (3,) 相机平移
+    cam_t: np.ndarray | None = None  # (3,) 相机平移（pred_cam_t，crop 空间）
     focal: np.ndarray | None = None  # (2,) 焦距
+
+    # batch context — cam_crop_to_full 所需参数
+    pred_cam: np.ndarray | None = None  # (3,) weak-perspective camera (s, tx, ty)
+    box_center: np.ndarray | None = None  # (2,) BBox 中心在原图的坐标
+    box_size: float | None = None  # BBox 尺寸（含 rescale_factor）
+    scaled_focal_length: float | None = None  # FOCAL_LENGTH * img_size / IMAGE_SIZE
 
     clipped: bool = False
     transform: WiLoRImageTransform | None = None
@@ -367,76 +373,6 @@ class WiLoRFallbackPolicy:
                 "回退模式是 WiLoR 失败后才调用 MediaPipe。"
                 "两者语义互斥。"
             )
-
-
-@dataclass(slots=True)
-class WiLoRReconstructionResult:
-    """WiLoR 3D / MANO 重建结果。
-
-    仅在候选片段上按需运行（非每帧）。
-    未运行重建时，所有字段为默认值。
-
-    坐标系约定：
-        - ``coordinate_frame`` 初始为 ``"model_camera"``（WiLoR 默认相机空间）
-        - ``scale_status`` 初始为 ``"uncalibrated"``
-        - 不得在未验证前写 ``"world"`` / ``"meters"`` / ``"camera_optical"``
-    """
-
-    # 3D 关键点（模型相机空间）
-    keypoints_3d: np.ndarray | None = None  # (N, 3)
-
-    # MANO 参数
-    mano_pose: np.ndarray | None = None  # (48,) 或 (16, 3)
-    mano_shape: np.ndarray | None = None  # (10,)
-
-    # 相机外参
-    camera_translation: np.ndarray | None = None  # (3,)
-
-    # 坐标系说明
-    coordinate_frame: str = "model_camera"
-    scale_status: str = "uncalibrated"  # uncalibrated / metric / needs_verification
-
-    # 质量指标
-    reprojection_error_px: float | None = None
-    pose_valid: bool = False
-    failure_reason: str | None = None
-
-    # 重建是否实际运行
-    reconstruction_attempted: bool = False
-
-    # 模型溯源
-    model_name: str = "wilor"
-    model_version: str = ""
-    checkpoint_sha256: str = ""
-
-    @classmethod
-    def not_attempted(cls, *, model_version: str = "", checkpoint_sha256: str = "") -> "WiLoRReconstructionResult":
-        """构造未运行重建的实例。"""
-        return cls(
-            reconstruction_attempted=False,
-            model_version=model_version,
-            checkpoint_sha256=checkpoint_sha256,
-        )
-
-    @classmethod
-    def failed(
-        cls,
-        reason: str,
-        *,
-        model_version: str = "",
-        checkpoint_sha256: str = "",
-    ) -> "WiLoRReconstructionResult":
-        """构造重建失败但 2D 检测仍有效的实例。
-
-        3D 失败不影响 2D BBox 交付。
-        """
-        return cls(
-            reconstruction_attempted=True,
-            pose_valid=False,
-            failure_reason=reason,
-            model_version=model_version,
-            checkpoint_sha256=checkpoint_sha256,
-        )
 
 
 @dataclass(slots=True)
@@ -517,7 +453,6 @@ __all__ = [
     "WiLoRInferenceError",
     "WiLoRModelInfo",
     "WiLoROutputFormatError",
-    "WiLoRReconstructionResult",
     "WiLoRRunReport",
     "WiLoRRunThresholds",
     "WiLoRUnavailableError",

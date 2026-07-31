@@ -180,28 +180,39 @@ class HandModelRouter:
         timestamp_ms: int,
     ) -> ModelAttemptResult:
         """调用主模型并包装为 ModelAttemptResult。"""
+        import time as _time
+
+        # 尝试从 primary 获取元信息
+        _mi = getattr(self._primary, "model_info", None)
+        _model_version = getattr(_mi, "model_version", "unknown") if _mi else "unknown"
+        _checkpoint_sha256 = getattr(_mi, "checkpoint_sha256", None) if _mi else None
+        _device = getattr(_mi, "device", "unknown") if _mi else "unknown"
+
         try:
-            # WiLoRHandEstimator 直接返回 HandFrameResult
+            # WiLoRHandEstimator 直接返回 HandFrameResult（含计时和元信息）
             if hasattr(self._primary, "estimate_frame"):
                 result = self._primary.estimate_frame(frame_rgb, timestamp_ms)
                 return result.primary
         except Exception:
             pass
 
-        # Fallback: 使用 estimate() 协议
+        # Fallback: 使用 estimate() 协议（缺少详细元信息的兼容路径）
         try:
+            _t0 = _time.perf_counter()
             results = self._primary.estimate(frame_rgb, timestamp_ms)
+            _elapsed = (_time.perf_counter() - _t0) * 1000.0
+
             status = "detected" if results else "no_hand"
             return ModelAttemptResult(
                 model_name="wilor",
                 backend_name="wilor",
                 status=status,  # type: ignore[arg-type]
                 hands=list(results),
-                inference_ms=0.0,
+                inference_ms=_elapsed,
                 failure_reason=None,
-                model_version="unknown",
-                checkpoint_sha256=None,
-                device="unknown",
+                model_version=_model_version,
+                checkpoint_sha256=_checkpoint_sha256,
+                device=_device,
             )
         except Exception as exc:
             return ModelAttemptResult(
@@ -211,9 +222,9 @@ class HandModelRouter:
                 hands=[],
                 inference_ms=0.0,
                 failure_reason=f"{type(exc).__name__}: {exc}",
-                model_version="unknown",
-                checkpoint_sha256=None,
-                device="unknown",
+                model_version=_model_version,
+                checkpoint_sha256=_checkpoint_sha256,
+                device=_device,
             )
 
     def _run_fallback(
@@ -222,6 +233,12 @@ class HandModelRouter:
         timestamp_ms: int,
     ) -> ModelAttemptResult:
         """调用回退模型。"""
+        import time as _time
+
+        _mi = getattr(self._fallback, "model_info", None) if self._fallback else None
+        _mv = getattr(_mi, "model_version", "unknown") if _mi else "unknown"
+        _dev = getattr(_mi, "device", "cpu") if _mi else "cpu"
+
         if self._fallback is None:
             return ModelAttemptResult(
                 model_name="mediapipe",
@@ -230,24 +247,27 @@ class HandModelRouter:
                 hands=[],
                 inference_ms=0.0,
                 failure_reason="未配置 fallback",
-                model_version="unknown",
+                model_version=_mv,
                 checkpoint_sha256=None,
-                device="unknown",
+                device=_dev,
             )
 
         try:
+            _t0 = _time.perf_counter()
             results = self._fallback.estimate(frame_rgb, timestamp_ms)
+            _elapsed = (_time.perf_counter() - _t0) * 1000.0
+
             status = "detected" if results else "no_hand"
             return ModelAttemptResult(
                 model_name="mediapipe",
                 backend_name="mediapipe",
                 status=status,  # type: ignore[arg-type]
                 hands=list(results),
-                inference_ms=0.0,
+                inference_ms=_elapsed,
                 failure_reason=None,
-                model_version="hand_landmarker_v1",
+                model_version=_mv,
                 checkpoint_sha256=None,
-                device="cpu",
+                device=_dev,
             )
         except Exception as exc:
             return ModelAttemptResult(
@@ -257,9 +277,9 @@ class HandModelRouter:
                 hands=[],
                 inference_ms=0.0,
                 failure_reason=f"{type(exc).__name__}: {exc}",
-                model_version="hand_landmarker_v1",
+                model_version=_mv,
                 checkpoint_sha256=None,
-                device="cpu",
+                device=_dev,
             )
 
     def _should_fallback(self, primary: ModelAttemptResult) -> bool:
@@ -447,9 +467,9 @@ class _DegradedPrimary:
             hands=[],
             inference_ms=0.0,
             failure_reason=f"WiLoR 初始化失败: {self._error}",
-            model_version="degraded",
+            model_version="unknown",
             checkpoint_sha256=None,
-            device="",
+            device="unknown",
         )
         return HandFrameResult(
             timestamp_ms=timestamp_ms,

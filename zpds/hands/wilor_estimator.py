@@ -27,6 +27,10 @@ from zpds.hands.schemas import (
     ModelAttemptResult,
     RawHandResult,
 )
+from zpds.hands.wilor_joint_mapping import (
+    WILOR_TO_HANDS_V1_V1,
+    convert_wilor_to_raw_hand_result,
+)
 from zpds.hands.wilor_schema import (
     FRAME_LEVEL_ERRORS,
     RUN_LEVEL_ERRORS,
@@ -311,7 +315,22 @@ class WiLoRHandEstimator:
             if detections:
                 self._stats.detected += 1
                 status = "detected"
-                hands: list[RawHandResult] = []  # 21 点映射未验收，暂不转换
+                hands: list[RawHandResult] = []
+                for det in detections:
+                    try:
+                        iw = det.transform.original_width if det.transform else frame_rgb.shape[1]
+                        ih = det.transform.original_height if det.transform else frame_rgb.shape[0]
+                        raw = convert_wilor_to_raw_hand_result(
+                            det,
+                            mapping=WILOR_TO_HANDS_V1_V1,
+                            image_width=iw,
+                            image_height=ih,
+                        )
+                        if raw is not None:
+                            hands.append(raw)
+                    except Exception:
+                        # 单个 detection 转换失败不拖垮整帧
+                        pass
             else:
                 self._stats.no_hand += 1
                 status = "no_hand"

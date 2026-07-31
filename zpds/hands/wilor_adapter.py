@@ -323,6 +323,11 @@ def _extract_detections(
     all_kp2d = raw_result.get("pred_keypoints_2d") or []
     all_cam_t = raw_result.get("pred_cam_t") or []
     all_focal = raw_result.get("focal_length") or []
+    all_pred_cam = raw_result.get("pred_cam") or []
+    all_box_center = raw_result.get("box_center") or []
+    all_box_size = raw_result.get("box_size") or []
+    all_scaled_focal = raw_result.get("scaled_focal_length") or []
+    box_confidences = raw_result.get("box_confidences") or []
 
     for i in range(len(bboxes)):
         x1, y1, x2, y2 = bboxes[i]
@@ -344,6 +349,14 @@ def _extract_detections(
             continue  # 跳过不合法 BBox
 
         handedness = "Right" if right_flag else "Left"
+
+        # ---- 构建 WiLoRImageTransform（含 crop 区域） ----
+        _bc = all_box_center[i] if i < len(all_box_center) else None
+        _bsz = all_box_size[i] if i < len(all_box_size) else None
+
+        # WiLoR 模型配置常量（与 backend 中 _run_inference 保持一致）
+        _WILOR_IMAGE_SIZE = 256
+
         transform = WiLoRImageTransform.from_resize(
             original_width=image_width,
             original_height=image_height,
@@ -351,16 +364,31 @@ def _extract_detections(
             detector_height=image_height,
         )
 
+        # 从 batch context 填充 crop 参数（cam_crop_to_full & 2D 回退所需）
+        if _bc is not None and _bsz is not None:
+            transform.crop_x1 = float(_bc[0] - _bsz / 2.0)
+            transform.crop_y1 = float(_bc[1] - _bsz / 2.0)
+            transform.crop_width = float(_bsz)
+            transform.crop_height = float(_bsz)
+            transform.crop_input_width = float(_WILOR_IMAGE_SIZE)
+            transform.crop_input_height = float(_WILOR_IMAGE_SIZE)
+
+        _conf = float(box_confidences[i]) if i < len(box_confidences) else 0.0
+
         detection = WiLoRDetection(
             handedness=handedness,
-            handedness_score=0.8,  # WiLoR 不直接提供，由 YOLO cls 给出
-            detection_score=0.8,
+            handedness_score=_conf,   # YOLO box confidence（含 cls 概率）
+            detection_score=_conf,
             bbox_xyxy_px=(float(x1), float(y1), float(x2), float(y2)),
             raw_keypoints_2d=joints_2d_raw,
             raw_keypoint_format="wilor_model_crop",
             raw_keypoints_3d=joints_3d,
             cam_t=all_cam_t[i] if i < len(all_cam_t) else None,
             focal=all_focal[i] if i < len(all_focal) else None,
+            pred_cam=all_pred_cam[i] if i < len(all_pred_cam) else None,
+            box_center=_bc,
+            box_size=float(_bsz) if _bsz is not None else None,
+            scaled_focal_length=float(all_scaled_focal[i]) if i < len(all_scaled_focal) and all_scaled_focal[i] is not None else None,
             clipped=clipped,
             transform=transform,
         )

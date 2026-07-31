@@ -4,7 +4,6 @@ import pytest
 from zpds.hands.wilor_schema import (
     WiLoRDetection,
     WiLoRImageTransform,
-    WiLoRReconstructionResult,
 )
 
 
@@ -97,31 +96,3 @@ def test_wilor_detection_clipped() -> None:
     )
     assert detection.clipped
 
-
-def test_wilor_reconstruction_default_not_attempted() -> None:
-    result = WiLoRReconstructionResult()
-
-    assert not result.reconstruction_attempted
-    assert result.keypoints_3d is None
-    assert result.mano_pose is None
-    assert not result.pose_valid
-
-
-def test_wilor_reconstruction_with_mano_params() -> None:
-    result = WiLoRReconstructionResult(
-        keypoints_3d=np.random.default_rng(1).uniform(0, 1, (21, 3)).astype(np.float32),
-        mano_pose=np.zeros(48, dtype=np.float32),
-        mano_shape=np.ones(10, dtype=np.float32) * 0.1,
-        camera_translation=np.array([0.1, -0.2, 0.5], dtype=np.float32),
-        coordinate_frame="camera",
-        scale_status="metric",
-        reprojection_error_px=2.3,
-        pose_valid=True,
-        reconstruction_attempted=True,
-    )
-
-    assert result.keypoints_3d.shape == (21, 3)
-    assert result.pose_valid
-    assert result.scale_status == "metric"
-    assert result.reprojection_error_px == 2.3
-    assert result.reconstruction_attempted
