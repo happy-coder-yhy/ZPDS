@@ -110,6 +110,8 @@ def _draw_single_hand(
     score: float,
     frame_h: int,
     frame_w: int,
+    backend_active: str = "",
+    fallback_used: bool = False,
 ):
     """在帧上绘制单只手的覆层。"""
     color = _get_hand_color(handedness)
@@ -142,7 +144,9 @@ def _draw_single_hand(
                 cv2.circle(frame, (px, py), 2, color, -1, cv2.LINE_AA)
 
     # --- 标签 ---
-    label = f"{handedness}  {score:.2f}"
+    backend_label = backend_active or "unknown"
+    fallback_label = " fallback" if fallback_used else ""
+    label = f"{handedness} {score:.2f} {backend_label}{fallback_label}"
     tx, ty = bx1, max(by1 - 6, 18)
     cv2.putText(frame, label, (tx, ty),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
@@ -228,6 +232,8 @@ def generate_hands_preview(
             "score": float(row["handedness_score"]),
             "keypoints": kp_array,
             "bbox": bbox,
+            "backend_active": str(row.get("backend_active", "")),
+            "backend_fallback_used": bool(row.get("backend_fallback_used", False)),
         })
 
     if target_fps is None:
@@ -278,6 +284,8 @@ def generate_hands_preview(
                     overlay, hand_info["keypoints"], hand_info["bbox"],
                     hand_info["handedness"], hand_info["score"],
                     frame_h, frame_w,
+                    hand_info["backend_active"],
+                    hand_info["backend_fallback_used"],
                 )
 
         # 半透明混合

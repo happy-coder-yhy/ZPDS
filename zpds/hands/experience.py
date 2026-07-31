@@ -45,6 +45,7 @@ def write_hands_experience_manifest(
     config_sha256: str,
     checkpoint_sha256: str,
     validation_status: str | None,
+    model_name: str | None = None,
 ) -> str:
     """创建或更新当前 Experience 的 Hands V1 资产登记。"""
     root = Path(experience_dir).expanduser().resolve()
@@ -57,6 +58,16 @@ def write_hands_experience_manifest(
         raise FileNotFoundError(f"Hands Parquet 不存在: {outputs.parquet}")
 
     frame = pd.read_parquet(outputs.parquet)
+    detected_model_names = [
+        str(value)
+        for value in frame.get("model_name", pd.Series(dtype=str)).dropna().unique()
+        if str(value)
+    ]
+    if model_name is None:
+        unique_model_names = sorted(set(detected_model_names))
+        model_name = unique_model_names[0] if len(unique_model_names) == 1 else "mixed"
+    if not model_name:
+        raise ValueError("model_name 不能为空")
     files: dict[str, dict[str, Any]] = {}
     for role, path in (
         ("hands_2d", outputs.parquet),
@@ -98,6 +109,7 @@ def write_hands_experience_manifest(
     if not isinstance(annotations, dict):
         raise TypeError("experience_manifest.json 的 annotations 必须是对象")
     annotations["hands_v1"] = {
+        "model_name": model_name,
         "rows": len(frame),
         "annotated_frames": int(
             frame["output_frame_index"].nunique()

@@ -400,6 +400,13 @@ class HandObservation:
     model_version: str
     keypoints_any_clipped: bool = False
     keypoints_clipped_count: int = 0
+    # 逐帧模型归因。普通 HandEstimator 没有帧级结果时保留空值，Writer 会
+    # 回退到本次运行的 run_meta，兼容既有 MediaPipe 调用方。
+    backend_requested: str = ""
+    backend_active: str = ""
+    backend_fallback_used: bool = False
+    backend_fallback_reason: str = ""
+    backend_delegate: str = ""
 
     def __post_init__(self) -> None:
         if not self.segment_id:

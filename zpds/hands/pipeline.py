@@ -9,7 +9,13 @@ from typing import Protocol
 
 import numpy as np
 
-from zpds.hands.schemas import Handedness, HandObservation, PreparedFrame, RawHandResult
+from zpds.hands.schemas import (
+    Handedness,
+    HandFrameResult,
+    HandObservation,
+    PreparedFrame,
+    RawHandResult,
+)
 
 
 class HandEstimator(Protocol):
@@ -149,10 +155,11 @@ class HandsPipeline:
                 previous_timestamp_ms = timestamp_ms
 
                 try:
-                    raw_results = self._estimator.estimate(
+                    frame_result = self._estimate_frame(
                         frame.frame_rgb,
                         timestamp_ms,
                     )
+                    raw_results = frame_result.effective_hands
                     if not isinstance(raw_results, list):
                         raise TypeError(
                             "estimator.estimate() 必须返回 list[RawHandResult]，"
@@ -160,7 +167,12 @@ class HandsPipeline:
                         )
 
                     observations = [
-                        self._to_observation(frame, raw_result, detection_id)
+                        self._to_observation(
+                            frame,
+                            raw_result,
+                            detection_id,
+                            frame_result=frame_result,
+                        )
                         for detection_id, raw_result in enumerate(raw_results)
                     ]
                 except Exception as error:
@@ -191,12 +203,15 @@ class HandsPipeline:
         frame: PreparedFrame,
         raw_result: RawHandResult,
         detection_id: int,
+        *,
+        frame_result: HandFrameResult,
     ) -> HandObservation:
         if not isinstance(raw_result, RawHandResult):
             raise TypeError(
                 f"estimator 结果必须是 RawHandResult，实际为 {type(raw_result).__name__}"
             )
 
+        active_attempt = self._active_attempt(frame_result)
         return HandObservation(
             segment_id=self._reader.segment_id,
             video_stream_id=self._reader.video_stream_id,
@@ -215,11 +230,91 @@ class HandsPipeline:
             ),
             keypoints_2d=[(float(x), float(y)) for x, y in raw_result.keypoints.pixel],
             keypoints_z_relative=[float(z) for _, _, z in raw_result.keypoints.normalized],
-            model_name=self._model_name,
-            model_version=self._model_version,
+            model_name=(
+                active_attempt.model_name
+                if active_attempt is not None
+                else self._model_name
+            ),
+            model_version=(
+                active_attempt.model_version
+                if active_attempt is not None
+                else self._model_version
+            ),
             keypoints_any_clipped=raw_result.keypoints.any_clipped,
             keypoints_clipped_count=raw_result.keypoints.clipped_count,
+            backend_requested=(
+                frame_result.requested_model
+                if active_attempt is not None
+                and active_attempt.backend_name != "legacy_protocol"
+                else ""
+            ),
+            backend_active=(
+                active_attempt.backend_name
+                if active_attempt is not None
+                and active_attempt.backend_name != "legacy_protocol"
+                else ""
+            ),
+            backend_fallback_used=frame_result.fallback_used,
+            backend_fallback_reason=(frame_result.fallback_reason or ""),
         )
+
+    def _estimate_frame(
+        self,
+        frame_rgb: np.ndarray,
+        timestamp_ms: int,
+    ) -> HandFrameResult:
+        """Use rich frame results when supported without changing the base protocol."""
+        estimate_frame = getattr(self._estimator, "estimate_frame", None)
+        if callable(estimate_frame):
+            result = estimate_frame(frame_rgb, timestamp_ms)
+            if not isinstance(result, HandFrameResult):
+                raise TypeError(
+                    "estimator.estimate_frame() 必须返回 HandFrameResult，"
+                    f"实际为 {type(result).__name__}"
+                )
+            return result
+
+        raw_results = self._estimator.estimate(frame_rgb, timestamp_ms)
+        if not isinstance(raw_results, list):
+            raise TypeError(
+                "estimator.estimate() 必须返回 list[RawHandResult]，"
+                f"实际为 {type(raw_results).__name__}"
+            )
+        return HandFrameResult(
+            timestamp_ms=timestamp_ms,
+            requested_model=self._model_name,
+            primary=self._synthetic_attempt(raw_results),
+            fallback=None,
+            effective_model=self._model_name,
+            effective_hands=raw_results,
+        )
+
+    def _synthetic_attempt(self, raw_results: list[RawHandResult]):
+        """Represent legacy protocol output without inventing backend provenance."""
+        from zpds.hands.schemas import ModelAttemptResult
+
+        return ModelAttemptResult(
+            model_name=self._model_name,
+            backend_name="legacy_protocol",
+            status="detected" if raw_results else "no_hand",
+            hands=raw_results,
+            inference_ms=0.0,
+            failure_reason=None,
+            model_version=self._model_version,
+            checkpoint_sha256=None,
+            device="legacy_protocol",
+        )
+
+    @staticmethod
+    def _active_attempt(frame_result: HandFrameResult):
+        if frame_result.effective_model == frame_result.primary.model_name:
+            return frame_result.primary
+        if (
+            frame_result.fallback is not None
+            and frame_result.effective_model == frame_result.fallback.model_name
+        ):
+            return frame_result.fallback
+        return None
 
     @staticmethod
     def _model_timestamp_ms(

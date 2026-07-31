@@ -91,6 +91,26 @@ def test_config_backend_override_is_part_of_hash(tmp_path: Path) -> None:
     assert config.config_sha256 == compute_config_sha256(expected)
 
 
+def test_wilor_config_resolves_checkpoint_and_hashes_it(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "models" / "wilor.ckpt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"wilor-checkpoint")
+    document = _config_document()
+    document["hands"]["backend"] = "wilor"
+    document["hands"]["wilor"] = {
+        "checkpoint_path": "models/wilor.ckpt",
+        "model_version": "wilor_cvpr2025",
+        "device": "cpu",
+    }
+    config_path = _write_config(tmp_path, document)
+
+    config = HandsPipelineConfig.load(config_path)
+
+    assert config.wilor is not None
+    assert config.wilor.checkpoint_path == str(checkpoint.resolve())
+    assert config.checkpoint_sha256 == hashlib.sha256(b"wilor-checkpoint").hexdigest()
+
+
 def test_config_rejects_invalid_confidence(tmp_path: Path) -> None:
     document = _config_document()
     document["hands"]["min_tracking_confidence"] = 1.5
@@ -178,6 +198,7 @@ def test_experience_manifest_registers_hands_assets(tmp_path: Path) -> None:
     hands = manifest["annotations"]["hands_v1"]
 
     assert hands["rows"] == 1
+    assert hands["model_name"] == "mediapipe"
     assert hands["annotated_frames"] == 1
     assert hands["validation_status"] == "pass"
     assert hands["files"]["hands_2d"]["uri"] == "assets/poses/hands_2d.parquet"

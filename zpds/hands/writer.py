@@ -202,15 +202,24 @@ def _observation_to_row(
         "model_version": observation.model_version,
         "checkpoint_sha256": checkpoint_sha256,
         "config_sha256": config_sha256,
-        "backend_requested": (run_meta or {}).get("backend_requested", ""),
-        "backend_active": (run_meta or {}).get("backend_active", ""),
+        "backend_requested": (
+            observation.backend_requested
+            or (run_meta or {}).get("backend_requested", "")
+        ),
+        "backend_active": (
+            observation.backend_active or (run_meta or {}).get("backend_active", "")
+        ),
         "backend_fallback_used": bool(
-            (run_meta or {}).get("backend_fallback_used", False)
+            observation.backend_fallback_used
+            or (run_meta or {}).get("backend_fallback_used", False)
         ),
-        "backend_fallback_reason": (run_meta or {}).get(
-            "backend_fallback_reason", ""
+        "backend_fallback_reason": (
+            observation.backend_fallback_reason
+            or (run_meta or {}).get("backend_fallback_reason", "")
         ),
-        "backend_delegate": (run_meta or {}).get("backend_delegate", ""),
+        "backend_delegate": (
+            observation.backend_delegate or (run_meta or {}).get("backend_delegate", "")
+        ),
     }
 
 
@@ -284,6 +293,58 @@ def estimator_provenance(estimator: Any, config: dict | None = None) -> tuple[di
         "config_sha256": model_meta["config_sha256"],
     }
     return {**model_meta, **run_meta}, report
+
+
+def wilor_provenance(estimator: Any, config: dict | None = None) -> tuple[dict, dict]:
+    """Build WiLoR-specific parquet provenance and a serializable run summary.
+
+    The estimator remains duck-typed so this module does not import optional WiLoR
+    dependencies.  A caller that records MediaPipe fallback frames should use the
+    frame-level fields on ``HandObservation``; ``run_meta`` is retained for the
+    legacy writer interface and for frames without observations.
+    """
+    model_info = _as_plain_dict(getattr(estimator, "model_info", None))
+    frame_stats = _as_plain_dict(getattr(estimator, "frame_stats", None))
+    report_document: dict[str, Any] = {}
+    build_run_report = getattr(estimator, "build_run_report", None)
+    if callable(build_run_report):
+        report = build_run_report()
+        to_dict = getattr(report, "to_dict", None)
+        report_document = to_dict() if callable(to_dict) else _as_plain_dict(report)
+
+    fallback_used = int(frame_stats.get("fallback_used", 0)) > 0
+    fallback_reason = _first_wilor_failure_reason(report_document)
+    if fallback_used and not fallback_reason:
+        fallback_reason = "WiLoR frame failure triggered MediaPipe fallback; see hands_run.json"
+
+    model_meta = {
+        "model_name": "wilor",
+        "model_version": model_info.get("model_version", ""),
+        "checkpoint_sha256": model_info.get("checkpoint_sha256", ""),
+        "config_sha256": compute_config_sha256(config) if config is not None else "",
+    }
+    run_meta = {
+        "backend_requested": "wilor",
+        "backend_active": "wilor",
+        "backend_fallback_used": fallback_used,
+        "backend_fallback_reason": fallback_reason,
+        "backend_delegate": model_info.get("device", ""),
+    }
+    report_document.update(
+        {
+            "model": report_document.get("model", model_info),
+            "session_statistics": frame_stats,
+            "config_sha256": model_meta["config_sha256"],
+        }
+    )
+    return {**model_meta, **run_meta}, report_document
+
+
+def _first_wilor_failure_reason(report: dict[str, Any]) -> str:
+    for error in report.get("errors", []):
+        if isinstance(error, dict) and error.get("failure_reason"):
+            return str(error["failure_reason"])
+    return ""
 
 
 def write_hands_run_report(report: dict, output_path: str) -> str:

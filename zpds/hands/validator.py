@@ -316,3 +316,245 @@ def validate_hands_parquet(
         "errors": errors,
         "warnings": warnings,
     }
+
+
+def validate_wilor_hands(
+    parquet_path: str,
+    *,
+    hands_run_path: str,
+    image_width: int,
+    image_height: int,
+    segment_json_path: str | None = None,
+    max_failure_ratio: float = 0.02,
+    expected_model_version: str = "wilor_cvpr2025",
+    wrist_tolerance_px: float = 2.0,
+) -> dict:
+    """Validate the additional contracts required for a WiLoR Hands V1 run.
+
+    This intentionally layers WiLoR checks on top of the model-agnostic validator.
+    It accepts MediaPipe rows only when they are explicitly attributed to a WiLoR
+    frame fallback, so a mixed output cannot silently hide a different model.
+    """
+    if image_width <= 0 or image_height <= 0:
+        raise ValueError("image_width 和 image_height 必须为正数")
+    if not 0.0 <= max_failure_ratio <= 1.0:
+        raise ValueError("max_failure_ratio 必须在 [0, 1] 范围内")
+    if wrist_tolerance_px < 0:
+        raise ValueError("wrist_tolerance_px 不能为负数")
+
+    result = validate_hands_parquet(
+        parquet_path,
+        segment_json_path=segment_json_path,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    checks = result["checks"]
+    stats = result["statistics"]
+    errors = result["errors"]
+    warnings = result.get("warnings", [])
+
+    try:
+        frame = pd.read_parquet(parquet_path)
+    except (OSError, ValueError, ImportError, pa.ArrowException):
+        # The generic report already records the read failure.
+        return result
+
+    _validate_wilor_pixel_inverse_transform(
+        frame, image_width, image_height, checks, errors
+    )
+    _validate_wilor_reprojection_consistency(
+        frame, wrist_tolerance_px, checks, errors
+    )
+
+    run_document: dict | None = None
+    try:
+        run_document = _load_wilor_run_report(hands_run_path)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        checks["wilor_provenance"] = "fail"
+        checks["failure_records"] = "fail"
+        errors.append(f"Cannot read WiLoR hands_run.json: {error}")
+
+    if run_document is not None:
+        _validate_wilor_provenance(
+            frame,
+            run_document,
+            expected_model_version,
+            checks,
+            errors,
+        )
+        _validate_wilor_failure_records(
+            run_document,
+            max_failure_ratio,
+            checks,
+            stats,
+            errors,
+        )
+
+    _validate_wilor_backend_attribution(frame, checks, errors)
+
+    result["status"] = "fail" if errors else ("warn" if warnings else "pass")
+    return result
+
+
+def _validate_wilor_pixel_inverse_transform(
+    frame: pd.DataFrame,
+    image_width: int,
+    image_height: int,
+    checks: dict,
+    errors: list,
+) -> None:
+    invalid_rows: list[int] = []
+    for index, keypoints in frame.get("keypoints_2d", pd.Series(dtype=object)).items():
+        try:
+            points = np.array(list(keypoints), dtype=np.float64)
+        except (TypeError, ValueError):
+            invalid_rows.append(int(index))
+            continue
+        if (
+            points.shape != (21, 2)
+            or not np.isfinite(points).all()
+            or (points[:, 0] < 0).any()
+            or (points[:, 0] > image_width - 1).any()
+            or (points[:, 1] < 0).any()
+            or (points[:, 1] > image_height - 1).any()
+        ):
+            invalid_rows.append(int(index))
+    checks["pixel_inverse_transform"] = "pass" if not invalid_rows else "fail"
+    if invalid_rows:
+        errors.append(
+            "WiLoR pixel inverse transform invalid in rows: "
+            f"{invalid_rows[:20]}..."
+        )
+
+
+def _validate_wilor_reprojection_consistency(
+    frame: pd.DataFrame,
+    wrist_tolerance_px: float,
+    checks: dict,
+    errors: list,
+) -> None:
+    invalid_rows: list[int] = []
+    for index, row in frame.iterrows():
+        try:
+            wrist = np.array(list(row["keypoints_2d"]), dtype=np.float64)[0]
+            x1, y1, x2, y2 = (
+                float(row["bbox_x1"]),
+                float(row["bbox_y1"]),
+                float(row["bbox_x2"]),
+                float(row["bbox_y2"]),
+            )
+        except (IndexError, KeyError, TypeError, ValueError):
+            invalid_rows.append(int(index))
+            continue
+        if (
+            wrist.shape != (2,)
+            or not np.isfinite(wrist).all()
+            or wrist[0] < x1 - wrist_tolerance_px
+            or wrist[0] > x2 + wrist_tolerance_px
+            or wrist[1] < y1 - wrist_tolerance_px
+            or wrist[1] > y2 + wrist_tolerance_px
+        ):
+            invalid_rows.append(int(index))
+    checks["reprojection_consistency"] = "pass" if not invalid_rows else "fail"
+    if invalid_rows:
+        errors.append(
+            "WiLoR wrist is outside its bbox in rows: "
+            f"{invalid_rows[:20]}..."
+        )
+
+
+def _load_wilor_run_report(path: str) -> dict:
+    document = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise TypeError("WiLoR hands_run.json 顶层必须是对象")
+    return document
+
+
+def _validate_wilor_provenance(
+    frame: pd.DataFrame,
+    report: dict,
+    expected_model_version: str,
+    checks: dict,
+    errors: list,
+) -> None:
+    model = report.get("model")
+    model = model if isinstance(model, dict) else {}
+    wilor_rows = frame[frame.get("model_name", pd.Series(dtype=str)) == "wilor"]
+    parquet_complete = (
+        not wilor_rows.empty
+        and "checkpoint_sha256" in wilor_rows
+        and wilor_rows["checkpoint_sha256"].astype(str).ne("").all()
+        and "model_version" in wilor_rows
+        and wilor_rows["model_version"].eq(expected_model_version).all()
+    )
+    report_complete = (
+        model.get("name") == "wilor"
+        and model.get("version") == expected_model_version
+        and bool(model.get("checkpoint_sha256"))
+        and bool(model.get("device"))
+    )
+    checks["wilor_provenance"] = "pass" if parquet_complete and report_complete else "fail"
+    if checks["wilor_provenance"] == "fail":
+        errors.append(
+            "WiLoR provenance must include matching model version, checkpoint SHA-256, "
+            "and device"
+        )
+
+
+def _validate_wilor_failure_records(
+    report: dict,
+    max_failure_ratio: float,
+    checks: dict,
+    stats: dict,
+    errors: list,
+) -> None:
+    coverage = report.get("coverage")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    total = coverage.get("decoded_frames", coverage.get("total_frames"))
+    failed = coverage.get("failed_frames", coverage.get("failed"))
+    try:
+        total_value = int(total)
+        failed_value = int(failed)
+    except (TypeError, ValueError):
+        total_value, failed_value = 0, 0
+    ratio = failed_value / total_value if total_value > 0 else float("inf")
+    stats["wilor_failure_ratio"] = ratio
+    ok = total_value > 0 and 0 <= failed_value <= total_value and ratio < max_failure_ratio
+    checks["failure_records"] = "pass" if ok else "fail"
+    if not ok:
+        errors.append(
+            "WiLoR failure ratio must be below "
+            f"{max_failure_ratio:.2%}; got {failed_value}/{total_value}"
+        )
+
+
+def _validate_wilor_backend_attribution(
+    frame: pd.DataFrame,
+    checks: dict,
+    errors: list,
+) -> None:
+    required = {
+        "backend_requested",
+        "backend_active",
+        "backend_fallback_used",
+        "backend_fallback_reason",
+    }
+    if not required.issubset(frame.columns):
+        checks["backend_attribution"] = "fail"
+        errors.append("WiLoR backend attribution columns are missing")
+        return
+
+    requested = frame["backend_requested"].astype(str)
+    active = frame["backend_active"].astype(str)
+    fallback_used = frame["backend_fallback_used"].astype(bool)
+    reason = frame["backend_fallback_reason"].fillna("").astype(str)
+    valid = (
+        requested.eq("wilor")
+        & active.isin(["wilor", "mediapipe"])
+        & (~fallback_used | reason.ne(""))
+        & ((active != "mediapipe") | fallback_used)
+    )
+    checks["backend_attribution"] = "pass" if valid.all() else "fail"
+    if not valid.all():
+        bad_rows = frame.index[~valid].tolist()
+        errors.append(f"Invalid WiLoR backend attribution in rows: {bad_rows[:20]}...")

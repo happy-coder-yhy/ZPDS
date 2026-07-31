@@ -7,7 +7,9 @@ from zpds.hands.pipeline import HandsPipeline, HandsPipelineError
 from zpds.hands.schemas import (
     HAND_KEYPOINT_COUNT,
     HandBBox,
+    HandFrameResult,
     HandKeypoints,
+    ModelAttemptResult,
     PreparedFrame,
     RawHandResult,
 )
@@ -213,6 +215,63 @@ def test_pipeline_detection_ids_restart_for_each_frame() -> None:
     assert pipeline.stats.frames_processed == 2
     assert pipeline.stats.observations_created == 3
     assert pipeline.stats.frames_with_hands == 2
+
+
+def test_pipeline_preserves_frame_level_wilor_fallback_attribution() -> None:
+    class RichEstimator:
+        def estimate_frame(
+            self,
+            frame_rgb: np.ndarray,
+            timestamp_ms: int,
+        ) -> HandFrameResult:
+            primary = ModelAttemptResult(
+                model_name="wilor",
+                backend_name="wilor",
+                status="failed",
+                hands=[],
+                inference_ms=1.0,
+                failure_reason="synthetic WiLoR failure",
+                model_version="wilor_cvpr2025",
+                checkpoint_sha256="wilor-sha",
+                device="cuda:0",
+            )
+            fallback = ModelAttemptResult(
+                model_name="mediapipe",
+                backend_name="mediapipe",
+                status="detected",
+                hands=[_raw_hand("Right")],
+                inference_ms=1.0,
+                failure_reason=None,
+                model_version="hand_landmarker_v1",
+                checkpoint_sha256=None,
+                device="cpu",
+            )
+            return HandFrameResult(
+                timestamp_ms=timestamp_ms,
+                requested_model="wilor",
+                primary=primary,
+                fallback=fallback,
+                fallback_attempted=True,
+                fallback_used=True,
+                fallback_reason=primary.failure_reason,
+                effective_model="mediapipe",
+                effective_hands=fallback.hands,
+            )
+
+    pipeline = HandsPipeline(
+        reader=FakeReader([_frame(0, 0)]),
+        estimator=RichEstimator(),
+        model_name="wilor",
+        model_version="wilor_cvpr2025",
+    )
+
+    observation = next(iter(pipeline))
+
+    assert observation.model_name == "mediapipe"
+    assert observation.backend_requested == "wilor"
+    assert observation.backend_active == "mediapipe"
+    assert observation.backend_fallback_used is True
+    assert observation.backend_fallback_reason == "synthetic WiLoR failure"
 
 
 @pytest.mark.parametrize(

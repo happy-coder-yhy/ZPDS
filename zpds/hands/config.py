@@ -13,9 +13,10 @@ import yaml
 
 from zpds.hands.mediapipe_adapter import HandEstimatorConfig
 from zpds.hands.schemas import ModelInfo
+from zpds.hands.wilor_schema import WiLoRConfig
 
 VALID_BACKENDS = frozenset(
-    {"auto", "tasks_hand_landmarker", "solutions_hands"}
+    {"auto", "tasks_hand_landmarker", "solutions_hands", "wilor"}
 )
 
 
@@ -37,6 +38,7 @@ class HandsPipelineConfig:
     estimator: HandEstimatorConfig
     config_sha256: str
     checkpoint_sha256: str
+    wilor: WiLoRConfig | None = None
 
     @classmethod
     def load(
@@ -71,13 +73,57 @@ class HandsPipelineConfig:
             model_path = config_path.parent / model_path
         estimator.tasks.model_path = str(model_path.resolve())
         model_info = ModelInfo.from_file(estimator.tasks.model_path)
+        wilor = cls._load_wilor_config(config_path, hands_document)
+        checkpoint_sha256 = (
+            _sha256_file(Path(wilor.checkpoint_path)) if wilor is not None else model_info.sha256
+        )
 
         return cls(
             path=config_path,
             document=document,
             estimator=estimator,
             config_sha256=_config_sha256(document),
-            checkpoint_sha256=model_info.sha256,
+            checkpoint_sha256=checkpoint_sha256,
+            wilor=wilor,
+        )
+
+    @staticmethod
+    def _load_wilor_config(
+        config_path: Path,
+        hands_document: dict[str, Any],
+    ) -> WiLoRConfig | None:
+        if hands_document.get("backend") != "wilor":
+            return None
+        raw = hands_document.get("wilor")
+        if not isinstance(raw, dict):
+            raise TypeError("hands.backend=wilor 时 hands.wilor 必须是对象")
+
+        def resolve_path(name: str) -> str:
+            value = raw.get(name, "")
+            if not value:
+                return ""
+            path = Path(str(value)).expanduser()
+            if not path.is_absolute():
+                path = config_path.parent / path
+            return str(path.resolve())
+
+        checkpoint_path = resolve_path("checkpoint_path")
+        if not checkpoint_path:
+            raise ValueError("hands.wilor.checkpoint_path 不能为空")
+        if not Path(checkpoint_path).is_file():
+            raise FileNotFoundError(f"WiLoR checkpoint 不存在: {checkpoint_path}")
+        return WiLoRConfig(
+            checkpoint_path=checkpoint_path,
+            expected_sha256=str(raw.get("checkpoint_sha256", raw.get("expected_sha256", ""))),
+            wilor_source_path=resolve_path("wilor_source_path"),
+            detector_path=resolve_path("detector_path"),
+            model_config_path=resolve_path("model_config_path"),
+            device=str(raw.get("device", "cpu")),
+            precision=str(raw.get("precision", "float32")),
+            model_version=str(raw.get("model_version", "wilor_cvpr2025")),
+            upstream_repository=str(raw.get("upstream_repository", "")),
+            upstream_git_commit=str(raw.get("upstream_git_commit", "")),
+            upstream_license_checked=bool(raw.get("upstream_license_checked", False)),
         )
 
     @staticmethod
@@ -104,6 +150,14 @@ class HandsPipelineConfig:
             raise ValueError("hands.tasks.delegate 必须是 cpu 或 gpu")
         if config.solutions.model_complexity not in {0, 1}:
             raise ValueError("hands.solutions.model_complexity 必须是 0 或 1")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)

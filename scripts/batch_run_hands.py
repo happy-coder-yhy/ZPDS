@@ -43,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config.yaml", help="Hands YAML 配置")
     parser.add_argument(
         "--backend",
-        choices=["auto", "tasks_hand_landmarker", "solutions_hands"],
+        choices=["auto", "tasks_hand_landmarker", "solutions_hands", "wilor"],
         help="覆盖配置文件中的模型后端",
     )
     parser.add_argument(
