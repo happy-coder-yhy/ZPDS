@@ -120,6 +120,8 @@ def test_pipeline_handles_frames_without_hands() -> None:
     assert pipeline.stats.frames_processed == 2
     assert pipeline.stats.observations_created == 0
     assert pipeline.stats.frames_with_hands == 0
+    assert pipeline.stats.frames_no_hand == 2
+    assert pipeline.stats.frames_failed == 0
     assert pipeline.stats.average_fps > 0
 
 
@@ -325,7 +327,105 @@ def test_pipeline_wraps_estimator_failure_with_frame_context() -> None:
     assert "output_frame_index=1" in message
     assert "timestamp_ns=33333333" in message
     assert isinstance(error_info.value.__cause__, RuntimeError)
-    assert pipeline.stats.frames_processed == 1
+    assert pipeline.stats.frames_processed == 2
+    assert pipeline.stats.frames_failed == 1
+    assert pipeline.frame_statistics.to_manifest() == {
+        "requested": 2,
+        "detected": 0,
+        "no_hand": 1,
+        "failed": 1,
+        "skipped_invalid_input": 0,
+    }
+
+
+def test_run_frames_records_every_status_and_continues_after_failure() -> None:
+    frames = [
+        _frame(
+            index,
+            index * 33_333_333,
+            source_frame_index=index + 10,
+            source_timestamp_ns=1_000_000_000 + index * 33_333_333,
+        )
+        for index in range(4)
+    ]
+    estimator = FakeEstimator(
+        [
+            [_raw_hand("Left")],
+            [],
+            RuntimeError("single frame failure"),
+            [_raw_hand("Right")],
+        ]
+    )
+    pipeline = HandsPipeline(
+        reader=FakeReader(frames),
+        estimator=estimator,
+        model_name="wilor",
+        model_version="test",
+        active_backend="wilor",
+    )
+
+    records = pipeline.run_frames_to_list()
+
+    assert [record.inference_status for record in records] == [
+        "detected",
+        "no_hand",
+        "failed",
+        "detected",
+    ]
+    assert estimator.timestamps_ms == [0, 33, 66, 99]
+    assert [record.frame.output_frame_index for record in records] == [0, 1, 2, 3]
+    assert [record.frame.timestamp_ns for record in records] == [
+        0,
+        33_333_333,
+        66_666_666,
+        99_999_999,
+    ]
+    assert [record.frame.source_frame_index for record in records] == [
+        10,
+        11,
+        12,
+        13,
+    ]
+    assert records[2].failure_reason == (
+        "RuntimeError: single frame failure"
+    )
+    assert all(record.active_backend == "wilor" for record in records)
+    assert all(record.inference_ms >= 0 for record in records)
+    assert pipeline.stats.frames_processed == 4
+    assert pipeline.stats.frames_with_hands == 2
+    assert pipeline.stats.frames_no_hand == 1
+    assert pipeline.stats.frames_failed == 1
+    assert pipeline.stats.observations_created == 2
+    assert pipeline.frame_statistics.requested == 4
+    assert pipeline.frame_statistics.accounted == 4
+    assert pipeline.frame_statistics.is_complete
+
+
+def test_run_frames_turns_invalid_model_output_into_failed_status() -> None:
+    pipeline, estimator = _pipeline(
+        [_frame(0, 0), _frame(1, 33_333_333)],
+        [["not-a-result"], []],
+    )
+
+    records = pipeline.run_frames_to_list()
+
+    assert [record.inference_status for record in records] == [
+        "failed",
+        "no_hand",
+    ]
+    assert "RawHandResult" in (records[0].failure_reason or "")
+    assert estimator.timestamps_ms == [0, 33]
+    assert pipeline.stats.frames_processed == 2
+    assert pipeline.stats.frames_failed == 1
+    assert pipeline.stats.frames_no_hand == 1
+
+
+def test_pipeline_interfaces_share_one_shot_guard() -> None:
+    pipeline, _ = _pipeline([_frame(0, 0)], [[]])
+
+    assert pipeline.run_frames_to_list()[0].inference_status == "no_hand"
+    with pytest.raises(HandsPipelineError, match="不能重复运行"):
+        list(pipeline)
 
 
 @pytest.mark.parametrize("invalid_response", [None, (), ["not-a-result"]])

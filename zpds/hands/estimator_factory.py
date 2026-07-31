@@ -1,0 +1,285 @@
+"""Hands 模型工厂和运行时元数据。
+
+阶段三只提供稳定的工厂边界。MediaPipe 可直接创建；WiLoR 的真实创建逻辑
+由后续 ``wilor_adapter.py`` 接入，未接入时必须明确失败。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
+from zpds.hands.config import HandsPipelineConfig
+from zpds.hands.contracts import HandEstimator
+from zpds.hands.mediapipe_adapter import MediaPipeHandEstimator
+
+
+class EstimatorUnavailableError(RuntimeError):
+    """配置选择的模型尚未在当前运行环境中可用。"""
+
+
+@dataclass
+class EstimatorRuntime:
+    """模型实例及写入 Manifest/Parquet 所需的来源信息。"""
+
+    estimator: HandEstimator
+    model_name: str
+    model_version: str
+    checkpoint_sha256: str
+    active_backend: str
+    upstream_git_commit: str = ""
+    run_meta: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.estimator, HandEstimator):
+            raise TypeError("estimator 必须实现 estimate() 和 close()")
+        for field_name in ("model_name", "active_backend"):
+            if not str(getattr(self, field_name)).strip():
+                raise ValueError(f"EstimatorRuntime.{field_name} 不能为空")
+        if not isinstance(self.run_meta, dict):
+            raise TypeError("EstimatorRuntime.run_meta 必须是字典")
+
+
+def validate_estimator_runtime(
+    primary_model: str,
+    runtime: EstimatorRuntime,
+    config: HandsPipelineConfig,
+) -> None:
+    """在 Pipeline 接管前验证人员 B 返回的运行时元数据。"""
+
+    if runtime.model_name != primary_model:
+        raise ValueError(
+            "EstimatorRuntime.model_name 与路由选择不一致: "
+            f"expected={primary_model!r}, actual={runtime.model_name!r}"
+        )
+    if primary_model != "wilor":
+        return
+
+    expected_sha256 = config.wilor.checkpoint_sha256.lower()
+    if not expected_sha256:
+        raise ValueError("hands.wilor.checkpoint_sha256 未配置")
+    if runtime.checkpoint_sha256.lower() != expected_sha256:
+        raise ValueError("WiLoR runtime checkpoint_sha256 与配置不一致")
+
+    expected_commit = config.wilor.upstream_commit
+    if not expected_commit:
+        raise ValueError("hands.wilor.upstream_commit 未配置")
+    if runtime.upstream_git_commit != expected_commit:
+        raise ValueError("WiLoR runtime upstream_git_commit 与配置不一致")
+    if runtime.active_backend != "wilor":
+        raise ValueError("WiLoR runtime active_backend 必须为 'wilor'")
+
+
+def create_hand_estimator(
+    primary_model: str,
+    config: HandsPipelineConfig,
+) -> EstimatorRuntime:
+    """根据 Router 结果创建模型；禁止跨模型静默回退。"""
+    if primary_model == "wilor":
+        return _create_wilor_estimator(config)
+        raise EstimatorUnavailableError(
+            "WiLoR 已被选为主模型，但真实 wilor_adapter.py 尚未接入；"
+            "不能静默改用 MediaPipe"
+        )
+    if primary_model != "mediapipe":
+        raise ValueError(f"未知 Hands 主模型: {primary_model!r}")
+
+    estimator = MediaPipeHandEstimator.from_config(config.estimator)
+    backend_info = estimator.backend_info
+    active_backend = (
+        backend_info.active_backend if backend_info is not None else "unknown"
+    )
+    run_meta: dict[str, object] = {
+        "backend_requested": (
+            backend_info.requested_backend if backend_info else ""
+        ),
+        "backend_active": active_backend,
+        "backend_fallback_used": (
+            backend_info.fallback_used if backend_info else False
+        ),
+        "backend_fallback_reason": (
+            backend_info.fallback_reason if backend_info else ""
+        ),
+        "backend_delegate": backend_info.delegate if backend_info else "",
+    }
+    try:
+        model_version = version("mediapipe")
+    except PackageNotFoundError:
+        model_version = ""
+    return EstimatorRuntime(
+        estimator=estimator,
+        model_name="mediapipe",
+        model_version=model_version,
+        checkpoint_sha256=estimator.model_info.sha256,
+        active_backend=active_backend,
+        run_meta=run_meta,
+    )
+
+
+def _read_source_commit(source_path: Path) -> str:
+    git_dir = source_path / ".git"
+    head_path = git_dir / "HEAD"
+    if not head_path.is_file():
+        return ""
+    head = head_path.read_text(encoding="utf-8").strip()
+    if not head.startswith("ref: "):
+        return head
+    ref_name = head.removeprefix("ref: ").strip()
+    ref_path = git_dir / Path(ref_name)
+    if ref_path.is_file():
+        return ref_path.read_text(encoding="utf-8").strip()
+    packed_refs = git_dir / "packed-refs"
+    if packed_refs.is_file():
+        for line in packed_refs.read_text(encoding="utf-8").splitlines():
+            if line.startswith(("#", "^")):
+                continue
+            commit, _, name = line.partition(" ")
+            if name == ref_name:
+                return commit
+    return ""
+
+
+def _create_wilor_estimator(config: HandsPipelineConfig) -> EstimatorRuntime:
+    """Create the real WiLoR stack through its lazy-loading modules."""
+    wilor = config.wilor
+    source_path = Path(wilor.source_path)
+    if not wilor.source_path or not (source_path / "wilor").is_dir():
+        raise EstimatorUnavailableError(
+            "WiLoR source package is unavailable: "
+            f"{source_path if wilor.source_path else '<not configured>'}; "
+            "不能静默改用 MediaPipe"
+        )
+    if not wilor.upstream_commit:
+        raise EstimatorUnavailableError(
+            "hands.wilor.upstream_commit is not configured"
+        )
+    source_commit = _read_source_commit(source_path)
+    if source_commit != wilor.upstream_commit:
+        raise EstimatorUnavailableError(
+            "WiLoR source commit does not match config: "
+            f"expected={wilor.upstream_commit}, actual={source_commit or 'unknown'}"
+        )
+    if not wilor.upstream_license_checked:
+        raise EstimatorUnavailableError(
+            "WiLoR upstream license has not been acknowledged in config"
+        )
+
+    from zpds.hands.backends.wilor import WiLoRBackend
+    from zpds.hands.wilor_adapter import WiLoRAdapter
+    from zpds.hands.wilor_estimator import (
+        WiLoREstimatorConfig,
+        WiLoRHandEstimator,
+    )
+    from zpds.hands.wilor_joint_mapping import (
+        MAPPING_VERSION,
+        WILOR_TO_HANDS_V1_V1,
+    )
+    from zpds.hands.wilor_schema import (
+        WiLoRConfig as BackendWiLoRConfig,
+    )
+    from zpds.hands.wilor_schema import (
+        WiLoRFallbackPolicy,
+    )
+
+    backend_fields = getattr(BackendWiLoRConfig, "__dataclass_fields__", {})
+    if "batch_size" not in backend_fields:
+        raise EstimatorUnavailableError(
+            "Person B WiLoRConfig delivery does not expose batch_size; "
+            "the 8 GiB GPU safety setting cannot be enforced"
+        )
+    estimator_fields = getattr(
+        WiLoREstimatorConfig,
+        "__dataclass_fields__",
+        {},
+    )
+    missing_estimator_fields = {
+        "joint_mapping",
+        "joint_mapping_version",
+    } - set(estimator_fields)
+    if missing_estimator_fields:
+        raise EstimatorUnavailableError(
+            "Person B WiLoR estimator delivery is missing the validated "
+            "21-point mapping contract: "
+            f"{sorted(missing_estimator_fields)}"
+        )
+
+    if wilor.require_joint_mapping_version not in {
+        None,
+        MAPPING_VERSION,
+    }:
+        raise EstimatorUnavailableError(
+            "Unsupported WiLoR joint mapping version: "
+            f"{wilor.require_joint_mapping_version}"
+        )
+    precision = {
+        "fp16": "float16",
+        "fp32": "float32",
+    }.get(wilor.precision)
+    if precision is None:
+        raise EstimatorUnavailableError(
+            f"WiLoR backend does not support precision={wilor.precision!r}"
+        )
+
+    backend_config = BackendWiLoRConfig(
+        checkpoint_path=wilor.checkpoint_path,
+        expected_sha256=wilor.checkpoint_sha256.lower(),
+        wilor_source_path=str(source_path),
+        detector_path=wilor.detector_path,
+        model_config_path=wilor.model_config_path,
+        device=wilor.device,
+        precision=precision,
+        batch_size=wilor.batch_size,
+        model_version=wilor.model_version,
+        upstream_repository=wilor.upstream_repository,
+        upstream_git_commit=wilor.upstream_commit,
+        upstream_license_checked=wilor.upstream_license_checked,
+    )
+    backend = WiLoRBackend(backend_config)
+    adapter = WiLoRAdapter(backend)
+    estimator = WiLoRHandEstimator(
+        adapter=adapter,
+        model_info=backend.model_info,
+        fallback_estimator=None,
+        config=WiLoREstimatorConfig(
+            fallback_policy=WiLoRFallbackPolicy(
+                on_wilor_init_failure=False,
+                on_wilor_frame_failure=False,
+                on_wilor_no_hand=False,
+                on_invalid_input=False,
+            ),
+            model_name="wilor",
+            model_version=wilor.model_version,
+            joint_mapping=WILOR_TO_HANDS_V1_V1,
+            joint_mapping_version=MAPPING_VERSION,
+        ),
+    )
+    return EstimatorRuntime(
+        estimator=estimator,
+        model_name="wilor",
+        model_version=backend.model_info.model_version,
+        checkpoint_sha256=backend.model_info.checkpoint_sha256,
+        active_backend="wilor",
+        upstream_git_commit=backend.model_info.upstream_git_commit,
+        run_meta={
+            "backend_requested": "wilor",
+            "backend_active": "wilor",
+            "backend_fallback_used": False,
+            "backend_fallback_reason": "",
+            "device": backend.model_info.device,
+            "precision": backend.model_info.precision,
+            "source_path": str(source_path),
+            "upstream_repository": wilor.upstream_repository,
+            "upstream_git_commit": wilor.upstream_commit,
+            "model_revision": wilor.model_revision,
+            "joint_mapping_version": MAPPING_VERSION,
+        },
+    )
+
+
+__all__ = [
+    "EstimatorRuntime",
+    "EstimatorUnavailableError",
+    "create_hand_estimator",
+    "validate_estimator_runtime",
+]

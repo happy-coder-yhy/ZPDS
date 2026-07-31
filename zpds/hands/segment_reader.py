@@ -97,8 +97,13 @@ class PreparedSegmentReader:
     def sample_map_path(self) -> Path:
         return self._sample_map_path
 
-    def __len__(self) -> int:
+    @property
+    def expected_frame_count(self) -> int:
+        """Sample Map 声明的 Prepared 输出帧数。"""
         return len(self._sample_map)
+
+    def __len__(self) -> int:
+        return self.expected_frame_count
 
     def __iter__(self) -> Iterator[PreparedFrame]:
         capture = cv2.VideoCapture(str(self._video_path))

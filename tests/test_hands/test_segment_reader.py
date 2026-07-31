@@ -119,6 +119,7 @@ def test_reader_yields_rgb_frames_with_sample_map_metadata(tmp_path: Path) -> No
     assert reader.segment_id == "seg_000001"
     assert reader.video_stream_id == "ego_rgb"
     assert len(reader) == 3
+    assert reader.expected_frame_count == 3
     assert all(isinstance(frame, PreparedFrame) for frame in frames)
     assert [frame.output_frame_index for frame in frames] == [0, 1, 2]
     assert [frame.timestamp_ns for frame in frames] == [

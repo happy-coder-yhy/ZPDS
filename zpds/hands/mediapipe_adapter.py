@@ -66,7 +66,7 @@ class HandEstimatorConfig:
     solutions: _SolutionsConfig = field(default_factory=lambda: _SolutionsConfig())
 
     @classmethod
-    def from_yaml(cls, yaml_path: str | Path) -> "HandEstimatorConfig":
+    def from_yaml(cls, yaml_path: str | Path) -> HandEstimatorConfig:
         """从 YAML 配置文件加载。期望顶层 ``hands:`` 键。"""
         import yaml
 
@@ -81,7 +81,16 @@ class HandEstimatorConfig:
             raise ValueError(f"配置文件为空: {path.resolve()}")
 
         hands_cfg = data.get("hands", data)
+        if not isinstance(hands_cfg, dict):
+            raise TypeError("配置中的 hands 必须是对象")
+        mediapipe_cfg = hands_cfg.get("mediapipe", hands_cfg)
+        if not isinstance(mediapipe_cfg, dict):
+            raise TypeError("配置中的 hands.mediapipe 必须是对象")
+        return cls.from_mapping(mediapipe_cfg)
 
+    @classmethod
+    def from_mapping(cls, hands_cfg: dict) -> HandEstimatorConfig:
+        """从 MediaPipe 配置对象加载，供新旧配置结构共同使用。"""
         # 解析子配置
         tasks_cfg = hands_cfg.get("tasks", {})
         solutions_cfg = hands_cfg.get("solutions", {})

@@ -5,23 +5,33 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
-from importlib.metadata import PackageNotFoundError, version
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import cv2
 
+from zpds.hands.backend_router import HandsBackendRouter
 from zpds.hands.config import HandsOutputPaths, HandsPipelineConfig
+from zpds.hands.estimator_factory import (
+    EstimatorRuntime,
+    create_hand_estimator,
+    validate_estimator_runtime,
+)
 from zpds.hands.experience import write_hands_experience_manifest
-from zpds.hands.mediapipe_adapter import (
-    MediaPipeHandEstimator,
+from zpds.hands.orchestration import (
+    InferenceWriterBundle,
+    create_inference_writers,
 )
 from zpds.hands.pipeline import HandsPipeline
 from zpds.hands.preview import generate_hands_preview
 from zpds.hands.segment_reader import PreparedSegmentReader
-from zpds.hands.validator import validate_hands_parquet, validate_wilor_hands
-from zpds.hands.writer import wilor_provenance, write_hand_observations
+from zpds.hands.validator import validate_hands_parquet
+from zpds.hands.wilor_preflight import check_wilor_assets
+from zpds.hands.writer import write_hand_observations
+
+EstimatorFactory = Callable[[str, HandsPipelineConfig], EstimatorRuntime]
+InferenceWriterFactory = Callable[..., InferenceWriterBundle]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,11 +42,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stream-id", help="RGB Stream ID；唯一 RGB 流时可省略")
     parser.add_argument("--config", default="config.yaml", help="Hands YAML 配置")
     parser.add_argument(
+        "--source-kind",
+        choices=["ego", "non_ego"],
+        default="non_ego",
+        help="数据源类型；必须显式设为 ego 才会选择 ego 主后端",
+    )
+    parser.add_argument(
         "--backend",
-        choices=["auto", "tasks_hand_landmarker", "solutions_hands", "wilor"],
+        choices=["auto", "tasks_hand_landmarker", "solutions_hands"],
         help="覆盖配置文件中的模型后端",
     )
     parser.add_argument("--output", help="hands_2d.parquet 输出路径")
+    parser.add_argument(
+        "--frame-status-output",
+        help="WiLoR 逐帧状态 Parquet 输出路径",
+    )
+    parser.add_argument(
+        "--bbox-output",
+        help="WiLoR 全帧检测 BBox Parquet 输出路径",
+    )
     parser.add_argument(
         "--experience-dir",
         help="按 Experience 标准目录写出；不能与各类 --*-output 同时使用",
@@ -141,54 +165,22 @@ def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
     temporary_path.replace(path)
 
 
-def _mediapipe_version() -> str:
-    try:
-        return version("mediapipe")
-    except PackageNotFoundError:
-        return ""
-
-
-def _create_wilor_estimator(runtime_config: HandsPipelineConfig):
-    """Create WiLoR lazily so ordinary MediaPipe imports do not need Torch."""
-    if runtime_config.wilor is None:
-        raise ValueError("WiLoR 后端缺少 hands.wilor 配置")
-
-    from zpds.hands.backends.wilor import WiLoRBackend
-    from zpds.hands.wilor_adapter import WiLoRAdapter
-    from zpds.hands.wilor_estimator import WiLoREstimatorConfig, WiLoRHandEstimator
-    from zpds.hands.wilor_schema import WiLoRFallbackPolicy
-
-    wilor_document = runtime_config.document["hands"].get("wilor", {})
-    fallback_estimator = None
-    if bool(wilor_document.get("fallback_to_mediapipe", False)):
-        fallback_estimator = MediaPipeHandEstimator.from_config(runtime_config.estimator)
-    fallback_policy = WiLoRFallbackPolicy(
-        on_wilor_frame_failure=bool(
-            wilor_document.get("fallback_on_frame_failure", True)
-        ),
-        on_wilor_no_hand=bool(wilor_document.get("fallback_on_no_hand", False)),
-        on_invalid_input=bool(wilor_document.get("fallback_on_invalid_input", False)),
-        compare_with_mediapipe=False,
-    )
-    backend = WiLoRBackend(runtime_config.wilor)
-    return WiLoRHandEstimator(
-        adapter=WiLoRAdapter(backend),
-        model_info=backend.model_info,
-        fallback_estimator=fallback_estimator,
-        config=WiLoREstimatorConfig(
-            fallback_policy=fallback_policy,
-            model_version=backend.model_info.model_version,
-        ),
-    )
-
-
-def run(args: argparse.Namespace) -> int:
+def run(
+    args: argparse.Namespace,
+    *,
+    estimator_factory: EstimatorFactory = create_hand_estimator,
+    inference_writer_factory: InferenceWriterFactory = create_inference_writers,
+    verify_wilor_assets: bool = True,
+) -> int:
     segment_dir = Path(args.segment).expanduser().resolve()
     config_path = Path(args.config).expanduser().resolve()
     runtime_config = HandsPipelineConfig.load(
         config_path,
         backend_override=args.backend,
     )
+    source_kind = getattr(args, "source_kind", "non_ego")
+    router = HandsBackendRouter(runtime_config.backend_policy)
+    primary_model = router.select_backend(is_ego=source_kind == "ego")
 
     reader = PreparedSegmentReader(
         segment_dir,
@@ -209,6 +201,8 @@ def run(args: argparse.Namespace) -> int:
                 "report_output",
                 "preview_output",
                 "manifest_output",
+                "frame_status_output",
+                "bbox_output",
             )
             if getattr(args, name, None)
         ]
@@ -236,123 +230,124 @@ def run(args: argparse.Namespace) -> int:
             validation_report=output_path.with_name("hands_validation.json"),
             preview=output_path.with_name("hands_preview.mp4"),
             run_manifest=output_path.with_name("hands_run.json"),
+            frame_status=(
+                Path(args.frame_status_output).expanduser().resolve()
+                if getattr(args, "frame_status_output", None)
+                else output_path.with_name("wilor_frame_status.parquet")
+            ),
+            bbox=(
+                Path(args.bbox_output).expanduser().resolve()
+                if getattr(args, "bbox_output", None)
+                else output_path.with_name("wilor_hands_bbox.parquet")
+            ),
         )
-    preview_name = (
-        "wilor_hands_preview.mp4"
-        if runtime_config.estimator.backend == "wilor"
-        else "mediapipe_hands_preview.mp4"
-    )
-    output_paths = replace(output_paths, preview=output_paths.preview.with_name(preview_name))
     output_path = output_paths.parquet
     config_sha256 = runtime_config.config_sha256
-    manifest_path = (
-        Path(args.manifest_output).expanduser()
-        if args.manifest_output
-        else output_paths.run_manifest
-    ).resolve()
-    wilor_run_report: dict[str, Any] | None = None
 
-    if runtime_config.estimator.backend == "wilor":
-        estimator = _create_wilor_estimator(runtime_config)
-        try:
-            provenance, wilor_run_report = wilor_provenance(
-                estimator,
-                runtime_config.document,
-            )
-            pipeline = HandsPipeline(
-                reader,
-                estimator,
-                model_name="wilor",
-                model_version=estimator.model_info.model_version,
-                max_frames=args.max_frames,
-            )
-            parquet_path = write_hand_observations(
-                pipeline,
-                output_path,
-                prep_revision=prep_revision,
-                checkpoint_sha256=provenance["checkpoint_sha256"],
-                config_sha256=config_sha256,
-                run_meta=provenance,
-            )
-            backend_name = "wilor"
-            checkpoint_sha256 = provenance["checkpoint_sha256"]
-            run_statistics = {
-                "frames_processed": pipeline.stats.frames_processed,
-                "observations_created": pipeline.stats.observations_created,
-                "frames_with_hands": pipeline.stats.frames_with_hands,
-                "average_fps": pipeline.stats.average_fps,
-            }
-        finally:
-            wilor_run_report = estimator.build_run_report().to_dict()
-            estimator.close()
-        print(f"Parquet: {parquet_path}")
-        print("Backend: wilor")
-        print(
-            "Stats: "
-            f"frames={run_statistics['frames_processed']}, "
-            f"observations={run_statistics['observations_created']}, "
-            f"frames_with_hands={run_statistics['frames_with_hands']}, "
-            f"fps={run_statistics['average_fps']:.2f}"
+    if primary_model == "wilor" and (args.validate or args.preview):
+        raise ValueError(
+            "WiLoR 21 点映射尚未验收，不能生成或校验 Hands V1 关键点产物"
         )
-        # WiLoR validation consumes this report.  It is enriched with the generic
-        # run metadata below after validation has finished.
-        _write_json_atomic(manifest_path, wilor_run_report)
-    else:
-        if runtime_config.wilor is not None:
-            raise ValueError("非 WiLoR 后端不能携带 WiLoR 运行配置")
-        with MediaPipeHandEstimator.from_config(runtime_config.estimator) as estimator:
-            backend_info = estimator.backend_info
-            run_meta = {
-                "backend_requested": (
-                    backend_info.requested_backend if backend_info else ""
-                ),
-                "backend_active": (
-                    backend_info.active_backend if backend_info else ""
-                ),
-                "backend_fallback_used": (
-                    backend_info.fallback_used if backend_info else False
-                ),
-                "backend_fallback_reason": (
-                    backend_info.fallback_reason if backend_info else ""
-                ),
-                "backend_delegate": backend_info.delegate if backend_info else "",
-            }
-            pipeline = HandsPipeline(
-                reader,
-                estimator,
-                model_name="mediapipe",
-                model_version=_mediapipe_version(),
-                max_frames=args.max_frames,
-            )
+    if primary_model == "wilor" and experience_dir_value:
+        raise ValueError("WiLoR Experience 正式资产 Writer 尚未接入")
+
+    if primary_model == "wilor" and verify_wilor_assets:
+        preflight = check_wilor_assets(runtime_config.wilor)
+        if not preflight.ready:
+            details = "; ".join(preflight.errors) or "未知资产错误"
+            raise RuntimeError(f"WiLoR 资产预检失败: {details}")
+
+    runtime = estimator_factory(primary_model, runtime_config)
+    try:
+        validate_estimator_runtime(primary_model, runtime, runtime_config)
+    except Exception:
+        runtime.estimator.close()
+        raise
+    frame_status_path = (
+        str(output_paths.frame_status)
+        if primary_model == "wilor"
+        and output_paths.frame_status is not None
+        else None
+    )
+    bbox_path = (
+        str(output_paths.bbox)
+        if primary_model == "wilor" and output_paths.bbox is not None
+        else None
+    )
+    try:
+        writers = inference_writer_factory(
+            primary_model,
+            frame_status_path=frame_status_path,
+            bbox_path=bbox_path,
+        )
+    except Exception:
+        runtime.estimator.close()
+        raise
+    parquet_path: str | None = None
+    try:
+        pipeline = HandsPipeline(
+            reader,
+            runtime.estimator,
+            model_name=runtime.model_name,
+            model_version=runtime.model_version,
+            active_backend=runtime.active_backend,
+            max_frames=args.max_frames,
+        )
+
+        def consume_records() -> Iterator:
+            for record in pipeline.run_frames():
+                writers.frame_status.write(record)
+                writers.bbox.write(record)
+                yield from pipeline.observations_for_record(
+                    record,
+                    fail_on_error=primary_model == "mediapipe",
+                )
+
+        if primary_model == "mediapipe":
             parquet_path = write_hand_observations(
-                pipeline,
+                consume_records(),
                 output_path,
                 prep_revision=prep_revision,
-                checkpoint_sha256=estimator.model_info.sha256,
+                checkpoint_sha256=runtime.checkpoint_sha256,
                 config_sha256=config_sha256,
-                run_meta=run_meta,
-            )
-            backend_name = (
-                estimator.backend_info.active_backend
-                if estimator.backend_info is not None
-                else "unknown"
+                run_meta=runtime.run_meta,
             )
             print(f"Parquet: {parquet_path}")
-            print(f"Backend: {backend_name}")
-            print(
-                "Stats: "
-                f"frames={pipeline.stats.frames_processed}, "
-                f"observations={pipeline.stats.observations_created}, "
-                f"frames_with_hands={pipeline.stats.frames_with_hands}, "
-                f"fps={pipeline.stats.average_fps:.2f}"
-            )
-            run_statistics = {
-                "frames_processed": pipeline.stats.frames_processed,
-                "observations_created": pipeline.stats.observations_created,
-                "frames_with_hands": pipeline.stats.frames_with_hands,
-                "average_fps": pipeline.stats.average_fps,
-            }
-            checkpoint_sha256 = estimator.model_info.sha256
+        else:
+            for _observation in consume_records():
+                # WiLoR 21 点映射验收前不写 hands_2d.parquet。
+                pass
+
+        print(f"Primary model: {primary_model}")
+        print(f"Backend: {runtime.active_backend}")
+        print(
+            "Stats: "
+            f"frames={pipeline.stats.frames_processed}, "
+            f"observations={pipeline.stats.observations_created}, "
+            f"frames_with_hands={pipeline.stats.frames_with_hands}, "
+            f"fps={pipeline.stats.average_fps:.2f}"
+        )
+        run_statistics = {
+            "frames_processed": pipeline.stats.frames_processed,
+            "observations_created": pipeline.stats.observations_created,
+            "frames_with_hands": pipeline.stats.frames_with_hands,
+            "frames_no_hand": pipeline.stats.frames_no_hand,
+            "frames_failed": pipeline.stats.frames_failed,
+            "frames_skipped_invalid_input": (
+                pipeline.stats.frames_skipped_invalid_input
+            ),
+            "average_fps": pipeline.stats.average_fps,
+            "frame_status": pipeline.frame_statistics.to_manifest(),
+            "expected_frame_count": reader.expected_frame_count,
+        }
+    finally:
+        try:
+            writers.close()
+        finally:
+            runtime.estimator.close()
+
+    backend_name = runtime.active_backend
+    checkpoint_sha256 = runtime.checkpoint_sha256
 
     validation_status: str | None = None
     report_path: Path | None = None
@@ -365,25 +360,14 @@ def run(args: argparse.Namespace) -> int:
         reader.video_stream_id,
         segment_dir,
     )
-    if args.validate:
+    if args.validate and parquet_path is not None:
         image_width, image_height = actual_image_dimensions
-        if runtime_config.estimator.backend == "wilor":
-            if image_width is None or image_height is None:
-                raise ValueError("WiLoR 校验需要可读取的实际视频分辨率")
-            report = validate_wilor_hands(
-                parquet_path,
-                hands_run_path=str(manifest_path),
-                segment_json_path=str(segment_dir / "segment.json"),
-                image_width=image_width,
-                image_height=image_height,
-            )
-        else:
-            report = validate_hands_parquet(
-                parquet_path,
-                segment_json_path=str(segment_dir / "segment.json"),
-                image_width=image_width,
-                image_height=image_height,
-            )
+        report = validate_hands_parquet(
+            parquet_path,
+            segment_json_path=str(segment_dir / "segment.json"),
+            image_width=image_width,
+            image_height=image_height,
+        )
         report_path = (
             Path(args.report_output).expanduser()
             if args.report_output
@@ -395,7 +379,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"Report: {report_path}")
 
     generated_preview: str | None = None
-    if args.preview:
+    if args.preview and parquet_path is not None:
         preview_path = (
             Path(args.preview_output).expanduser()
             if args.preview_output
@@ -410,40 +394,82 @@ def run(args: argparse.Namespace) -> int:
         )
         print(f"Preview: {generated_preview}")
 
+    manifest_path = (
+        Path(args.manifest_output).expanduser()
+        if args.manifest_output
+        else output_paths.run_manifest
+    ).resolve()
     exit_code = 2 if validation_status == "fail" else 0
-    manifest_document = {
-        "schema_version": 1,
-        "completed": exit_code == 0,
-        "segment_id": reader.segment_id,
-        "video_stream_id": reader.video_stream_id,
-        "prep_revision": prep_revision,
-        "backend": backend_name,
-        "config_sha256": config_sha256,
-        "checkpoint_sha256": checkpoint_sha256,
-        "max_frames": args.max_frames,
-        "image_dimensions": {
-            "declared_width": declared_image_dimensions[0],
-            "declared_height": declared_image_dimensions[1],
-            "actual_width": actual_image_dimensions[0],
-            "actual_height": actual_image_dimensions[1],
-            "metadata_matches_video": (
-                declared_image_dimensions == actual_image_dimensions
-            ),
+    run_mode = "smoke" if args.max_frames is not None else "production"
+    frame_status_counts = pipeline.frame_statistics
+    full_frame_coverage = (
+        args.max_frames is None
+        and frame_status_counts.requested == reader.expected_frame_count
+        and frame_status_counts.is_complete
+    )
+    wilor_artifacts_present = (
+        output_paths.frame_status is not None
+        and output_paths.frame_status.is_file()
+        and output_paths.bbox is not None
+        and output_paths.bbox.is_file()
+    )
+    wilor_requirement_satisfied = (
+        full_frame_coverage and wilor_artifacts_present
+        if primary_model == "wilor"
+        else None
+    )
+    completed = (
+        exit_code == 0
+        and run_mode == "production"
+        and (
+            primary_model != "wilor"
+            or bool(wilor_requirement_satisfied)
+        )
+    )
+    _write_json_atomic(
+        manifest_path,
+        {
+            "schema_version": 2,
+            "completed": completed,
+            "run_mode": run_mode,
+            "segment_id": reader.segment_id,
+            "video_stream_id": reader.video_stream_id,
+            "prep_revision": prep_revision,
+            "source_kind": source_kind,
+            "primary_model": primary_model,
+            "backend": backend_name,
+            "config_sha256": config_sha256,
+            "checkpoint_sha256": checkpoint_sha256,
+            "upstream_git_commit": runtime.upstream_git_commit,
+            "max_frames": args.max_frames,
+            "full_frame_coverage": full_frame_coverage,
+            "wilor_requirement_satisfied": wilor_requirement_satisfied,
+            "image_dimensions": {
+                "declared_width": declared_image_dimensions[0],
+                "declared_height": declared_image_dimensions[1],
+                "actual_width": actual_image_dimensions[0],
+                "actual_height": actual_image_dimensions[1],
+                "metadata_matches_video": (
+                    declared_image_dimensions == actual_image_dimensions
+                ),
+            },
+            "statistics": run_statistics,
+            "validation_status": validation_status,
+            "outputs": {
+                "parquet": parquet_path,
+                "frame_status": frame_status_path,
+                "bbox": bbox_path,
+                "validation_report": str(report_path) if report_path else None,
+                "preview": generated_preview,
+            },
         },
-        "statistics": run_statistics,
-        "validation_status": validation_status,
-        "outputs": {
-            "parquet": parquet_path,
-            "validation_report": str(report_path) if report_path else None,
-            "preview": generated_preview,
-        },
-    }
-    if wilor_run_report is not None:
-        wilor_run_report.update(manifest_document)
-        _write_json_atomic(manifest_path, wilor_run_report)
-    else:
-        _write_json_atomic(manifest_path, manifest_document)
+    )
     print(f"Manifest: {manifest_path}")
+    if not completed:
+        print(
+            "Run incomplete: smoke run or required WiLoR full-frame "
+            "artifacts are not complete"
+        )
     if experience_dir_value:
         manifest = write_hands_experience_manifest(
             experience_dir=experience_dir_value,
@@ -458,7 +484,6 @@ def run(args: argparse.Namespace) -> int:
             config_sha256=config_sha256,
             checkpoint_sha256=checkpoint_sha256,
             validation_status=validation_status,
-            model_name="wilor" if wilor_run_report is not None else "mediapipe",
         )
         print(f"Experience: {manifest}")
     return exit_code

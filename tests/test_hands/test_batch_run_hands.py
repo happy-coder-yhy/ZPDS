@@ -186,7 +186,12 @@ def test_batch_continues_after_one_segment_fails(
     monkeypatch.setattr(
         batch_run_hands,
         "_expected_provenance",
-        lambda config_path, backend: ("config-hash", "model-hash"),
+        lambda config_path, backend, source_kind: (
+            "config-hash",
+            "model-hash",
+            "mediapipe",
+            "",
+        ),
     )
     monkeypatch.setattr(
         batch_run_hands,
@@ -251,7 +256,12 @@ def test_batch_skips_existing_valid_output(
     monkeypatch.setattr(
         batch_run_hands,
         "_expected_provenance",
-        lambda config_path, backend: ("config-hash", "model-hash"),
+        lambda config_path, backend, source_kind: (
+            "config-hash",
+            "model-hash",
+            "mediapipe",
+            "",
+        ),
     )
     monkeypatch.setattr(
         batch_run_hands,
