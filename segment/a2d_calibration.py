@@ -42,11 +42,7 @@ def extract_a2d_calibration(
         camera_id = cam_entry.get("camera_id", "")
         intrinsics = cam_entry.get("intrinsics", {})
 
-        distortion_coeffs = intrinsics.get("distortion_coeffs", [0.0, 0.0, 0.0, 0.0, 0.0])
-        while len(distortion_coeffs) < 5:
-            distortion_coeffs.append(0.0)
-
-        cameras.append({
+        camera = {
             "stream_id": camera_id,
             "frame_id": CAMERA_FRAME_IDS.get(camera_id, f"{camera_id}_optical"),
             "model": intrinsics.get("model", "pinhole"),
@@ -59,18 +55,23 @@ def extract_a2d_calibration(
                 "cx": intrinsics.get("cx", 0),
                 "cy": intrinsics.get("cy", 0),
             },
-            "distortion": {
-                "k1": distortion_coeffs[0],
-                "k2": distortion_coeffs[1],
-                "k3": distortion_coeffs[2],
-                "p1": distortion_coeffs[3],
-                "p2": distortion_coeffs[4],
-            },
             "resolution": {
                 "width": cam_entry.get("resolution", {}).get("width") or 640,
                 "height": cam_entry.get("resolution", {}).get("height") or 480,
             },
-        })
+        }
+        distortion_coeffs = intrinsics.get("distortion_coeffs")
+        if distortion_coeffs is not None:
+            values = list(distortion_coeffs)
+            if len(values) == 5:
+                camera["distortion"] = {
+                    "k1": values[0],
+                    "k2": values[1],
+                    "k3": values[2],
+                    "p1": values[3],
+                    "p2": values[4],
+                }
+        cameras.append(camera)
 
     return {
         "calibration_id": calibration_id,

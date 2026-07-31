@@ -7,6 +7,7 @@
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import cv2
@@ -94,6 +95,7 @@ def transcode_rgb(
     source_end_ns: int,
     index_frames: list[dict],
     target_fps: float = 30.0,
+    frame_transform: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> dict:
     """裁剪并转码 RGB 视频。
 
@@ -107,6 +109,7 @@ def transcode_rgb(
         source_end_ns: 源时间戳结束
         index_frames: 帧索引列表 (每项含 seq, timestamp_ns)
         target_fps: 目标恒定帧率
+        frame_transform: 可选逐帧确定性变换。提供时使用 OpenCV 写出路径。
 
     Returns:
         {
@@ -135,7 +138,7 @@ def transcode_rgb(
 
     # 只复用可解码且帧数精确匹配 sample map 的缓存。
     output_file = Path(output_mp4)
-    if output_file.exists() and output_file.stat().st_size > 0:
+    if frame_transform is None and output_file.exists() and output_file.stat().st_size > 0:
         cached_probe = _probe_video(output_file)
         if (
             cached_probe is not None
@@ -154,7 +157,7 @@ def transcode_rgb(
 
     # ---- ffmpeg 快速路径（秒级 vs OpenCV 分钟级） ----
     ffmpeg_error: Exception | None = None
-    if shutil.which("ffmpeg"):
+    if frame_transform is None and shutil.which("ffmpeg"):
         source_timestamps = np.asarray(
             [int(frame["timestamp_ns"]) for frame in span_frames],
             dtype=np.int64,
@@ -181,7 +184,7 @@ def transcode_rgb(
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
             ffmpeg_error = exc
 
-    # ---- OpenCV 回退 ----
+    # ---- OpenCV 帧级路径（去畸变）或回退 ----
     cap = cv2.VideoCapture(source_video)
     if not cap.isOpened():
         cap.release()
@@ -241,6 +244,8 @@ def transcode_rgb(
         ret, frame = cap.read()
 
         if ret and frame is not None:
+            if frame_transform is not None:
+                frame = frame_transform(frame)
             writer.write(frame)
             total_output += 1
         else:

@@ -37,6 +37,11 @@ from segment.calibration import (
     write_calibration,
 )
 from segment.depth_writer import write_depth_stream
+from segment.epic_fields_calibration import (
+    load_epic_fields_calibration,
+    missing_epic_fields_calibration,
+)
+from segment.image_undistorter import plan_undistortion
 from segment.imu_normalizer import normalize_imu_df, write_imu
 from segment.magnetic_encoder_writer import write_magnetic_encoder_stream
 from segment.mask_normalizer import normalize_masks, write_mask_parquet
@@ -328,14 +333,51 @@ def generate_segment(
                 "rows": len(df),
             })
 
-    # ---- ④ calibration ----
-    write_calibration(calibration, output_dir)
+    # ---- ⑥ 转码 + G16 去畸变 ----
+    video_results = []
+    undistortion_coverage = calibration.setdefault("undistortion", {"streams": {}})
+    for vm in video_meta:
+        vs = session.video_streams[vm["stream_id"]]
+        undistortion = plan_undistortion(
+            calibration,
+            vm["stream_id"],
+            width=vs.width,
+            height=vs.height,
+        )
+        undistortion_detail = {
+            "status": undistortion.status,
+            "detail": undistortion.detail,
+            "operation": {
+                "applied": "undistort",
+                "identity": "identity",
+            }.get(undistortion.status, "preserve_original"),
+            "calibration_source": calibration.get("source", {}).get(
+                "reference_url",
+                calibration.get("source", {}).get("uri", ""),
+            ),
+        }
+        undistortion_coverage["streams"][vm["stream_id"]] = undistortion_detail
+        vr = transcode_rgb(
+            source_video=vs.video_path,
+            output_mp4=vm["output_mp4"],
+            source_start_ns=source_start_ns,
+            source_end_ns=source_end_ns,
+            index_frames=vs.index_frames,
+            target_fps=target_fps,
+            frame_transform=undistortion.frame_transform,
+        )
+        vr["stream_id"] = vm["stream_id"]
+        vr["sample_map_uri"] = vm["sample_map_uri"]
+        vr["undistorted"] = undistortion.status == "applied"
+        vr["undistortion"] = undistortion_detail
+        video_results.append(vr)
 
-    # ---- ⑤ segment.json (video_meta 提供元数据，不依赖实际转码结果) ----
+    # ---- ⑦ 标定与 segment.json ----
+    write_calibration(calibration, output_dir)
     segment = build_segment_json(
         dataset_path=dataset_path,
         span=span,
-        video_results=video_meta,
+        video_results=video_results,
         imu_results=imu_results,
         calibration_id=calibration["calibration_id"],
         revision=revision,
@@ -348,31 +390,11 @@ def generate_segment(
         depth_results=depth_results,
         calibrations=calibration.get("calibrations", None),
         annotation_results=annotation_results if annotation_results else None,
-        time_series_results=(
-            time_series_results
-            if time_series_results
-            else None
-        ),
+        time_series_results=time_series_results if time_series_results else None,
     )
     write_segment_json(segment, output_dir)
 
-    # ---- ⑥ 转码 (放最后 — 最慢的步骤，不影响其他产出) ----
-    video_results = []
-    for vm in video_meta:
-        vs = session.video_streams[vm["stream_id"]]
-        vr = transcode_rgb(
-            source_video=vs.video_path,
-            output_mp4=vm["output_mp4"],
-            source_start_ns=source_start_ns,
-            source_end_ns=source_end_ns,
-            index_frames=vs.index_frames,
-            target_fps=target_fps,
-        )
-        vr["stream_id"] = vm["stream_id"]
-        vr["sample_map_uri"] = vm["sample_map_uri"]
-        video_results.append(vr)
-
-    # ---- ⑦ 写出后验证 ----
+    # ---- ⑧ 写出后验证 ----
     validation = validate_segment(output_dir)
     write_validation_report(validation, output_dir)
     write_annotation_validation_report(validation, output_dir)
@@ -430,6 +452,11 @@ def main():
         "--cache-dir",
         default=None,
         help="[Dunjia] H264 重建缓存目录（默认: 输出目录/.cache）",
+    )
+    parser.add_argument(
+        "--epic-fields-root",
+        default=None,
+        help="[EPIC] EPIC-Fields JSON 根目录；未提供或未覆盖的视频保持原 RGB",
     )
     parser.add_argument(
         "--profile", "-p",
@@ -678,17 +705,15 @@ def main():
             print(f"    [{stream_id}] {ann_s.annotation_type}, "
                   f"{len(ann_s.records)} 标注帧, bbox={ann_s.bbox_format}")
 
-        # EPIC 无标定 — 生成最小占位
-        calibration = {
-            "calibration_id": f"calib_epic_{session.meta.get('video_id', '001')}",
-            "cameras": [{
-                "name": "ego_rgb",
-                "width": pv.width,
-                "height": pv.height,
-                "intrinsics": {"fx": 0.0, "fy": 0.0, "cx": 0.0, "cy": 0.0},
-                "distortion_model": "none",
-            }],
-        }
+        video_id = session.meta.get("video_id", "")
+        try:
+            if args.epic_fields_root is None:
+                raise FileNotFoundError("未提供 --epic-fields-root")
+            calibration = load_epic_fields_calibration(args.epic_fields_root, video_id)
+        except FileNotFoundError:
+            calibration = missing_epic_fields_calibration(video_id, args.epic_fields_root)
+        coverage = calibration["coverage"]["status"]
+        print(f"  EPIC-Fields 标定覆盖: {coverage} ({video_id})")
 
         # source_assets: 视频 + pickle
         source_assets = []

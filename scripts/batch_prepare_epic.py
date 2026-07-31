@@ -32,7 +32,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-import yaml
+import yaml  # noqa: E402 - project root must be available to direct script execution
 
 
 # ---- 路径常量 ----
@@ -67,7 +67,7 @@ def _run_quality_detection(
     跳过黑屏检测和坏帧检测（两个都是逐帧解码，30min 视频需 20+ 分钟）。
     保留帧数一致性和时间戳缺口检测（纯数学运算，秒级完成）。
     """
-    from zpds_prepare.main import load_config, step_header
+    from zpds_prepare.main import load_config
     from zpds_prepare.readers import epic_reader as rd
 
     cfg = load_config(CONFIG_PATH)
@@ -89,7 +89,6 @@ def _run_quality_detection(
     # 运行检测器 (复用 main.py 的检测逻辑)
     from zpds_prepare.detectors.black_frame import detect_black_frames
     from zpds_prepare.detectors.timestamp_gap import detect_timestamp_gaps
-    from zpds_prepare.detectors.imu_gap import detect_imu_gaps
     from zpds_prepare.detectors.frame_count import detect_frame_count_mismatch
     from zpds_prepare.detectors.bad_frame import detect_bad_frames
     from zpds_prepare.decisions.segment_planner import plan_segments, get_issue_summary
@@ -204,6 +203,7 @@ def _run_segment_generation(
     candidates_path: Path,
     output_root: Path,
     session=None,
+    epic_fields_root: str | None = None,
 ) -> list[dict]:
     """对单条记录的所有候选 Segment 运行 batch_prepare。
 
@@ -211,8 +211,26 @@ def _run_segment_generation(
     """
     from batch_prepare import generate_segment
 
+    from segment.epic_fields_calibration import (
+        load_epic_fields_calibration,
+        missing_epic_fields_calibration,
+    )
+
+    video_id = record["video_id"]
+    try:
+        if epic_fields_root is None:
+            raise FileNotFoundError("未提供 --epic-fields-root")
+        calibration = load_epic_fields_calibration(epic_fields_root, video_id)
+    except FileNotFoundError:
+        calibration = missing_epic_fields_calibration(video_id, epic_fields_root)
+    coverage_status = calibration["coverage"]["status"]
+
     if not candidates_path.exists():
-        return [{"error": f"候选文件不存在: {candidates_path}"}]
+        return [{
+            "status": "fail",
+            "error": f"候选文件不存在: {candidates_path}",
+            "epic_fields_coverage": coverage_status,
+        }]
 
     with open(candidates_path, "r", encoding="utf-8") as f:
         candidates_doc = json.load(f)
@@ -222,19 +240,6 @@ def _run_segment_generation(
 
     # Session 由调用方传入（已由 QC 阶段加载）
     video_path = record["video_uri"]
-
-    # 占位标定
-    pv = session.primary_video
-    calibration = {
-        "calibration_id": f"calib_epic_{record['video_id']}",
-        "cameras": [{
-            "name": "ego_rgb",
-            "width": pv.width,
-            "height": pv.height,
-            "intrinsics": {"fx": 0.0, "fy": 0.0, "cx": 0.0, "cy": 0.0},
-            "distortion_model": "none",
-        }],
-    }
 
     # source_assets（EPIC 视频 5GB+，跳过 SHA-256 避免读盘数分钟）
     from segment.segment_writer import sha256_hex
@@ -279,12 +284,14 @@ def _run_segment_generation(
                 profile="epic",
                 source_assets=source_assets,
             )
+            result["epic_fields_coverage"] = coverage_status
             results.append(result)
         except Exception:
             results.append({
                 "segment_id": seg_id,
                 "status": "fail",
                 "error": traceback.format_exc(),
+                "epic_fields_coverage": coverage_status,
             })
 
     return results
@@ -324,6 +331,11 @@ def main():
     parser.add_argument(
         "--config", default=CONFIG_PATH,
         help="YAML 配置路径",
+    )
+    parser.add_argument(
+        "--epic-fields-root",
+        default=None,
+        help="EPIC-Fields JSON 根目录；未覆盖视频保持原 RGB 并记录状态",
     )
     args = parser.parse_args()
 
@@ -382,6 +394,7 @@ def main():
     succeeded = 0
     failed = 0
     skipped = 0
+    coverage_summary = {"covered": 0, "missing_calibration": 0}
 
     for i, rec in enumerate(records):
         video_id = rec["video_id"]
@@ -418,7 +431,7 @@ def main():
                 print(f"    ✓ {qd_result.get('issues_total', 0)} 个质量问题, "
                       f"{qd_result.get('candidate_count', 0)} 个候选")
             else:
-                print(f"  ② 跳过质量检测")
+                print("  ② 跳过质量检测")
                 # 跳过 QC 时仍需加载 session
                 from zpds_prepare.readers import epic_reader as er
                 epic_config: dict = {}
@@ -432,8 +445,20 @@ def main():
             candidates_path = output_dir / "segment_candidates.json"
             seg_root = PREPARED_ROOT / video_id
             print(f"  ③ 生成 Prepared Segment → {seg_root}")
-            seg_results = _run_segment_generation(rec, candidates_path, seg_root, session=session)
+            seg_results = _run_segment_generation(
+                rec,
+                candidates_path,
+                seg_root,
+                session=session,
+                epic_fields_root=args.epic_fields_root,
+            )
             result["stages"]["segment_generation"] = seg_results
+            coverage_status = next(
+                (entry.get("epic_fields_coverage") for entry in seg_results),
+                "missing_calibration",
+            )
+            result["epic_fields_coverage"] = coverage_status
+            coverage_summary[coverage_status] = coverage_summary.get(coverage_status, 0) + 1
 
             seg_pass = sum(1 for s in seg_results if s.get("status") == "pass")
             seg_fail = sum(1 for s in seg_results if s.get("status") == "fail")
@@ -476,6 +501,7 @@ def main():
         "skipped": skipped,
         "total_segments": total_segments,
         "total_elapsed_s": round(total_elapsed, 1),
+        "epic_fields_coverage": coverage_summary,
         "results": batch_results,
     }
 
@@ -484,7 +510,7 @@ def main():
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
     print(f"\n{'=' * 60}")
-    print(f"  批量完成")
+    print("  批量完成")
     print(f"{'=' * 60}")
     print(f"  总数:       {len(records)}")
     print(f"  ✓ 成功:     {succeeded}")

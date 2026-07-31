@@ -109,11 +109,7 @@ def extract_calibration_from_mcap(
     # 判断 multi_cam 键的风格：遁甲用 camera0/camera1/camera2，UMI 用 robot0/robot1
     is_umi = multi_cam and any(k.startswith("robot") for k in multi_cam)
 
-    main_stream_id = (
-        "robot0_camera0" if is_umi
-        else "ego_rgb_center" if multi_cam
-        else "ego_rgb"
-    )
+    main_stream_id = "robot0_camera0" if is_umi else "camera0" if multi_cam else "ego_rgb"
     cameras = [
         _build_camera_entry(calib_data, stream_id=main_stream_id),
     ]
@@ -131,15 +127,10 @@ def extract_calibration_from_mcap(
             # 遁甲风格：添加左右 RGB 和正式 Depth 相机
             for cam_name in ["camera1", "camera2", "depth"]:
                 if cam_name in multi_cam:
-                    stream_ids = {
-                        "camera1": "ego_rgb_left",
-                        "camera2": "ego_rgb_right",
-                        "depth": "ego_depth",
-                    }
                     cameras.append(
                         _build_camera_entry(
                             multi_cam[cam_name],
-                            stream_id=stream_ids[cam_name],
+                            stream_id="ego_depth" if cam_name == "depth" else cam_name,
                         )
                     )
 

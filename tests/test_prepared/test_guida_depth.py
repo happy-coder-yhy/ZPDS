@@ -316,3 +316,8 @@ def test_generate_segment_includes_formal_guida_depth(tmp_path: Path) -> None:
         stream for stream in segment["streams"] if stream["stream_id"] == "ego_imu"
     )
     assert imu_stream["origin"]["source_asset_id"] == "raw_imu_0"
+    rgb_stream = next(
+        stream for stream in segment["streams"] if stream["stream_id"] == "ego_rgb"
+    )
+    assert rgb_stream["origin"]["undistortion"]["status"] == "missing_calibration"
+    assert rgb_stream["origin"]["undistortion"]["operation"] == "preserve_original"

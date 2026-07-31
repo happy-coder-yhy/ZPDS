@@ -19,11 +19,14 @@ A2D 图像序列 → CFR MP4 转码器。
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+import pandas as pd
 
 
 def transcode_image_sequence(
@@ -34,6 +37,7 @@ def transcode_image_sequence(
     target_fps: float = 30.0,
     width: int = 640,
     height: int = 480,
+    frame_transform: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> dict:
     """将图像序列转码为 CFR H.264 MP4。
 
@@ -55,6 +59,7 @@ def transcode_image_sequence(
         target_fps: 目标恒定帧率。
         width: 帧宽。
         height: 帧高。
+        frame_transform: 可选逐帧确定性变换，在缩放到输出分辨率后应用。
 
     Returns:
         {
@@ -87,31 +92,7 @@ def transcode_image_sequence(
     segment_duration_ns = source_end_ns - source_start_ns
     output_count = max(1, int(segment_duration_ns / frame_interval_ns))
 
-    # ---- 3. 预加载所有源帧 ----
-    # Python open() + cv2.imdecode() 绕过中文路径问题
-    frame_cache: dict[int, np.ndarray] = {}
-    loaded_count = 0
-
-    for idx, sf in enumerate(span_frames):
-        source_path = sf["source_path"]
-        try:
-            with open(source_path, "rb") as fh:
-                jpeg_bytes = fh.read()
-            img = cv2.imdecode(
-                np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR
-            )
-            if img is not None:
-                if img.shape[1] != width or img.shape[0] != height:
-                    img = cv2.resize(img, (width, height))
-                frame_cache[idx] = img
-                loaded_count += 1
-        except Exception:
-            pass
-
-    if not frame_cache:
-        raise ValueError("无法加载任何源帧")
-
-    # ---- 4. 创建 VideoWriter ----
+    # ---- 3. 创建 VideoWriter ----
     # 按优先级尝试编码器: mp4v（内置）→ avc1 → H264（需 OpenH264 DLL）
     codec = None
     writer = None
@@ -124,22 +105,38 @@ def transcode_image_sequence(
     if writer is None or not writer.isOpened():
         raise RuntimeError(f"无法创建 VideoWriter: {output_mp4}")
 
-    # ---- 5. 逐个输出帧 → 最近邻 → 写入 ----
+    # ---- 4. 逐个输出帧 → 最近邻 → 写入 ----
     total_output = 0
+    loaded_source_frame = False
     black_frame = np.zeros((height, width, 3), dtype=np.uint8)
+    # 固定容量缓存：避免将长 Episode 的全部 JPEG 解码进内存。
+    frame_cache: OrderedDict[int, np.ndarray] = OrderedDict()
 
     for out_idx in range(output_count):
         target_time = source_start_ns + out_idx * frame_interval_ns
         nearest_idx = int(np.argmin(np.abs(span_timestamps - target_time)))
 
-        frame = _get_nearest_cached(frame_cache, nearest_idx)
+        frame = _get_nearest_cached(
+            frame_cache,
+            span_frames,
+            nearest_idx,
+            width,
+            height,
+        )
         if frame is None:
             frame = black_frame
+        else:
+            loaded_source_frame = True
+            if frame_transform is not None:
+                frame = frame_transform(frame)
 
         writer.write(frame)
         total_output += 1
 
     writer.release()
+    if not loaded_source_frame:
+        output_path.unlink(missing_ok=True)
+        raise ValueError("无法加载任何源帧")
 
     return {
         "output_frames": total_output,
@@ -152,19 +149,54 @@ def transcode_image_sequence(
 
 
 def _get_nearest_cached(
-    cache: dict[int, np.ndarray],
+    cache: OrderedDict[int, np.ndarray],
+    frames: list[dict[str, Any]],
     target_idx: int,
+    width: int,
+    height: int,
+    max_cache_size: int = 32,
 ) -> np.ndarray | None:
-    """从缓存中取 target_idx 或其最近可用的帧。"""
+    """按序号就近读取帧，并保留固定容量的已解码缓存。"""
     if target_idx in cache:
+        cache.move_to_end(target_idx)
         return cache[target_idx]
 
-    cached_indices = sorted(cache.keys())
-    if not cached_indices:
-        return None
+    for offset in range(len(frames)):
+        candidate_indices = [target_idx - offset]
+        if offset:
+            candidate_indices.append(target_idx + offset)
+        for frame_idx in candidate_indices:
+            if frame_idx < 0 or frame_idx >= len(frames):
+                continue
+            if frame_idx in cache:
+                cache.move_to_end(frame_idx)
+                return cache[frame_idx]
+            frame = _load_image(
+                frames[frame_idx].get("source_path", ""), width, height
+            )
+            if frame is None:
+                continue
+            cache[frame_idx] = frame
+            cache.move_to_end(frame_idx)
+            if len(cache) > max_cache_size:
+                cache.popitem(last=False)
+            return frame
+    return None
 
-    nearest = min(cached_indices, key=lambda i: abs(i - target_idx))
-    return cache.get(nearest)
+
+def _load_image(source_path: str, width: int, height: int) -> np.ndarray | None:
+    """读取单张源 JPEG，并在必要时缩放到输出尺寸。"""
+    try:
+        with open(source_path, "rb") as fh:
+            jpeg_bytes = fh.read()
+    except OSError:
+        return None
+    image = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return None
+    if image.shape[1] != width or image.shape[0] != height:
+        return cv2.resize(image, (width, height))
+    return image
 
 
 def generate_image_sample_map(
@@ -172,7 +204,7 @@ def generate_image_sample_map(
     source_start_ns: int,
     source_end_ns: int,
     target_fps: float = 30.0,
-) -> "pd.DataFrame":
+) -> pd.DataFrame:
     """为图像序列 CFR 输出生成最近邻 sample_map.parquet。
 
     Args:
@@ -191,8 +223,6 @@ def generate_image_sample_map(
           - mapping_method
           - time_error_ns
     """
-    import pandas as pd
-
     # 筛选有效帧
     span_frames = [
         f for f in index_frames
@@ -231,7 +261,7 @@ def generate_image_sample_map(
 
 
 def write_image_sample_map(
-    sample_map: "pd.DataFrame",
+    sample_map: pd.DataFrame,
     output_dir: str,
     stream_id: str,
 ) -> str:
@@ -253,7 +283,7 @@ def write_image_sample_map(
 
 
 __all__ = [
-    "transcode_image_sequence",
     "generate_image_sample_map",
+    "transcode_image_sequence",
     "write_image_sample_map",
 ]

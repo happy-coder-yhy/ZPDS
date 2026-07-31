@@ -40,6 +40,7 @@ from segment.timeseries_normalizer import (
     write_time_series,
 )
 from segment.a2d_calibration import extract_a2d_calibration, write_calibration
+from segment.image_undistorter import plan_undistortion
 from segment.segment_writer import build_segment_json, write_segment_json
 from segment.a2d_review_annotations import (
     convert_review_actions,
@@ -123,8 +124,31 @@ def prepare_segment(
     print(f"  时长: {duration_ns / 1e9:.3f}s")
 
     video_results = []
-    imu_results = []
     ts_results = []
+
+    # 先建立每路相机的去畸变映射。映射在整段内复用，且只应用到
+    # Prepared 派生产物；原始 JPEG 始终保持不变。
+    calib = extract_a2d_calibration(session.meta)
+    undistortion_plans = {}
+    undistortion_coverage = calib.setdefault("undistortion", {"streams": {}})
+    for stream_id in CAMERA_STREAMS:
+        vs = session.video_streams.get(stream_id)
+        if vs is None:
+            continue
+        plan = plan_undistortion(calib, stream_id, width=vs.width, height=vs.height)
+        undistortion_plans[stream_id] = plan
+        undistortion_coverage["streams"][stream_id] = {
+            "status": plan.status,
+            "detail": plan.detail,
+            "operation": {
+                "applied": "undistort",
+                "identity": "identity",
+            }.get(plan.status, "preserve_original"),
+            "calibration_source": calib.get("source", {}).get(
+                "reference_url",
+                calib.get("source", {}).get("uri", ""),
+            ),
+        }
 
     # ---- 8.1a: 图像序列转 MP4 ----
     for stream_id in CAMERA_STREAMS:
@@ -142,10 +166,13 @@ def prepare_segment(
             source_start_ns=source_start,
             source_end_ns=source_end,
             target_fps=TARGET_FPS,
-            width=CAMERA_WIDTH,
-            height=CAMERA_HEIGHT,
+            width=vs.width,
+            height=vs.height,
+            frame_transform=undistortion_plans[stream_id].frame_transform,
         )
-        print(f"{vr['output_frames']} 帧")
+        undistortion = undistortion_plans[stream_id]
+        geometry_status = "，已去畸变" if undistortion.status == "applied" else ""
+        print(f"{vr['output_frames']} 帧{geometry_status}")
 
         # ---- 8.1b: 生成 sample_map ----
         sample_map = generate_image_sample_map(
@@ -166,6 +193,8 @@ def prepare_segment(
             "sample_map_uri": f"maps/{stream_id}_sample_map.parquet",
             "role": "observation",
             "frame_id": f"{stream_id}_optical",
+            "undistorted": undistortion.status == "applied",
+            "undistortion": undistortion_coverage["streams"][stream_id],
         })
 
     # ---- 8.1c: 深度图像序列（拷贝 PNG，不转码） ----
@@ -247,7 +276,6 @@ def prepare_segment(
         })
 
     # ---- 8.3: calibration.json ----
-    calib = extract_a2d_calibration(session.meta)
     calib_path = write_calibration(calib, str(seg_dir))
     print(f"    calibration → {calib_path}")
     print(f"    相机: {[c['stream_id'] for c in calib['cameras']]}")
@@ -283,7 +311,7 @@ def prepare_segment(
             print(f"    review_actions → {ra_path} ({len(review_df)} actions)")
             review_annotations = build_annotation_stream_entry()
         else:
-            print(f"    review_actions: 无动作与此 Segment 重叠")
+            print("    review_actions: 无动作与此 Segment 重叠")
     else:
         print(f"    review_actions: review JSON 不存在 ({review_path})")
 
@@ -328,8 +356,6 @@ def prepare_segment(
 
 def _build_source_assets(session) -> list[dict]:
     """构建 source_assets 列表。"""
-    import hashlib
-
     assets = []
     source_path = Path(session.source_path)
 

@@ -127,8 +127,16 @@ def build_segment_json(
             "origin": {
                 "kind": "deterministic_transform",
                 "source_asset_id": source_assets[0]["source_asset_id"] if source_assets else "raw_color_0",
-                "operation": "trim_transcode_resample",
+                "operation": (
+                    "trim_transcode_resample_undistort"
+                    if vr.get("undistorted")
+                    else "trim_transcode_resample"
+                ),
                 "sample_map_uri": vr.get("sample_map_uri", f"maps/{stream_id}_sample_map.parquet"),
+                "undistortion": vr.get(
+                    "undistortion",
+                    {"status": "not_requested", "detail": "no calibration evaluation"},
+                ),
             },
         })
 
