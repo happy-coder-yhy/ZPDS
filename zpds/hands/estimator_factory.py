@@ -140,6 +140,39 @@ def _read_source_commit(source_path: Path) -> str:
     return ""
 
 
+def _validate_wilor_joint_mapping_contract(
+    *,
+    required_version: str | None,
+    mapping_version: str,
+    mapping: tuple[int, ...],
+) -> None:
+    """Validate Person B's versioned module-level joint mapping."""
+    if required_version not in {None, mapping_version}:
+        raise EstimatorUnavailableError(
+            "Unsupported WiLoR joint mapping version: "
+            f"required={required_version!r}, provided={mapping_version!r}"
+        )
+    if len(mapping) != 21:
+        raise EstimatorUnavailableError(
+            "WiLoR joint mapping must contain exactly 21 indices"
+        )
+    if any(
+        not isinstance(index, int) or isinstance(index, bool)
+        for index in mapping
+    ):
+        raise EstimatorUnavailableError(
+            "WiLoR joint mapping indices must be integers"
+        )
+    if len(set(mapping)) != 21:
+        raise EstimatorUnavailableError(
+            "WiLoR joint mapping must not contain duplicate indices"
+        )
+    if any(index < 0 or index >= 21 for index in mapping):
+        raise EstimatorUnavailableError(
+            "WiLoR joint mapping indices must be in the range [0, 20]"
+        )
+
+
 def _create_wilor_estimator(config: HandsPipelineConfig) -> EstimatorRuntime:
     """Create the real WiLoR stack through its lazy-loading modules."""
     wilor = config.wilor
@@ -182,36 +215,11 @@ def _create_wilor_estimator(config: HandsPipelineConfig) -> EstimatorRuntime:
         WiLoRFallbackPolicy,
     )
 
-    backend_fields = getattr(BackendWiLoRConfig, "__dataclass_fields__", {})
-    if "batch_size" not in backend_fields:
-        raise EstimatorUnavailableError(
-            "Person B WiLoRConfig delivery does not expose batch_size; "
-            "the 8 GiB GPU safety setting cannot be enforced"
-        )
-    estimator_fields = getattr(
-        WiLoREstimatorConfig,
-        "__dataclass_fields__",
-        {},
+    _validate_wilor_joint_mapping_contract(
+        required_version=wilor.require_joint_mapping_version,
+        mapping_version=MAPPING_VERSION,
+        mapping=WILOR_TO_HANDS_V1_V1,
     )
-    missing_estimator_fields = {
-        "joint_mapping",
-        "joint_mapping_version",
-    } - set(estimator_fields)
-    if missing_estimator_fields:
-        raise EstimatorUnavailableError(
-            "Person B WiLoR estimator delivery is missing the validated "
-            "21-point mapping contract: "
-            f"{sorted(missing_estimator_fields)}"
-        )
-
-    if wilor.require_joint_mapping_version not in {
-        None,
-        MAPPING_VERSION,
-    }:
-        raise EstimatorUnavailableError(
-            "Unsupported WiLoR joint mapping version: "
-            f"{wilor.require_joint_mapping_version}"
-        )
     precision = {
         "fp16": "float16",
         "fp32": "float32",
@@ -229,7 +237,6 @@ def _create_wilor_estimator(config: HandsPipelineConfig) -> EstimatorRuntime:
         model_config_path=wilor.model_config_path,
         device=wilor.device,
         precision=precision,
-        batch_size=wilor.batch_size,
         model_version=wilor.model_version,
         upstream_repository=wilor.upstream_repository,
         upstream_git_commit=wilor.upstream_commit,
@@ -250,8 +257,6 @@ def _create_wilor_estimator(config: HandsPipelineConfig) -> EstimatorRuntime:
             ),
             model_name="wilor",
             model_version=wilor.model_version,
-            joint_mapping=WILOR_TO_HANDS_V1_V1,
-            joint_mapping_version=MAPPING_VERSION,
         ),
     )
     return EstimatorRuntime(

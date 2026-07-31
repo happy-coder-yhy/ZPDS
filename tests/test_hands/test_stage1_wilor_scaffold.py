@@ -77,7 +77,6 @@ def _parallel_config() -> dict:
                 "checkpoint_path": "models/wilor/model.pt",
                 "device": "cuda:0",
                 "precision": "fp16",
-                "batch_size": 8,
             },
         }
     }
@@ -124,7 +123,6 @@ def test_backend_override_updates_nested_mediapipe_config_hash(
     [
         ("ego_bbox_every_frame", False, "ego_bbox_every_frame"),
         ("write_frame_status", False, "write_frame_status"),
-        ("batch_size", 0, "batch_size"),
     ],
 )
 def test_wilor_production_guards(

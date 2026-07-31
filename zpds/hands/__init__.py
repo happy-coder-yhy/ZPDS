@@ -5,6 +5,7 @@ from zpds.hands.config import HandsOutputPaths, HandsPipelineConfig, WilorConfig
 from zpds.hands.contracts import (
     BBoxWriter,
     FrameInferenceRecord,
+    FrameStatusHandEstimator,
     FrameStatusWriter,
     HandEstimator,
     InferenceStatus,
@@ -15,6 +16,16 @@ from zpds.hands.estimator_factory import (
     EstimatorUnavailableError,
     create_hand_estimator,
     validate_estimator_runtime,
+)
+from zpds.hands.frame_artifacts import (
+    InferenceArtifactContext,
+    ParquetBBoxWriter,
+    ParquetFrameStatusWriter,
+    validate_wilor_frame_artifacts,
+)
+from zpds.hands.model_router import (
+    HandModelRouter,
+    create_hand_model_router,
 )
 from zpds.hands.pipeline import (
     HandsPipeline,
@@ -32,10 +43,6 @@ from zpds.hands.schemas import (
     ModelAttemptResult,
     PreparedFrame,
     RawHandResult,
-)
-from zpds.hands.model_router import (
-    HandModelRouter,
-    create_hand_model_router,
 )
 from zpds.hands.segment_reader import (
     PreparedSegmentError,
@@ -56,6 +63,7 @@ __all__ = [
     "EstimatorRuntime",
     "EstimatorUnavailableError",
     "FrameInferenceRecord",
+    "FrameStatusHandEstimator",
     "FrameStatusWriter",
     "HandBBox",
     "HandEstimator",
@@ -70,8 +78,11 @@ __all__ = [
     "HandsPipeline",
     "HandsPipelineConfig",
     "HandsPipelineError",
-    "ModelAttemptResult",
+    "InferenceArtifactContext",
     "InferenceStatus",
+    "ModelAttemptResult",
+    "ParquetBBoxWriter",
+    "ParquetFrameStatusWriter",
     "PipelineStats",
     "PreparedFrame",
     "PreparedFrameSource",
@@ -82,11 +93,12 @@ __all__ = [
     "SampleMapValidationError",
     "StreamNotFoundError",
     "VideoDecodeError",
-    "create_hand_model_router",
     "WilorAssetCheck",
     "WilorConfig",
     "WilorPreflightReport",
     "check_wilor_assets",
     "create_hand_estimator",
+    "create_hand_model_router",
     "validate_estimator_runtime",
+    "validate_wilor_frame_artifacts",
 ]

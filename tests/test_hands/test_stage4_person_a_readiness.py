@@ -9,6 +9,7 @@ from zpds.hands.config import WilorConfig
 from zpds.hands.estimator_factory import (
     EstimatorRuntime,
     EstimatorUnavailableError,
+    _validate_wilor_joint_mapping_contract,
     create_hand_estimator,
     validate_estimator_runtime,
 )
@@ -142,8 +143,9 @@ def test_writer_bundle_enforces_person_c_contract() -> None:
         )
 
 
-def test_person_a_rejects_incomplete_person_b_runtime_contract(
+def test_person_a_accepts_person_b_runtime_contract(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "wilor-source"
     (source / "wilor").mkdir(parents=True)
@@ -157,11 +159,57 @@ def test_person_a_rejects_incomplete_person_b_runtime_contract(
         upstream_license_checked=True,
     )
 
-    with pytest.raises(
-        EstimatorUnavailableError,
-        match="Person B WiLoRConfig delivery",
-    ):
-        create_hand_estimator(
-            "wilor",
-            SimpleNamespace(wilor=wilor),  # type: ignore[arg-type]
+    class FakeBackend:
+        def __init__(self, config: object) -> None:
+            self.model_info = SimpleNamespace(
+                model_version=wilor.model_version,
+                checkpoint_sha256=wilor.checkpoint_sha256,
+                upstream_git_commit=wilor.upstream_commit,
+                device=wilor.device,
+                precision=wilor.precision,
+            )
+
+    monkeypatch.setattr(
+        "zpds.hands.backends.wilor.WiLoRBackend",
+        FakeBackend,
+    )
+    monkeypatch.setattr(
+        "zpds.hands.wilor_adapter.WiLoRAdapter",
+        lambda backend: object(),
+    )
+    monkeypatch.setattr(
+        "zpds.hands.wilor_estimator.WiLoRHandEstimator",
+        lambda **kwargs: FakeHandEstimator([]),
+    )
+
+    runtime = create_hand_estimator(
+        "wilor",
+        SimpleNamespace(wilor=wilor),  # type: ignore[arg-type]
+    )
+
+    assert runtime.active_backend == "wilor"
+    assert runtime.run_meta["joint_mapping_version"] == (
+        "wilor-to-hands-v1-v1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("required_version", "mapping", "message"),
+    [
+        ("unexpected-version", tuple(range(21)), "Unsupported"),
+        (None, tuple(range(20)), "exactly 21"),
+        (None, tuple(range(20)) + (19,), "duplicate"),
+        (None, tuple(range(20)) + (21,), "range"),
+    ],
+)
+def test_person_a_rejects_invalid_person_b_joint_mapping_contract(
+    required_version: str | None,
+    mapping: tuple[int, ...],
+    message: str,
+) -> None:
+    with pytest.raises(EstimatorUnavailableError, match=message):
+        _validate_wilor_joint_mapping_contract(
+            required_version=required_version,
+            mapping_version="wilor-to-hands-v1-v1",
+            mapping=mapping,
         )

@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 import yaml
 
@@ -14,11 +15,8 @@ from zpds.hands.estimator_factory import (
     EstimatorUnavailableError,
     create_hand_estimator,
 )
-from zpds.hands.orchestration import (
-    FrameWriterUnavailableError,
-    InferenceWriterBundle,
-    create_inference_writers,
-)
+from zpds.hands.frame_artifacts import InferenceArtifactContext
+from zpds.hands.orchestration import create_inference_writers
 from zpds.hands.schemas import (
     HandBBox,
     HandKeypoints,
@@ -29,7 +27,7 @@ from zpds.hands.testing import FakeHandEstimator
 
 
 class _FakeReader:
-    def __init__(self, _segment_dir: Path, video_stream_id: str | None) -> None:
+    def __init__(self, segment_dir: Path, video_stream_id: str | None) -> None:
         self.segment_id = "seg_000001"
         self.video_stream_id = video_stream_id or "ego_rgb"
         self._frames = [
@@ -42,6 +40,21 @@ class _FakeReader:
             )
             for index in range(3)
         ]
+        self.sample_map_path = segment_dir / "sample_map.parquet"
+        pd.DataFrame(
+            {
+                "output_frame_index": [0, 1, 2],
+                "output_timestamp_ns": [
+                    frame.timestamp_ns for frame in self._frames
+                ],
+                "source_frame_index": [
+                    frame.source_frame_index for frame in self._frames
+                ],
+                "source_timestamp_ns": [
+                    frame.source_timestamp_ns for frame in self._frames
+                ],
+            }
+        ).to_parquet(self.sample_map_path, index=False)
 
     @property
     def expected_frame_count(self) -> int:
@@ -131,9 +144,8 @@ def test_wilor_cli_orchestration_writes_full_frame_manifest(
 ) -> None:
     args = _args(tmp_path)
     estimator = FakeHandEstimator(
-        [[_hand()], [], RuntimeError("single-frame failure")]
+        [[_hand()], [], [_hand()]]
     )
-    writers: dict[str, _PersistingWriter] = {}
 
     def estimator_factory(
         primary_model: str,
@@ -147,20 +159,6 @@ def test_wilor_cli_orchestration_writes_full_frame_manifest(
             checkpoint_sha256="test-wilor-sha",
             upstream_git_commit="test-commit",
             active_backend="wilor",
-        )
-
-    def writer_factory(
-        primary_model: str,
-        *,
-        frame_status_path: str,
-        bbox_path: str,
-    ) -> InferenceWriterBundle:
-        assert primary_model == "wilor"
-        writers["status"] = _PersistingWriter(frame_status_path)
-        writers["bbox"] = _PersistingWriter(bbox_path)
-        return InferenceWriterBundle(
-            frame_status=writers["status"],
-            bbox=writers["bbox"],
         )
 
     monkeypatch.setattr(run_hands, "PreparedSegmentReader", _FakeReader)
@@ -178,7 +176,6 @@ def test_wilor_cli_orchestration_writes_full_frame_manifest(
     assert run_hands.run(
         args,
         estimator_factory=estimator_factory,
-        inference_writer_factory=writer_factory,
         verify_wilor_assets=False,
     ) == 0
 
@@ -194,15 +191,21 @@ def test_wilor_cli_orchestration_writes_full_frame_manifest(
     assert manifest["wilor_requirement_satisfied"] is True
     assert manifest["statistics"]["frame_status"] == {
         "requested": 3,
-        "detected": 1,
+        "detected": 2,
         "no_hand": 1,
-        "failed": 1,
+        "failed": 0,
         "skipped_invalid_input": 0,
     }
-    assert len(writers["status"].records) == 3
-    assert len(writers["bbox"].records) == 3
+    frame_status = pd.read_parquet(
+        tmp_path / "outputs" / "wilor_frame_status.parquet"
+    )
+    bbox = pd.read_parquet(
+        tmp_path / "outputs" / "wilor_hands_bbox.parquet"
+    )
+    assert len(frame_status) == 3
+    assert len(bbox) == 2
     assert estimator.closed
-    assert not (tmp_path / "outputs" / "hands_2d.parquet").exists()
+    assert (tmp_path / "outputs" / "hands_2d.parquet").is_file()
 
 
 def test_max_frames_is_recorded_as_incomplete_smoke_run(
@@ -222,17 +225,6 @@ def test_max_frames_is_recorded_as_incomplete_smoke_run(
             active_backend="wilor",
         )
 
-    def writer_factory(
-        _primary_model: str,
-        *,
-        frame_status_path: str,
-        bbox_path: str,
-    ) -> InferenceWriterBundle:
-        return InferenceWriterBundle(
-            frame_status=_PersistingWriter(frame_status_path),
-            bbox=_PersistingWriter(bbox_path),
-        )
-
     monkeypatch.setattr(run_hands, "PreparedSegmentReader", _FakeReader)
     monkeypatch.setattr(
         run_hands,
@@ -248,7 +240,6 @@ def test_max_frames_is_recorded_as_incomplete_smoke_run(
     assert run_hands.run(
         args,
         estimator_factory=estimator_factory,
-        inference_writer_factory=writer_factory,
         verify_wilor_assets=False,
     ) == 0
     manifest = json.loads(
@@ -359,16 +350,28 @@ def test_batch_rejects_incomplete_wilor_frame_statistics(
     assert "统计不完整" in reason
 
 
-def test_default_wilor_factories_never_silently_use_mediapipe(
+def test_default_wilor_factories_create_formal_parquet_writers(
     tmp_path: Path,
 ) -> None:
     config = HandsPipelineConfig.load(_write_config(tmp_path))
 
     with pytest.raises(EstimatorUnavailableError, match="不能静默"):
         create_hand_estimator("wilor", config)
-    with pytest.raises(FrameWriterUnavailableError, match="尚未接入"):
-        create_inference_writers(
-            "wilor",
-            frame_status_path="status.parquet",
-            bbox_path="bbox.parquet",
-        )
+    bundle = create_inference_writers(
+        "wilor",
+        frame_status_path=str(tmp_path / "status.parquet"),
+        bbox_path=str(tmp_path / "bbox.parquet"),
+        context=InferenceArtifactContext(
+            prep_revision="r0001",
+            segment_id="seg_000001",
+            video_stream_id="ego_rgb",
+            model_name="wilor",
+            model_version="test",
+            checkpoint_sha256="sha",
+            config_sha256="config",
+            device="cuda:0",
+        ),
+    )
+    bundle.close()
+    assert (tmp_path / "status.parquet").is_file()
+    assert (tmp_path / "bbox.parquet").is_file()

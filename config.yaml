@@ -83,7 +83,7 @@ hands:
     model_revision: dcf093e9c3e82a63e1a61c851dc20cb4612ccb5f
     source_path: models/wilor/source
     model_version: wilor_cvpr2025
-    upstream_license_checked: false
+    upstream_license_checked: true
     detector_path: models/wilor/detector.pt
     checkpoint_path: models/wilor/wilor_final.ckpt
     checkpoint_sha256: 3e97aafc7dd08d883a4cc5a027df61fdb6fda6136dbd1319405413862ada6bb2
@@ -93,7 +93,6 @@ hands:
     asset_manifest_path: models/wilor/download_manifest.json
     device: cuda:0
     precision: fp16
-    batch_size: 1
     bbox_padding_ratio: 0.15
     candidate_context_s: 0.75
     require_joint_mapping_version: wilor-to-hands-v1-v1

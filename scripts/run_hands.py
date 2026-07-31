@@ -19,6 +19,10 @@ from zpds.hands.estimator_factory import (
     validate_estimator_runtime,
 )
 from zpds.hands.experience import write_hands_experience_manifest
+from zpds.hands.frame_artifacts import (
+    InferenceArtifactContext,
+    validate_wilor_frame_artifacts,
+)
 from zpds.hands.orchestration import (
     InferenceWriterBundle,
     create_inference_writers,
@@ -26,7 +30,7 @@ from zpds.hands.orchestration import (
 from zpds.hands.pipeline import HandsPipeline
 from zpds.hands.preview import generate_hands_preview
 from zpds.hands.segment_reader import PreparedSegmentReader
-from zpds.hands.validator import validate_hands_parquet
+from zpds.hands.validator import validate_hands_parquet, validate_wilor_hands
 from zpds.hands.wilor_preflight import check_wilor_assets
 from zpds.hands.writer import write_hand_observations
 
@@ -165,6 +169,39 @@ def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
     temporary_path.replace(path)
 
 
+def _combine_validation_reports(
+    **reports: dict[str, Any],
+) -> dict[str, Any]:
+    """将 A 的全帧资产校验与 C 的 Hands 校验合并为一个报告。"""
+    statuses = [
+        str(report.get("status", "fail"))
+        for report in reports.values()
+    ]
+    status = (
+        "fail"
+        if "fail" in statuses
+        else ("warn" if "warn" in statuses else "pass")
+    )
+    errors: list[str] = []
+    warnings: list[str] = []
+    for report in reports.values():
+        errors.extend(str(item) for item in report.get("errors", []))
+        warnings.extend(str(item) for item in report.get("warnings", []))
+    return {
+        "status": status,
+        "checks": {
+            name: report.get("checks", {})
+            for name, report in reports.items()
+        },
+        "statistics": {
+            name: report.get("statistics", {})
+            for name, report in reports.items()
+        },
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
 def run(
     args: argparse.Namespace,
     *,
@@ -244,13 +281,6 @@ def run(
     output_path = output_paths.parquet
     config_sha256 = runtime_config.config_sha256
 
-    if primary_model == "wilor" and (args.validate or args.preview):
-        raise ValueError(
-            "WiLoR 21 点映射尚未验收，不能生成或校验 Hands V1 关键点产物"
-        )
-    if primary_model == "wilor" and experience_dir_value:
-        raise ValueError("WiLoR Experience 正式资产 Writer 尚未接入")
-
     if primary_model == "wilor" and verify_wilor_assets:
         preflight = check_wilor_assets(runtime_config.wilor)
         if not preflight.ready:
@@ -275,10 +305,25 @@ def run(
         else None
     )
     try:
+        writer_context = InferenceArtifactContext(
+            prep_revision=prep_revision,
+            segment_id=reader.segment_id,
+            video_stream_id=reader.video_stream_id,
+            model_name=runtime.model_name,
+            model_version=runtime.model_version,
+            checkpoint_sha256=runtime.checkpoint_sha256,
+            config_sha256=config_sha256,
+            device=str(
+                runtime.run_meta.get("device")
+                or runtime.run_meta.get("backend_delegate")
+                or runtime.active_backend
+            ),
+        )
         writers = inference_writer_factory(
             primary_model,
             frame_status_path=frame_status_path,
             bbox_path=bbox_path,
+            context=writer_context,
         )
     except Exception:
         runtime.estimator.close()
@@ -303,20 +348,15 @@ def run(
                     fail_on_error=primary_model == "mediapipe",
                 )
 
-        if primary_model == "mediapipe":
-            parquet_path = write_hand_observations(
-                consume_records(),
-                output_path,
-                prep_revision=prep_revision,
-                checkpoint_sha256=runtime.checkpoint_sha256,
-                config_sha256=config_sha256,
-                run_meta=runtime.run_meta,
-            )
-            print(f"Parquet: {parquet_path}")
-        else:
-            for _observation in consume_records():
-                # WiLoR 21 点映射验收前不写 hands_2d.parquet。
-                pass
+        parquet_path = write_hand_observations(
+            consume_records(),
+            output_path,
+            prep_revision=prep_revision,
+            checkpoint_sha256=runtime.checkpoint_sha256,
+            config_sha256=config_sha256,
+            run_meta=runtime.run_meta,
+        )
+        print(f"Parquet: {parquet_path}")
 
         print(f"Primary model: {primary_model}")
         print(f"Backend: {runtime.active_backend}")
@@ -348,9 +388,6 @@ def run(
 
     backend_name = runtime.active_backend
     checkpoint_sha256 = runtime.checkpoint_sha256
-
-    validation_status: str | None = None
-    report_path: Path | None = None
     declared_image_dimensions = _image_dimensions(
         segment,
         reader.video_stream_id,
@@ -360,14 +397,118 @@ def run(
         reader.video_stream_id,
         segment_dir,
     )
+    manifest_path = (
+        Path(args.manifest_output).expanduser()
+        if args.manifest_output
+        else output_paths.run_manifest
+    ).resolve()
+    run_mode = "smoke" if args.max_frames is not None else "production"
+    frame_status_counts = pipeline.frame_statistics
+    full_frame_coverage = (
+        args.max_frames is None
+        and frame_status_counts.requested == reader.expected_frame_count
+        and frame_status_counts.is_complete
+    )
+    wilor_artifacts_present = (
+        output_paths.frame_status is not None
+        and output_paths.frame_status.is_file()
+        and output_paths.bbox is not None
+        and output_paths.bbox.is_file()
+    )
+    artifact_report: dict[str, Any] | None = None
+    if primary_model == "wilor":
+        if (
+            output_paths.frame_status is None
+            or output_paths.bbox is None
+        ):
+            raise RuntimeError("WiLoR 全帧资产输出路径缺失")
+        artifact_report = validate_wilor_frame_artifacts(
+            output_paths.frame_status,
+            output_paths.bbox,
+            reader.sample_map_path,
+            expected_frame_count=frame_status_counts.requested,
+        )
+
+    model_device = str(
+        runtime.run_meta.get("device")
+        or runtime.run_meta.get("backend_delegate")
+        or runtime.active_backend
+    )
+    manifest_document: dict[str, Any] = {
+        "schema_version": 2,
+        "completed": False,
+        "run_mode": run_mode,
+        "segment_id": reader.segment_id,
+        "video_stream_id": reader.video_stream_id,
+        "prep_revision": prep_revision,
+        "source_kind": source_kind,
+        "primary_model": primary_model,
+        "backend": backend_name,
+        "config_sha256": config_sha256,
+        "checkpoint_sha256": checkpoint_sha256,
+        "upstream_git_commit": runtime.upstream_git_commit,
+        "max_frames": args.max_frames,
+        "full_frame_coverage": full_frame_coverage,
+        "wilor_requirement_satisfied": False,
+        "model": {
+            "name": runtime.model_name,
+            "version": runtime.model_version,
+            "checkpoint_sha256": checkpoint_sha256,
+            "device": model_device,
+        },
+        "coverage": {
+            "decoded_frames": pipeline.stats.frames_processed,
+            "failed_frames": pipeline.stats.frames_failed,
+        },
+        "image_dimensions": {
+            "declared_width": declared_image_dimensions[0],
+            "declared_height": declared_image_dimensions[1],
+            "actual_width": actual_image_dimensions[0],
+            "actual_height": actual_image_dimensions[1],
+            "metadata_matches_video": (
+                declared_image_dimensions == actual_image_dimensions
+            ),
+        },
+        "statistics": run_statistics,
+        "frame_artifact_validation": artifact_report,
+        "validation_status": None,
+        "outputs": {
+            "parquet": parquet_path,
+            "frame_status": frame_status_path,
+            "bbox": bbox_path,
+            "validation_report": None,
+            "preview": None,
+        },
+    }
+    # WiLoR 专用 Validator 读取 hands_run.json，因此先写可追溯的初始版本。
+    _write_json_atomic(manifest_path, manifest_document)
+
+    validation_status: str | None = None
+    report_path: Path | None = None
     if args.validate and parquet_path is not None:
         image_width, image_height = actual_image_dimensions
-        report = validate_hands_parquet(
-            parquet_path,
-            segment_json_path=str(segment_dir / "segment.json"),
-            image_width=image_width,
-            image_height=image_height,
-        )
+        if image_width is None or image_height is None:
+            raise ValueError("Hands Validator 无法确定实际视频分辨率")
+        if primary_model == "wilor":
+            hands_report = validate_wilor_hands(
+                parquet_path,
+                hands_run_path=str(manifest_path),
+                segment_json_path=str(segment_dir / "segment.json"),
+                image_width=image_width,
+                image_height=image_height,
+                expected_model_version=runtime.model_version,
+            )
+            report = _combine_validation_reports(
+                frame_artifacts=artifact_report or {},
+                hands_v1=hands_report,
+            )
+        else:
+            report = validate_hands_parquet(
+                parquet_path,
+                segment_json_path=str(segment_dir / "segment.json"),
+                image_width=image_width,
+                image_height=image_height,
+            )
         report_path = (
             Path(args.report_output).expanduser()
             if args.report_output
@@ -394,27 +535,21 @@ def run(
         )
         print(f"Preview: {generated_preview}")
 
-    manifest_path = (
-        Path(args.manifest_output).expanduser()
-        if args.manifest_output
-        else output_paths.run_manifest
-    ).resolve()
-    exit_code = 2 if validation_status == "fail" else 0
-    run_mode = "smoke" if args.max_frames is not None else "production"
-    frame_status_counts = pipeline.frame_statistics
-    full_frame_coverage = (
-        args.max_frames is None
-        and frame_status_counts.requested == reader.expected_frame_count
-        and frame_status_counts.is_complete
+    artifact_status = (
+        str(artifact_report.get("status"))
+        if artifact_report is not None
+        else "pass"
     )
-    wilor_artifacts_present = (
-        output_paths.frame_status is not None
-        and output_paths.frame_status.is_file()
-        and output_paths.bbox is not None
-        and output_paths.bbox.is_file()
+    exit_code = (
+        2
+        if validation_status == "fail"
+        or (primary_model == "wilor" and artifact_status == "fail")
+        else 0
     )
     wilor_requirement_satisfied = (
-        full_frame_coverage and wilor_artifacts_present
+        full_frame_coverage
+        and wilor_artifacts_present
+        and artifact_status == "pass"
         if primary_model == "wilor"
         else None
     )
@@ -426,44 +561,16 @@ def run(
             or bool(wilor_requirement_satisfied)
         )
     )
-    _write_json_atomic(
-        manifest_path,
-        {
-            "schema_version": 2,
-            "completed": completed,
-            "run_mode": run_mode,
-            "segment_id": reader.segment_id,
-            "video_stream_id": reader.video_stream_id,
-            "prep_revision": prep_revision,
-            "source_kind": source_kind,
-            "primary_model": primary_model,
-            "backend": backend_name,
-            "config_sha256": config_sha256,
-            "checkpoint_sha256": checkpoint_sha256,
-            "upstream_git_commit": runtime.upstream_git_commit,
-            "max_frames": args.max_frames,
-            "full_frame_coverage": full_frame_coverage,
-            "wilor_requirement_satisfied": wilor_requirement_satisfied,
-            "image_dimensions": {
-                "declared_width": declared_image_dimensions[0],
-                "declared_height": declared_image_dimensions[1],
-                "actual_width": actual_image_dimensions[0],
-                "actual_height": actual_image_dimensions[1],
-                "metadata_matches_video": (
-                    declared_image_dimensions == actual_image_dimensions
-                ),
-            },
-            "statistics": run_statistics,
-            "validation_status": validation_status,
-            "outputs": {
-                "parquet": parquet_path,
-                "frame_status": frame_status_path,
-                "bbox": bbox_path,
-                "validation_report": str(report_path) if report_path else None,
-                "preview": generated_preview,
-            },
-        },
+    manifest_document["completed"] = completed
+    manifest_document["wilor_requirement_satisfied"] = (
+        wilor_requirement_satisfied
     )
+    manifest_document["validation_status"] = validation_status
+    manifest_document["outputs"]["validation_report"] = (
+        str(report_path) if report_path else None
+    )
+    manifest_document["outputs"]["preview"] = generated_preview
+    _write_json_atomic(manifest_path, manifest_document)
     print(f"Manifest: {manifest_path}")
     if not completed:
         print(

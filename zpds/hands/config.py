@@ -14,7 +14,6 @@ import yaml
 from zpds.hands.backend_router import HandsBackendPolicy
 from zpds.hands.mediapipe_adapter import HandEstimatorConfig
 from zpds.hands.schemas import ModelInfo
-from zpds.hands.wilor_schema import WiLoRConfig
 
 VALID_BACKENDS = frozenset(
     {"auto", "tasks_hand_landmarker", "solutions_hands", "wilor"}
@@ -44,7 +43,6 @@ class WilorConfig:
     asset_manifest_path: str = ""
     device: str = "cuda:0"
     precision: str = "fp16"
-    batch_size: int = 8
     bbox_padding_ratio: float = 0.15
     candidate_context_s: float = 0.75
     require_joint_mapping_version: str | None = None
@@ -99,7 +97,6 @@ class WilorConfig:
             asset_manifest_path=resolve_path("asset_manifest_path"),
             device=str(document.get("device", "cuda:0")),
             precision=str(document.get("precision", "fp16")),
-            batch_size=int(document.get("batch_size", 8)),
             bbox_padding_ratio=float(
                 document.get("bbox_padding_ratio", 0.15)
             ),
@@ -119,8 +116,6 @@ class WilorConfig:
     def validate(self) -> None:
         if self.bbox_fps <= 0:
             raise ValueError("hands.wilor.bbox_fps 必须大于 0")
-        if self.batch_size <= 0:
-            raise ValueError("hands.wilor.batch_size 必须大于 0")
         if self.bbox_padding_ratio < 0:
             raise ValueError("hands.wilor.bbox_padding_ratio 不能为负数")
         if self.candidate_context_s < 0:
@@ -155,7 +150,6 @@ class HandsPipelineConfig:
     wilor: WilorConfig
     config_sha256: str
     checkpoint_sha256: str
-    wilor: WiLoRConfig | None = None
 
     @classmethod
     def load(
@@ -235,10 +229,18 @@ class HandsPipelineConfig:
             model_path = config_path.parent / model_path
         estimator.tasks.model_path = str(model_path.resolve())
         model_info = ModelInfo.from_file(estimator.tasks.model_path)
-        wilor = cls._load_wilor_config(config_path, hands_document)
-        checkpoint_sha256 = (
-            _sha256_file(Path(wilor.checkpoint_path)) if wilor is not None else model_info.sha256
-        )
+        use_wilor_checkpoint = estimator.backend == "wilor"
+        if use_wilor_checkpoint:
+            checkpoint_path = Path(wilor.checkpoint_path)
+            if not wilor.checkpoint_path:
+                raise ValueError("hands.wilor.checkpoint_path 不能为空")
+            if not checkpoint_path.is_file():
+                raise FileNotFoundError(
+                    f"WiLoR checkpoint 不存在: {checkpoint_path}"
+                )
+            checkpoint_sha256 = _sha256_file(checkpoint_path)
+        else:
+            checkpoint_sha256 = model_info.sha256
 
         return cls(
             path=config_path,
@@ -248,46 +250,6 @@ class HandsPipelineConfig:
             wilor=wilor,
             config_sha256=_config_sha256(document),
             checkpoint_sha256=checkpoint_sha256,
-            wilor=wilor,
-        )
-
-    @staticmethod
-    def _load_wilor_config(
-        config_path: Path,
-        hands_document: dict[str, Any],
-    ) -> WiLoRConfig | None:
-        if hands_document.get("backend") != "wilor":
-            return None
-        raw = hands_document.get("wilor")
-        if not isinstance(raw, dict):
-            raise TypeError("hands.backend=wilor 时 hands.wilor 必须是对象")
-
-        def resolve_path(name: str) -> str:
-            value = raw.get(name, "")
-            if not value:
-                return ""
-            path = Path(str(value)).expanduser()
-            if not path.is_absolute():
-                path = config_path.parent / path
-            return str(path.resolve())
-
-        checkpoint_path = resolve_path("checkpoint_path")
-        if not checkpoint_path:
-            raise ValueError("hands.wilor.checkpoint_path 不能为空")
-        if not Path(checkpoint_path).is_file():
-            raise FileNotFoundError(f"WiLoR checkpoint 不存在: {checkpoint_path}")
-        return WiLoRConfig(
-            checkpoint_path=checkpoint_path,
-            expected_sha256=str(raw.get("checkpoint_sha256", raw.get("expected_sha256", ""))),
-            wilor_source_path=resolve_path("wilor_source_path"),
-            detector_path=resolve_path("detector_path"),
-            model_config_path=resolve_path("model_config_path"),
-            device=str(raw.get("device", "cpu")),
-            precision=str(raw.get("precision", "float32")),
-            model_version=str(raw.get("model_version", "wilor_cvpr2025")),
-            upstream_repository=str(raw.get("upstream_repository", "")),
-            upstream_git_commit=str(raw.get("upstream_git_commit", "")),
-            upstream_license_checked=bool(raw.get("upstream_license_checked", False)),
         )
 
     @staticmethod

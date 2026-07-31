@@ -12,7 +12,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 import numpy as np
 
-from zpds.hands.schemas import PreparedFrame, RawHandResult
+from zpds.hands.schemas import HandFrameResult, PreparedFrame, RawHandResult
 
 InferenceStatus = Literal[
     "detected",
@@ -40,6 +40,18 @@ class HandEstimator(Protocol):
         """释放模型、GPU 和第三方运行时资源。"""
 
 
+@runtime_checkable
+class FrameStatusHandEstimator(HandEstimator, Protocol):
+    """可向人员 A 保留模型原始逐帧状态的扩展估计器接口。"""
+
+    def estimate_frame(
+        self,
+        frame_rgb: np.ndarray,
+        timestamp_ms: int,
+    ) -> HandFrameResult:
+        """返回 detected/no-hand/failed 等结构化模型状态。"""
+
+
 @dataclass(frozen=True)
 class FrameInferenceRecord:
     """人员 A 为每个 Prepared 输出帧生成的一条推理记录。"""
@@ -47,6 +59,8 @@ class FrameInferenceRecord:
     frame: PreparedFrame
     inference_status: InferenceStatus
     raw_hands: tuple[RawHandResult, ...] = ()
+    effective_hands: tuple[RawHandResult, ...] = ()
+    frame_result: HandFrameResult | None = None
     failure_reason: str | None = None
     active_backend: str = ""
     inference_ms: float = 0.0
@@ -62,6 +76,11 @@ class FrameInferenceRecord:
             raise ValueError("inference_ms 必须是非负有限数值")
         if any(not isinstance(hand, RawHandResult) for hand in self.raw_hands):
             raise TypeError("raw_hands 必须全部是 RawHandResult")
+        if any(
+            not isinstance(hand, RawHandResult)
+            for hand in self.effective_hands
+        ):
+            raise TypeError("effective_hands 必须全部是 RawHandResult")
 
         if self.inference_status == "detected" and not self.raw_hands:
             raise ValueError("detected 状态必须至少包含一只手")
@@ -143,6 +162,7 @@ __all__ = [
     "VALID_INFERENCE_STATUSES",
     "BBoxWriter",
     "FrameInferenceRecord",
+    "FrameStatusHandEstimator",
     "FrameStatusWriter",
     "HandEstimator",
     "InferenceStatus",

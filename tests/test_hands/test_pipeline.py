@@ -46,6 +46,63 @@ class FakeEstimator:
         return response  # type: ignore[return-value]
 
 
+class FakeStructuredEstimator:
+    def __init__(self, responses: list[HandFrameResult]) -> None:
+        self._responses = responses
+        self.timestamps_ms: list[int] = []
+        self.closed = False
+
+    def estimate_frame(
+        self,
+        _frame_rgb: np.ndarray,
+        timestamp_ms: int,
+    ) -> HandFrameResult:
+        self.timestamps_ms.append(timestamp_ms)
+        return self._responses[len(self.timestamps_ms) - 1]
+
+    def estimate(
+        self,
+        _frame_rgb: np.ndarray,
+        _timestamp_ms: int,
+    ) -> list[RawHandResult]:
+        raise AssertionError(
+            "structured estimator must use estimate_frame(), not estimate()"
+        )
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _structured_result(
+    status: str,
+    *,
+    hands: list[RawHandResult] | None = None,
+    failure_reason: str | None = None,
+    inference_ms: float = 1.25,
+) -> HandFrameResult:
+    primary = ModelAttemptResult(
+        model_name="wilor",
+        backend_name="wilor",
+        status=status,  # type: ignore[arg-type]
+        hands=hands or [],
+        inference_ms=inference_ms,
+        failure_reason=failure_reason,
+        model_version="test",
+        checkpoint_sha256="abc",
+        device="cuda:0",
+    )
+    return HandFrameResult(
+        timestamp_ms=0,
+        requested_model="wilor",
+        primary=primary,
+        fallback=None,
+        effective_model=(
+            "wilor" if status == "detected" else None
+        ),
+        effective_hands=list(primary.hands),
+    )
+
+
 def _frame(
     output_frame_index: int,
     timestamp_ns: int,
@@ -399,6 +456,100 @@ def test_run_frames_records_every_status_and_continues_after_failure() -> None:
     assert pipeline.frame_statistics.requested == 4
     assert pipeline.frame_statistics.accounted == 4
     assert pipeline.frame_statistics.is_complete
+
+
+def test_pipeline_preserves_structured_wilor_frame_statuses() -> None:
+    frames = [
+        _frame(index, index * 33_333_333)
+        for index in range(4)
+    ]
+    estimator = FakeStructuredEstimator(
+        [
+            _structured_result(
+                "detected",
+                hands=[_raw_hand("Left")],
+                inference_ms=2.0,
+            ),
+            _structured_result("no_hand", inference_ms=3.0),
+            _structured_result(
+                "failed",
+                failure_reason="WiLoRInferenceError: bad frame",
+                inference_ms=4.0,
+            ),
+            _structured_result(
+                "skipped_invalid_input",
+                failure_reason="invalid RGB frame",
+                inference_ms=0.0,
+            ),
+        ]
+    )
+    pipeline = HandsPipeline(
+        reader=FakeReader(frames),
+        estimator=estimator,
+        model_name="wilor",
+        model_version="test",
+        active_backend="wilor",
+    )
+
+    records = pipeline.run_frames_to_list()
+
+    assert [record.inference_status for record in records] == [
+        "detected",
+        "no_hand",
+        "failed",
+        "skipped_invalid_input",
+    ]
+    assert [record.inference_ms for record in records] == [
+        2.0,
+        3.0,
+        4.0,
+        0.0,
+    ]
+    assert records[2].failure_reason == (
+        "WiLoRInferenceError: bad frame"
+    )
+    assert records[3].failure_reason == "invalid RGB frame"
+    assert estimator.timestamps_ms == [0, 33, 66, 99]
+    assert pipeline.stats.frames_with_hands == 1
+    assert pipeline.stats.frames_no_hand == 1
+    assert pipeline.stats.frames_failed == 1
+    assert pipeline.stats.frames_skipped_invalid_input == 1
+    assert pipeline.frame_statistics.to_manifest() == {
+        "requested": 4,
+        "detected": 1,
+        "no_hand": 1,
+        "failed": 1,
+        "skipped_invalid_input": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _structured_result("detected"),
+        _structured_result(
+            "not_run",
+            failure_reason="run aborted",
+        ),
+    ],
+)
+def test_pipeline_never_turns_invalid_structured_status_into_no_hand(
+    result: HandFrameResult,
+) -> None:
+    pipeline = HandsPipeline(
+        reader=FakeReader([_frame(0, 0)]),
+        estimator=FakeStructuredEstimator([result]),
+        model_name="wilor",
+        model_version="test",
+        active_backend="wilor",
+    )
+
+    record = pipeline.run_frames_to_list()[0]
+
+    assert record.inference_status == "failed"
+    assert record.failure_reason
+    assert pipeline.stats.frames_failed == 1
+    assert pipeline.stats.frames_no_hand == 0
 
 
 def test_run_frames_turns_invalid_model_output_into_failed_status() -> None:

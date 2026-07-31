@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from zpds.hands.contracts import BBoxWriter, FrameStatusWriter
-
-
-class FrameWriterUnavailableError(RuntimeError):
-    """WiLoR 逐帧正式 Writer 尚未接入。"""
+from zpds.hands.frame_artifacts import (
+    InferenceArtifactContext,
+    ParquetBBoxWriter,
+    ParquetFrameStatusWriter,
+)
 
 
 class NullInferenceWriter:
@@ -46,23 +47,30 @@ def create_inference_writers(
     *,
     frame_status_path: str | None,
     bbox_path: str | None,
+    context: InferenceArtifactContext | None = None,
 ) -> InferenceWriterBundle:
-    """创建逐帧 Writer；WiLoR 正式 Writer 未接入时明确失败。"""
+    """创建 MediaPipe 空 Writer 或 WiLoR 正式 Parquet Writer。"""
     if primary_model == "mediapipe":
         return InferenceWriterBundle(
             frame_status=NullInferenceWriter(),
             bbox=NullInferenceWriter(),
         )
     if primary_model == "wilor":
-        raise FrameWriterUnavailableError(
-            "WiLoR frame-status/BBox 正式 Writer 尚未接入；"
-            f"目标路径为 frame_status={frame_status_path}, bbox={bbox_path}"
+        if frame_status_path is None or bbox_path is None:
+            raise ValueError("WiLoR frame-status 和 BBox 输出路径不能为空")
+        if context is None:
+            raise ValueError("WiLoR Writer 缺少 InferenceArtifactContext")
+        return InferenceWriterBundle(
+            frame_status=ParquetFrameStatusWriter(
+                frame_status_path,
+                context,
+            ),
+            bbox=ParquetBBoxWriter(bbox_path, context),
         )
     raise ValueError(f"未知 Hands 主模型: {primary_model!r}")
 
 
 __all__ = [
-    "FrameWriterUnavailableError",
     "InferenceWriterBundle",
     "NullInferenceWriter",
     "create_inference_writers",
