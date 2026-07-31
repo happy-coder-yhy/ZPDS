@@ -315,6 +315,10 @@ class WiLoRHandEstimator:
             if detections:
                 self._stats.detected += 1
                 status = "detected"
+                # 按 YOLO 置信度排序，最多保留 2 只手（filter low-confidence false positives）
+                detections = sorted(
+                    detections, key=lambda d: d.detection_score, reverse=True
+                )[:2]
                 hands: list[RawHandResult] = []
                 for det in detections:
                     try:
