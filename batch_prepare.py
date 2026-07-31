@@ -170,6 +170,8 @@ def generate_segment(
     profile: str = "guida",
     source_assets: list[dict] | None = None,
     depth_npz_path: str | None = None,
+    experience_dir: str | None = None,
+    experience_version: str | None = None,
 ) -> dict:
     """为单个候选区间生成完整 Prepared Segment。
 
@@ -399,6 +401,16 @@ def generate_segment(
     write_validation_report(validation, output_dir)
     write_annotation_validation_report(validation, output_dir)
 
+    experience_manifest = None
+    if experience_dir is not None and validation["status"] != "fail":
+        from zpds.annotation.importer import import_segment_annotations
+
+        experience_manifest = import_segment_annotations(
+            output_dir,
+            experience_dir,
+            experience_version=experience_version,
+        )
+
     return {
         "segment_id": segment_id,
         "status": validation["status"],
@@ -413,6 +425,7 @@ def generate_segment(
         "annotation_rows": sum(
             ar.get("rows", 0) for ar in annotation_results
         ) if annotation_results else 0,
+        "experience_manifest": experience_manifest,
         "checks": validation["checks"],
         "errors": validation["errors"],
     }
@@ -463,6 +476,16 @@ def main():
         default="guida",
         choices=["guida", "dunjia", "umi", "epic"],
         help="数据源 profile (默认: guida)",
+    )
+    parser.add_argument(
+        "--experience-dir",
+        default=None,
+        help="可选：将已声明的 Prepared 标注导入此 Experience 目录",
+    )
+    parser.add_argument(
+        "--experience-version",
+        default=None,
+        help="Experience 版本（默认使用 --experience-dir 的目录名）",
     )
     args = parser.parse_args()
 
@@ -810,6 +833,8 @@ def main():
                 quality_issues=span_issues if span_issues else None,
                 profile=profile,
                 source_assets=source_assets,
+                experience_dir=args.experience_dir,
+                experience_version=args.experience_version,
             )
             elapsed = time.time() - t0
             result["elapsed_s"] = round(elapsed, 1)

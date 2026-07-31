@@ -23,30 +23,35 @@ import sys
 import time
 from pathlib import Path
 
-from zpds_prepare.readers.a2d_reader import read_session
-from segment.a2d_video_transcoder import (
-    transcode_image_sequence,
-    generate_image_sample_map,
-    write_image_sample_map,
-)
+# Allow direct ``python scripts/prepare_a2d_segment.py`` execution.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from segment.a2d_calibration import extract_a2d_calibration, write_calibration
 from segment.a2d_depth_copy import (
     copy_depth_sequence,
-    generate_depth_sample_map as generate_depth_sample_map,
-    write_depth_sample_map as write_depth_sample_map,
+    generate_depth_sample_map,
     probe_depth_properties,
+    write_depth_sample_map,
 )
+from segment.a2d_review_annotations import (
+    build_annotation_stream_entry,
+    convert_review_actions,
+    write_review_annotations,
+)
+from segment.a2d_video_transcoder import (
+    generate_image_sample_map,
+    transcode_image_sequence,
+    write_image_sample_map,
+)
+from segment.image_undistorter import plan_undistortion
+from segment.segment_writer import build_segment_json, write_segment_json
 from segment.timeseries_normalizer import (
     normalize_time_series,
     write_time_series,
 )
-from segment.a2d_calibration import extract_a2d_calibration, write_calibration
-from segment.image_undistorter import plan_undistortion
-from segment.segment_writer import build_segment_json, write_segment_json
-from segment.a2d_review_annotations import (
-    convert_review_actions,
-    write_review_annotations,
-    build_annotation_stream_entry,
-)
+from zpds_prepare.readers.a2d_reader import read_session
 
 # 输出流配置
 TARGET_FPS = 30.0
@@ -99,6 +104,8 @@ def prepare_segment(
     output_base: Path,
     segment_index: int,
     revision: str = "r0001",
+    experience_dir: str | Path | None = None,
+    experience_version: str | None = None,
 ) -> dict:
     """为一个候选 Segment 生成完整 Prepared Segment。
 
@@ -108,6 +115,8 @@ def prepare_segment(
         output_base: Prepared Segment 根目录。
         segment_index: 从 1 开始的序号。
         revision: record_revision。
+        experience_dir: 可选的 Experience 输出目录；写入已声明的既有标注。
+        experience_version: Experience 版本；默认使用 Experience 目录名。
 
     Returns:
         segment dict（segment.json 内容）。
@@ -351,6 +360,17 @@ def prepare_segment(
     seg_path = write_segment_json(segment, str(seg_dir))
     print(f"    segment.json → {seg_path}")
 
+    if experience_dir is not None:
+        from zpds.annotation.importer import import_segment_annotations
+
+        manifest = import_segment_annotations(
+            seg_dir,
+            experience_dir,
+            experience_version=experience_version,
+        )
+        if manifest is not None:
+            print(f"    existing annotations → {manifest}")
+
     return segment
 
 
@@ -578,6 +598,16 @@ def main():
         default="r0001",
         help="record_revision (默认: r0001)",
     )
+    parser.add_argument(
+        "--experience-dir",
+        default=None,
+        help="可选：将已声明的 Prepared 标注导入此 Experience 目录",
+    )
+    parser.add_argument(
+        "--experience-version",
+        default=None,
+        help="Experience 版本（默认使用 --experience-dir 的目录名）",
+    )
     args = parser.parse_args()
 
     source_path = Path(args.source)
@@ -654,6 +684,8 @@ def main():
             output_base=output_base,
             segment_index=i,
             revision=args.revision,
+            experience_dir=args.experience_dir,
+            experience_version=args.experience_version,
         )
 
         # 打印 segment 摘要

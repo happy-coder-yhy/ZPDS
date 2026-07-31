@@ -204,6 +204,8 @@ def _run_segment_generation(
     output_root: Path,
     session=None,
     epic_fields_root: str | None = None,
+    experience_dir: str | None = None,
+    experience_version: str | None = None,
 ) -> list[dict]:
     """对单条记录的所有候选 Segment 运行 batch_prepare。
 
@@ -283,6 +285,8 @@ def _run_segment_generation(
                 quality_issues=cand.get("issues_in_span"),
                 profile="epic",
                 source_assets=source_assets,
+                experience_dir=experience_dir,
+                experience_version=experience_version,
             )
             result["epic_fields_coverage"] = coverage_status
             results.append(result)
@@ -336,6 +340,16 @@ def main():
         "--epic-fields-root",
         default=None,
         help="EPIC-Fields JSON 根目录；未覆盖视频保持原 RGB 并记录状态",
+    )
+    parser.add_argument(
+        "--experience-dir",
+        default=None,
+        help="可选：将已声明的 Prepared 标注导入此 Experience 目录",
+    )
+    parser.add_argument(
+        "--experience-version",
+        default=None,
+        help="Experience 版本（默认使用 --experience-dir 的目录名）",
     )
     args = parser.parse_args()
 
@@ -451,6 +465,8 @@ def main():
                 seg_root,
                 session=session,
                 epic_fields_root=args.epic_fields_root,
+                experience_dir=args.experience_dir,
+                experience_version=args.experience_version,
             )
             result["stages"]["segment_generation"] = seg_results
             coverage_status = next(

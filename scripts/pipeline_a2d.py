@@ -51,6 +51,8 @@ def run_pipeline(
     skip_mcap: bool = True,   # MCAP 解析较重，默认跳过
     target_fps: float = 30.0,
     revision: str = "r0001",
+    experience_dir: str | None = None,
+    experience_version: str | None = None,
 ) -> int:
     """执行 A2D 完整 Pipeline。
 
@@ -228,6 +230,8 @@ def run_pipeline(
             output_base=output_base_path,
             segment_index=i,
             revision=revision,
+            experience_dir=experience_dir,
+            experience_version=experience_version,
         )
         all_segments.append(seg)
 
@@ -349,6 +353,16 @@ def main():
         default="r0001",
         help="record_revision（默认: r0001）",
     )
+    parser.add_argument(
+        "--experience-dir",
+        default=None,
+        help="可选：将已声明的 Prepared 标注导入此 Experience 目录",
+    )
+    parser.add_argument(
+        "--experience-version",
+        default=None,
+        help="Experience 版本（默认使用 --experience-dir 的目录名）",
+    )
     args = parser.parse_args()
 
     return run_pipeline(
@@ -361,6 +375,8 @@ def main():
         skip_mcap=not args.mcap,
         target_fps=args.target_fps,
         revision=args.revision,
+        experience_dir=args.experience_dir,
+        experience_version=args.experience_version,
     )
 
 
