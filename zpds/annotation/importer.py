@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import pyarrow.parquet as pq
@@ -224,9 +224,21 @@ def _copy_immutable(source: Path, destination: Path, expected_sha256: str) -> No
 
 
 def _resolve_segment_file(segment_root: Path, uri: str) -> Path:
-    candidate = Path(uri)
-    if candidate.is_absolute() or ".." in candidate.parts:
+    # ``Path`` only understands the current host's path syntax. A manifest
+    # produced on another OS must still reject absolute paths and traversal,
+    # so validate the URI using both path flavours before resolving it.
+    posix_candidate = PurePosixPath(uri)
+    windows_candidate = PureWindowsPath(uri)
+    if (
+        posix_candidate.is_absolute()
+        or windows_candidate.is_absolute()
+        or bool(windows_candidate.drive)
+        or ".." in posix_candidate.parts
+        or ".." in windows_candidate.parts
+    ):
         raise ValueError(f"annotation uri 必须是 Segment 内相对路径: {uri!r}")
+    # Treat either slash style as a portable manifest separator.
+    candidate = Path(*PurePosixPath(uri.replace("\\", "/")).parts)
     resolved = (segment_root / candidate).resolve()
     if not resolved.is_relative_to(segment_root):
         raise ValueError(f"annotation uri 超出 Segment 目录: {uri!r}")

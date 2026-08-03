@@ -124,7 +124,11 @@ def test_reimport_is_idempotent_but_changed_content_is_rejected(tmp_path: Path) 
     ("uri", "expected"),
     [
         ("../outside.parquet", "相对路径"),
+        (r"..\outside.parquet", "相对路径"),
         ("/tmp/outside.parquet", "相对路径"),
+        (r"C:\tmp\outside.parquet", "相对路径"),
+        ("C:/tmp/outside.parquet", "相对路径"),
+        (r"\\server\share\outside.parquet", "相对路径"),
     ],
 )
 def test_rejects_annotation_uri_outside_segment(
@@ -137,6 +141,19 @@ def test_rejects_annotation_uri_outside_segment(
 
     with pytest.raises(ValueError, match=expected):
         import_segment_annotations(segment_dir, tmp_path / "experience")
+
+
+def test_accepts_windows_relative_annotation_uri_on_any_host(tmp_path: Path) -> None:
+    segment_dir = tmp_path / "prepared" / "seg_000001"
+    _write_parquet(segment_dir / "annotations" / "review_actions.parquet", [10])
+    _write_segment(
+        segment_dir,
+        [_annotation_stream(uri=r"annotations\review_actions.parquet")],
+    )
+
+    manifest_path = import_segment_annotations(segment_dir, tmp_path / "experience")
+
+    assert manifest_path is not None
 
 
 def test_rejects_non_parquet_annotation_stream(tmp_path: Path) -> None:
