@@ -33,6 +33,7 @@ from zpds_prepare.detectors.imu_gap import detect_imu_gaps
 from zpds_prepare.detectors.timestamp_gap import detect_timestamp_gaps
 from zpds_prepare.writers.candidate_writer import write_segment_candidates
 from zpds_prepare.writers.quality_writer import write_quality_issues
+from zpds.qc import QCCascade
 
 CONFIG_PATH = "config.yaml"
 OUTPUT_DIR = "output"
@@ -97,6 +98,11 @@ def main():
         "--formal-robot-qc",
         action="store_true",
         help="[UMI] 写入正式 quality views 和 revision manifest；保留原始数据不变",
+    )
+    parser.add_argument(
+        "--skip-cascade",
+        action="store_true",
+        help="跳过 QC 级联（Stage 3/5/6/9/11）",
     )
     parser.add_argument(
         "--epic-ho",
@@ -252,12 +258,28 @@ def main():
         session = rd.read_session(dataset_path)
 
     if args.formal_robot_qc:
-        if profile != "umi":
-            parser.error("--formal-robot-qc 当前仅支持 umi；A2D/遁甲请传入其已生成的 typed reports")
-        from zpds.qc.robot_integration import run_umi_formal_session
+        from zpds.qc.robot_integration import (
+            run_a2d_formal_session,
+            run_dunjia_formal_session,
+            run_umi_formal_session,
+        )
 
-        delivery = run_umi_formal_session(session, output_dir)
-        print(f"正式 UMI revision 已写入: {(output_dir / 'revision.json').resolve()}")
+        if profile == "umi":
+            delivery = run_umi_formal_session(session, output_dir)
+        elif profile == "dunjia":
+            delivery = run_dunjia_formal_session(session, output_dir)
+        elif profile == "a2d":
+            delivery = run_a2d_formal_session(
+                session, dataset_path, output_dir
+            )
+        else:
+            parser.error(
+                f"--formal-robot-qc 不支持 {profile}；"
+                f"可选: umi, dunjia, a2d"
+            )
+            return 1
+
+        print(f"正式 QC revision 已写入: {(output_dir / 'revision.json').resolve()}")
         print("VLM 语义: not_run")
         print(f"质量视图: {', '.join(sorted(delivery.report.quality_views))}")
         return 0
@@ -321,9 +343,89 @@ def main():
               f"bbox={ann_s.bbox_format}")
 
     # ================================================================
-    # Step 2: 运行检测器（遍历所有流）
+    # Step 2: QC 级联（Stage 3/5/6/9/11）
     # ================================================================
-    step_header(2, "运行检测器")
+    step_header(2, "QC 级联 (Stage 3/5/6/9/11)")
+
+    cascade_decisions: list = []
+    cascade_report = None
+    cascade_distribution: dict = {}
+    if not args.skip_cascade:
+        # 提取 IMU 数据供 Stage 6 使用
+        imu_context: dict[str, object] = {}
+        for imu_id, imu_s in session.imu_streams.items():
+            df = imu_s.dataframe
+            imu_context["imu_timestamps_ns"] = df["timestamp_ns"].tolist()
+            imu_context["imu_stream_id"] = imu_id
+            accel_cols = [c for c in df.columns if c in ("ax", "ay", "az")]
+            gyro_cols = [c for c in df.columns if c in ("gx", "gy", "gz")]
+            if accel_cols + gyro_cols:
+                imu_context["imu_values"] = df[accel_cols + gyro_cols].to_numpy()
+                imu_context["imu_axis_names"] = accel_cols + gyro_cols
+            break  # 取第一个 IMU 流
+
+        for stream_id, vs in session.video_streams.items():
+            ctx: dict[str, object] = {
+                "session_id": session_id,
+                "video_path": str(vs.video_path) if vs.video_path else "",
+                "fps": float(vs.fps),
+                "start_ns": int(vs.timestamps_ns[0]) if vs.timestamps_ns else 0,
+                "profile": profile,
+                "evidence_dir": str(output_dir / "evidence" / stream_id),
+                "stream_id": stream_id,
+            }
+            depth_s = session.depth_streams.get(stream_id)
+            if depth_s is not None:
+                if depth_s.timestamps_ns:
+                    ctx["rgb_timestamps_ns"] = vs.timestamps_ns
+                    ctx["depth_timestamps_ns"] = depth_s.timestamps_ns
+                if hasattr(depth_s, "frame_dir") and depth_s.frame_dir:
+                    ctx["depth_dir"] = str(depth_s.frame_dir)
+            ctx.update(imu_context)
+            try:
+                cascade = QCCascade.from_profile(profile)
+                report = cascade.run(ctx)
+                cascade_report = report
+                cascade_distribution = cascade.distribution_dict()
+                cascade_decisions.extend(report.decisions)
+                print(f"  [{stream_id}] Stage 级联完成: "
+                      f"{len(report.decisions)} decisions, "
+                      f"overall_pass={report.overall_pass}")
+            except Exception as exc:
+                print(f"  [{stream_id}] QC 级联异常: {exc}")
+        if cascade_report:
+            cascade_path = output_dir / "cascade_report.json"
+            import json as _json
+            cascade_path.parent.mkdir(parents=True, exist_ok=True)
+            cascade_data = {
+                "session_id": cascade_report.session_id,
+                "overall_pass": cascade_report.overall_pass,
+                "total_decisions": len(cascade_report.decisions),
+                "distribution": cascade_distribution,
+                "decisions": [
+                    {
+                        "stage": d.stage,
+                        "reason": d.reason.value,
+                        "severity": d.severity.value,
+                        "message": d.message,
+                        "disposition": d.disposition.value if d.disposition else None,
+                        "detail": d.detail,
+                    }
+                    for d in cascade_report.decisions
+                ],
+            }
+            cascade_path.write_text(
+                _json.dumps(cascade_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"  级联报告: {cascade_path.resolve()}")
+    else:
+        print("  QC 级联已跳过 (--skip-cascade)")
+
+    # ================================================================
+    # Step 3: 运行检测器（遍历所有流）
+    # ================================================================
+    step_header(3, "运行检测器")
 
     all_issues = []
     min_black_duration_ns = int(min_black_duration_s * 1_000_000_000)
@@ -474,9 +576,9 @@ def main():
             print("    ✓ 无异常")
 
     # ================================================================
-    # Step 3: 汇总分析
+    # Step 4: 汇总分析
     # ================================================================
-    step_header(3, "汇总分析")
+    step_header(4, "汇总分析")
 
     summary = get_issue_summary(all_issues)
     print(f"  总异常数: {summary['total']}")
@@ -485,9 +587,9 @@ def main():
         print(f"  按处置: {summary['by_decision']}")
 
     # ================================================================
-    # Step 4: 写出 quality_issues.json
+    # Step 5: 写出 quality_issues.json
     # ================================================================
-    step_header(4, "写出 quality_issues.json")
+    step_header(5, "写出 quality_issues.json")
 
     qi_path = write_quality_issues(
         output_path=output_dir / "quality_issues.json",
@@ -497,9 +599,9 @@ def main():
     print(f"  输出: {qi_path.resolve()}")
 
     # ================================================================
-    # Step 5: 生成候选 Segment
+    # Step 6: 生成候选 Segment
     # ================================================================
-    step_header(5, "生成候选 Segment")
+    step_header(6, "生成候选 Segment")
 
     candidates = plan_segments(
         issues=all_issues,
@@ -519,9 +621,9 @@ def main():
                   f"{(iss['end_ns'] - iss['start_ns']) / 1e9:.2f}s")
 
     # ================================================================
-    # Step 6: 写出 segment_candidates.json
+    # Step 7: 写出 segment_candidates.json
     # ================================================================
-    step_header(6, "写出 segment_candidates.json")
+    step_header(7, "写出 segment_candidates.json")
 
     sc_path = write_segment_candidates(
         output_path=output_dir / "segment_candidates.json",
@@ -539,6 +641,7 @@ def main():
     print(f"\n{'=' * 60}")
     print("  完成")
     print(f"  耗时:        {elapsed:.1f}s")
+    print(f"  QC 级联:     {'已跳过' if args.skip_cascade else f'{len(cascade_decisions)} decisions'}")
     print(f"  发现异常:    {summary['total']}")
     print(f"  候选 Segment: {len(candidates)}")
     print(f"  输出目录:    {output_dir.resolve()}")
