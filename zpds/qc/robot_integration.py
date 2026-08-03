@@ -310,7 +310,160 @@ def run_umi_formal_session(
     return delivery
 
 
+def run_dunjia_formal_session(
+    session: Any,
+    output_dir: str | Path,
+    *,
+    config: dict[str, Any] | None = None,
+    producer_version: str = "v1",
+) -> RobotQCDelivery:
+    """Run Person B's Dunjia B1-B5 detectors then adapt to the formal schema."""
+    from zpds_prepare.detectors.dunjia import (
+        check_dunjia_completeness,
+        check_dunjia_coverage,
+        check_dunjia_imu,
+        check_dunjia_rgbd,
+        aggregate_dunjia_quality_views,
+    )
+
+    cfg = config or {}
+    require_depth = bool(cfg.get("dunjia", {}).get("depth", {}).get("required", True))
+    max_pairing_ns = int(cfg.get("dunjia", {}).get("rgbd", {}).get("max_pairing_offset_ns", 50_000_000))
+    spike_factor = float(cfg.get("dunjia", {}).get("imu", {}).get("spike_std_factor", 6.0))
+
+    # B1-B4: run detectors
+    completeness = check_dunjia_completeness(session, require_depth=require_depth)
+    rgbd = check_dunjia_rgbd(session, max_pairing_offset_ns=max_pairing_ns)
+    imu = check_dunjia_imu(session, spike_std_factor=spike_factor)
+    coverage = check_dunjia_coverage(session)
+
+    # B5: aggregate views
+    views_report = aggregate_dunjia_quality_views(
+        completeness=completeness,
+        rgbd=rgbd,
+        imu=imu,
+        coverage=coverage,
+        session_id=session.session_id,
+        source_path=str(session.source_path),
+    )
+
+    config_hash = deterministic_config_hash(cfg)
+    views = adapt_source_views(
+        views_report,
+        producer="person-b.dunjia",
+        version=producer_version,
+        config_hash=config_hash,
+    )
+
+    source_assets: list[dict[str, Any]] = [
+        {"asset_type": "mcap", "uri": str(session.source_path)}
+    ]
+
+    modalities: dict[str, str] = {
+        "human_hand": "not_applicable",
+        "end_effector": "applicable",
+    }
+
+    stream_ranges: dict[str, tuple[int, int]] = {}
+    for stream_id, vs in session.video_streams.items():
+        if vs.timestamps_ns:
+            stream_ranges[stream_id] = (int(min(vs.timestamps_ns)), int(max(vs.timestamps_ns)))
+
+    delivery = build_robot_qc_delivery(
+        session_id=session.session_id,
+        profile="dunjia_ego",
+        source_assets=source_assets,
+        modalities=modalities,
+        views=views,
+        stream_ranges=stream_ranges,
+        effective_config=cfg,
+        producer="person-b.dunjia",
+        version=producer_version,
+    )
+    manifest_path = Path(output_dir) / "revision.json"
+    write_revision_manifest(manifest_path, delivery.manifest)
+    return delivery
+
+
+def run_a2d_formal_session(
+    session: Any,
+    episode_root: str | Path,
+    output_dir: str | Path,
+    *,
+    config: dict[str, Any] | None = None,
+    producer_version: str = "v1",
+) -> RobotQCDelivery:
+    """Run Person B's A2D B6-B9 detectors then adapt to the formal schema."""
+    from zpds_prepare.detectors.a2d import (
+        check_a2d_alignment,
+        check_a2d_completeness,
+        check_a2d_robot_quality,
+        aggregate_a2d_quality_views,
+    )
+
+    cfg = config or {}
+    freeze_min_s = float(cfg.get("a2d", {}).get("robot", {}).get("freeze_min_duration_s", 2.0))
+    gap_factor = float(cfg.get("a2d", {}).get("robot", {}).get("gap_factor", 3.0))
+
+    # B6: completeness (takes path, not session)
+    completeness = check_a2d_completeness(episode_root)
+
+    # B7-B8: alignment + robot quality (take session)
+    alignment = check_a2d_alignment(session)
+    robot_quality = check_a2d_robot_quality(
+        session, freeze_min_duration_s=freeze_min_s, gap_factor=gap_factor
+    )
+
+    # B9: aggregate views
+    views_report = aggregate_a2d_quality_views(
+        completeness=completeness,
+        alignment=alignment,
+        robot_quality=robot_quality,
+        episode_id=session.session_id,
+        source_path=str(episode_root),
+    )
+
+    config_hash = deterministic_config_hash(cfg)
+    views = adapt_source_views(
+        views_report,
+        producer="person-b.a2d",
+        version=producer_version,
+        config_hash=config_hash,
+    )
+
+    source_assets: list[dict[str, Any]] = [
+        {"asset_type": "episode_directory", "uri": str(episode_root)}
+    ]
+
+    modalities: dict[str, str] = {
+        "human_hand": "not_applicable",
+        "end_effector": "applicable",
+    }
+
+    stream_ranges: dict[str, tuple[int, int]] = {}
+    for stream_id, vs in session.video_streams.items():
+        if vs.timestamps_ns:
+            stream_ranges[stream_id] = (int(min(vs.timestamps_ns)), int(max(vs.timestamps_ns)))
+
+    delivery = build_robot_qc_delivery(
+        session_id=session.session_id,
+        profile="a2d_robot",
+        source_assets=source_assets,
+        modalities=modalities,
+        views=views,
+        stream_ranges=stream_ranges,
+        effective_config=cfg,
+        producer="person-b.a2d",
+        version=producer_version,
+    )
+    manifest_path = Path(output_dir) / "revision.json"
+    write_revision_manifest(manifest_path, delivery.manifest)
+    return delivery
+
+
 __all__ = [
     "FormalRobotQualityAdapter", "RobotQCDelivery", "adapt_source_views",
-    "build_robot_qc_delivery", "run_umi_formal_session", "source_views_to_decisions",
+    "build_robot_qc_delivery", "run_a2d_formal_session",
+    "run_dunjia_formal_session", "run_umi_formal_session",
+    "source_views_to_decisions",
 ]
