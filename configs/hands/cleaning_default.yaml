@@ -1,0 +1,22 @@
+hand_video_cleaning:
+  min_video_duration_s: 2.0
+  min_kept_span_duration_s: 1.0
+  black_gray_mean_max: 12.0
+  black_pixel_value_max: 16
+  black_dark_ratio_min: 0.98
+  black_min_duration_s: 0.20
+  blur_laplacian_var_max: 20.0
+  blur_min_duration_s: 0.40
+  no_hand_min_duration_s: 0.50
+  no_operation_center_speed_max_per_s: 0.01
+  no_operation_flow_magnitude_max_px: 0.35
+  no_operation_min_duration_s: 1.00
+  occlusion_pose_completeness_max: 0.70
+  occlusion_clipped_ratio_min: 0.35
+  occlusion_min_duration_s: 0.30
+  flow_consistency_scale_px: 1.50
+  flow_resize_width: 320
+  flow_grid_stride: 8
+  smoothness_normalized_jerk_scale: 1.0
+  merge_gap_s: 0.10
+  output_codec: mp4v

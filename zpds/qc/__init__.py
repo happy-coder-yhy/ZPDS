@@ -6,6 +6,7 @@
   - Stage 3: visual (D13 过曝 + D14 模糊)
   - Stage 5: depth (D15 深度有效性)
   - Stage 6: imu (D16 IMU 异常)
+  - Stage 9: hand video cleaning report
   - Stage 11: dedup (D18 跨 Session 近重复)
 """
 
@@ -23,6 +24,7 @@ def _register_builtin_stages():
     from zpds.qc import stage3_visual as _s3  # noqa: F401
     from zpds.qc import stage5_depth as _s5  # noqa: F401
     from zpds.qc import stage6_imu as _s6  # noqa: F401
+    from zpds.qc import stage9_hand as _s9  # noqa: F401
     from zpds.qc import stage11_dedup as _s11  # noqa: F401
 
 

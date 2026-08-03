@@ -1,8 +1,9 @@
 """质量检查决策与严重等级枚举。"""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 class Severity(str, Enum):
@@ -12,8 +13,19 @@ class Severity(str, Enum):
     INFO = "info"      # 仅记录
 
 
+class Disposition(str, Enum):
+    """质量决策对数据的处理语义。"""
+
+    KEEP = "keep"
+    KEEP_WITH_FLAG = "keep_with_flag"
+    QUARANTINE = "quarantine"
+    TRIM = "trim"
+    SPLIT = "split"
+    REJECT = "reject"
+
+
 class ReasonCode(str, Enum):
-    """预定义决策原因码，覆盖 12 级 QC 全部场景。"""
+    """预定义决策原因码，覆盖 Stage 0～12。"""
     # Stage 0 — 文件清单
     FILE_MISSING = "file_missing"
     HASH_MISMATCH = "hash_mismatch"
@@ -35,6 +47,8 @@ class ReasonCode(str, Enum):
     DUPLICATE_FRAME = "duplicate_frame"
     VFR_DETECTED = "vfr_detected"
     MOTION_ANOMALY = "motion_anomaly"
+    FLOW_INCONSISTENT = "flow_inconsistent"
+    VIDEO_TOO_SHORT = "video_too_short"
     # Stage 5 — 深度
     DEPTH_INVALID_RATIO = "depth_invalid_ratio"
     DEPTH_UNIT_UNKNOWN = "depth_unit_unknown"
@@ -53,6 +67,9 @@ class ReasonCode(str, Enum):
     # Stage 9 — 手部
     HAND_ABSENT = "hand_absent"
     HAND_TRACK_LOST = "hand_track_lost"
+    HAND_OCCLUDED = "hand_occluded"
+    HAND_POSE_INCOMPLETE = "hand_pose_incomplete"
+    NO_OPERATION = "no_operation"
     # Stage 10 — 语义
     SEMANTIC_INCONSISTENCY = "semantic_inconsistency"
     # Stage 11 — 去重
@@ -68,6 +85,9 @@ class Decision:
     reason: ReasonCode
     severity: Severity
     message: str = ""
-    frame_idx: Optional[int] = None
-    timestamp_ns: Optional[int] = None
+    frame_idx: int | None = None
+    timestamp_ns: int | None = None
+    end_frame_idx: int | None = None
+    end_timestamp_ns: int | None = None
+    disposition: Disposition | None = None
     detail: dict = field(default_factory=dict)
