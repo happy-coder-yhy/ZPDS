@@ -10,4 +10,8 @@ class DunjiaEgoProfile(BaseProfile):
         super().__init__(
             name="dunjia_ego",
             description="遁甲头戴多相机：Foxglove MCAP，3× RGB H264 + 深度 PNG + IMU",
+            modalities={
+                "human_hand": "not_applicable",
+                "end_effector": "applicable",
+            },
         )

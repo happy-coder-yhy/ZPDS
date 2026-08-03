@@ -70,8 +70,11 @@ class ReasonCode(str, Enum):
     HAND_OCCLUDED = "hand_occluded"
     HAND_POSE_INCOMPLETE = "hand_pose_incomplete"
     NO_OPERATION = "no_operation"
+    CHECK_NOT_APPLICABLE = "check_not_applicable"
+    SOURCE_QUALITY_FLAG = "source_quality_flag"
     # Stage 10 — 语义
     SEMANTIC_INCONSISTENCY = "semantic_inconsistency"
+    SEMANTIC_NOT_RUN = "semantic_not_run"
     # Stage 11 — 去重
     NEAR_DUPLICATE = "near_duplicate"
     # Stage 12 — 交付

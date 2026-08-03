@@ -10,4 +10,8 @@ class JianzhiUmiProfile(BaseProfile):
         super().__init__(
             name="jianzhi_umi",
             description="简智新创 UMI 双端夹爪 teleop：MCAP，双 robot，H264 + IMU + 磁编码器 + VIO",
+            modalities={
+                "human_hand": "not_applicable",
+                "end_effector": "applicable",
+            },
         )

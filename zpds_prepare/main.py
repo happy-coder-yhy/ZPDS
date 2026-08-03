@@ -94,6 +94,11 @@ def main():
         help="[Dunjia] H264 重建缓存目录（默认: 输出目录/.cache）",
     )
     parser.add_argument(
+        "--formal-robot-qc",
+        action="store_true",
+        help="[UMI] 写入正式 quality views 和 revision manifest；保留原始数据不变",
+    )
+    parser.add_argument(
         "--epic-ho",
         default=None,
         help="[EPIC] hand-object .pkl 标注路径",
@@ -245,6 +250,17 @@ def main():
         session = rd.read_session(dataset_path, cache_dir=cache_dir)
     else:
         session = rd.read_session(dataset_path)
+
+    if args.formal_robot_qc:
+        if profile != "umi":
+            parser.error("--formal-robot-qc 当前仅支持 umi；A2D/遁甲请传入其已生成的 typed reports")
+        from zpds.qc.robot_integration import run_umi_formal_session
+
+        delivery = run_umi_formal_session(session, output_dir)
+        print(f"正式 UMI revision 已写入: {(output_dir / 'revision.json').resolve()}")
+        print("VLM 语义: not_run")
+        print(f"质量视图: {', '.join(sorted(delivery.report.quality_views))}")
+        return 0
     pv = session.primary_video
 
     meta = session.meta

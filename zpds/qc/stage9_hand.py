@@ -66,6 +66,29 @@ def check(path: str | Path) -> list[Decision]:
 
 @register_stage(9)
 def _check_stage9(context: dict) -> list[Decision]:
+    profile = context.get("profile")
+    modalities = context.get("modalities", {})
+    if profile:
+        from zpds.profiles.registry import get
+
+        registered = get(str(profile))
+        if registered is not None:
+            modalities = {**registered.modalities, **modalities}
+    if modalities.get("human_hand") == "not_applicable":
+        return [
+            Decision(
+                stage=9,
+                reason=ReasonCode.CHECK_NOT_APPLICABLE,
+                severity=Severity.INFO,
+                message="Human-hand QC skipped: source observes a robot end effector",
+                disposition=Disposition.KEEP,
+                detail={
+                    "applicability": "not_applicable",
+                    "run_human_hand_model": False,
+                    "forbidden_reason_codes": [ReasonCode.HAND_ABSENT.value],
+                },
+            )
+        ]
     report_path = context.get("hand_cleaning_report_path")
     if not report_path:
         return []
