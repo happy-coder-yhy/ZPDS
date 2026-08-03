@@ -75,6 +75,9 @@ class FormalRobotQualityAdapter:
         return QualityMetric(
             name=metric.metric_name,
             value=metric.value,
+            threshold=None,
+            comparison="none",
+            pass_=None,
             unit=metric.unit,
             applicability=metric.applicability,
             severity=_severity(metric.severity),
@@ -86,7 +89,11 @@ class FormalRobotQualityAdapter:
             producer=metric.producer,
             version=metric.version,
             config_hash=metric.config_hash,
-            details={"stream_id": metric.stream_id, **metric.details},
+            details={
+                "stream_id": metric.stream_id,
+                **metric.details,
+                "evaluation_status": "not_evaluated",
+            },
         )
 
     def adapt_view(self, view: Any) -> QualityView:

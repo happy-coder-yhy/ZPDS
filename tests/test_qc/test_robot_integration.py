@@ -46,6 +46,40 @@ def test_umi_adapter_preserves_review_without_rejecting_rgb() -> None:
     assert vio.disposition.value == "keep_with_flag"
 
 
+def test_quality_metric_uses_explicit_comparison_direction() -> None:
+    assert QualityMetric("coverage", 0.9, threshold=0.8, comparison="gte").pass_ is True
+    assert QualityMetric("invalid_count", 0, threshold=0, comparison="lte").pass_ is True
+    assert QualityMetric("residual_ns", 0, threshold=1, comparison="lte").pass_ is True
+    assert QualityMetric("exact_count", 1, threshold=0, comparison="eq").pass_ is False
+
+
+def test_umi_uncalibrated_metric_is_not_evaluated() -> None:
+    metric = SimpleNamespace(
+        metric_name="umi_vio.invalid_quaternion_count",
+        value=0,
+        unit="count",
+        applicability="applicable",
+        severity="info",
+        disposition="keep",
+        reason_code="measurement_only_uncalibrated",
+        start_ns=None,
+        end_ns=None,
+        evidence_uri="evidence/vio.parquet",
+        producer="person-a",
+        version="v1",
+        config_hash="a" * 64,
+        stream_id="robot0_vio_pose",
+        details={"automatic_reject": False},
+    )
+
+    adapted = FormalRobotQualityAdapter().adapt_metric(metric)
+
+    assert adapted.threshold is None
+    assert adapted.comparison == "none"
+    assert adapted.pass_ is None
+    assert adapted.details["evaluation_status"] == "not_evaluated"
+
+
 def test_a2d_bc_reject_does_not_mutate_observation_view() -> None:
     source = SimpleNamespace(
         views={
@@ -91,6 +125,7 @@ def test_delivery_round_trip_keeps_raw_and_skips_vlm(tmp_path) -> None:
     loaded = read_revision_manifest(path)
 
     assert source.read_bytes() == b"immutable"
+    assert loaded["schema_version"] == "zpds.revision_manifest.v2"
     assert loaded["raw_mutation"] is False
     assert loaded["outcome"]["status"] == "not_run"
     assert loaded["metrics"][0]["metric_name"] == "vio.invalid_count"

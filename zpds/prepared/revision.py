@@ -12,6 +12,9 @@ from typing import Any
 from zpds.core.quality import QualityMetric, QualityView
 
 _REVISION_RE = re.compile(r"^r(\d{4,})$")
+REVISION_SCHEMA_V1 = "zpds.revision_manifest.v1"
+REVISION_SCHEMA_V2 = "zpds.revision_manifest.v2"
+SUPPORTED_REVISION_SCHEMAS = frozenset({REVISION_SCHEMA_V1, REVISION_SCHEMA_V2})
 
 
 def deterministic_config_hash(config: dict[str, Any]) -> str:
@@ -43,7 +46,7 @@ class RevisionManifest:
     producer: str = "zpds.robot_qc"
     version: str = "v1"
     config_hash: str = ""
-    schema_version: str = "zpds.revision_manifest.v1"
+    schema_version: str = REVISION_SCHEMA_V2
     raw_mutation: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -84,7 +87,7 @@ def read_revision_manifest(path: str | Path) -> dict[str, Any]:
     required = {"schema_version", "revision_id", "source_session_id", "profile", "source_assets",
                 "modalities", "quality_views", "metrics", "config_hash", "raw_mutation"}
     missing = sorted(required - document.keys())
-    if missing or document.get("schema_version") != "zpds.revision_manifest.v1":
+    if missing or document.get("schema_version") not in SUPPORTED_REVISION_SCHEMAS:
         raise ValueError(f"invalid revision manifest, missing={missing}")
     if document["raw_mutation"] is not False:
         raise ValueError("revision manifest must declare raw_mutation=false")
@@ -117,6 +120,12 @@ class RevisionManager:
 
 
 __all__ = [
-    "RevisionManager", "RevisionManifest", "deterministic_config_hash",
-    "read_revision_manifest", "write_revision_manifest",
+    "REVISION_SCHEMA_V1",
+    "REVISION_SCHEMA_V2",
+    "SUPPORTED_REVISION_SCHEMAS",
+    "RevisionManager",
+    "RevisionManifest",
+    "deterministic_config_hash",
+    "read_revision_manifest",
+    "write_revision_manifest",
 ]

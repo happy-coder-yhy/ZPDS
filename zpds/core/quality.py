@@ -35,8 +35,9 @@ class QualityMetric:
     """
     name: str
     value: float | int | str | bool | None
-    threshold: float = 0.8
-    pass_: bool = True
+    threshold: float | None = 0.8
+    comparison: str = "gte"
+    pass_: bool | None = True
     unit: str = "ratio"
     applicability: str = "applicable"
     severity: Severity = Severity.INFO
@@ -53,8 +54,18 @@ class QualityMetric:
     def __post_init__(self):
         if self.applicability not in {"applicable", "not_applicable", "unavailable"}:
             raise ValueError(f"invalid applicability: {self.applicability}")
+        if self.comparison not in {"gte", "lte", "eq", "none"}:
+            raise ValueError(f"invalid comparison: {self.comparison}")
+        if self.comparison == "none" or self.threshold is None:
+            self.pass_ = None
+            return
         if isinstance(self.value, (int, float)) and not isinstance(self.value, bool):
-            self.pass_ = self.value >= self.threshold
+            if self.comparison == "gte":
+                self.pass_ = self.value >= self.threshold
+            elif self.comparison == "lte":
+                self.pass_ = self.value <= self.threshold
+            else:
+                self.pass_ = self.value == self.threshold
 
     @property
     def metric_name(self) -> str:
