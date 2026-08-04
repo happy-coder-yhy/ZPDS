@@ -55,8 +55,10 @@ class BrightnessTransitionDetector:
         *,
         fps: float,
         start_timestamp_ns: int = 0,
+        frame_scores: DetectorFrameScores | None = None,
     ) -> list[TransitionProposal]:
-        frame_scores = self.score_frames(frames, fps=fps)
+        if frame_scores is None:
+            frame_scores = self.score_frames(frames, fps=fps)
         means = frame_scores.diagnostics.get("mean_luma", ())
         black_ratios = frame_scores.diagnostics.get("black_ratio", ())
         proposals: list[TransitionProposal] = []

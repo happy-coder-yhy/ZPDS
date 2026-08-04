@@ -1,6 +1,36 @@
 # A2D Robot (真机) — QC 阈值
 profile: a2d_robot
 
+scene:
+  governance:
+    calibration_status: provisional
+    soft_boundary_action: quarantine
+    auto_finalize_soft_boundaries: false
+  stage_a:
+    weights:
+      histogram: 0.25
+      ssim: 0.30
+      optical_flow: 0.30
+      brightness: 0.15
+    histogram:
+      threshold: 0.40
+    ssim:
+      hard_cut_similarity: 0.50
+      gradual_similarity: 0.85
+    optical_flow:
+      residual_threshold_px: 1.40
+      residual_hard_scale_px: 5.00
+      freeze_motion_threshold_px: 0.05
+    brightness:
+      mean_jump_threshold: 0.18
+  stage_b:
+    z_score_threshold: 2.0
+  fusion:
+    min_scene_duration_s: 3.0
+    hysteresis_frames: 2
+    same_scene_similarity: 0.95
+    low_confidence_threshold: 0.60
+
 stage2_time:
   max_gap_ms: 100
 

@@ -36,6 +36,7 @@ class TransitionDetector(Protocol):
         *,
         fps: float,
         start_timestamp_ns: int = 0,
+        frame_scores: DetectorFrameScores | None = None,
     ) -> list[TransitionProposal]: ...
 
 

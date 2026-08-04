@@ -105,6 +105,16 @@ def test_optical_flow_detects_hard_cut_and_freeze(config: SceneConfig) -> None:
     assert _has_boundary(freeze_proposals, 6)
 
 
+def test_optical_flow_downscales_large_frames_for_analysis(config: SceneConfig) -> None:
+    detector = OpticalFlowTransitionDetector(config.stage_a.optical_flow)
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    gray, scale = detector._analysis_gray(frame)
+
+    assert gray.shape == (180, 320)
+    assert scale == pytest.approx(0.25)
+
+
 def test_ego_translation_is_suppressed_by_global_motion_compensation(
     config: SceneConfig,
 ) -> None:

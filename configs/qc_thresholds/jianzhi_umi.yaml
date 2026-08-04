@@ -1,6 +1,36 @@
 # Jianzhi UMI (简智新创) — QC 阈值
 profile: jianzhi_umi
 
+scene:
+  governance:
+    calibration_status: provisional
+    soft_boundary_action: quarantine
+    auto_finalize_soft_boundaries: false
+  stage_a:
+    weights:
+      histogram: 0.20
+      ssim: 0.30
+      optical_flow: 0.35
+      brightness: 0.15
+    histogram:
+      threshold: 0.52
+    ssim:
+      hard_cut_similarity: 0.40
+      gradual_similarity: 0.78
+    optical_flow:
+      residual_threshold_px: 2.40
+      residual_hard_scale_px: 7.00
+      freeze_motion_threshold_px: 0.12
+    brightness:
+      mean_jump_threshold: 0.25
+  stage_b:
+    z_score_threshold: 2.0
+  fusion:
+    min_scene_duration_s: 3.0
+    hysteresis_frames: 2
+    same_scene_similarity: 0.95
+    low_confidence_threshold: 0.60
+
 stage2_time:
   max_gap_ms: 50
 

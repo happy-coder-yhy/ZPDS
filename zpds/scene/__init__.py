@@ -2,6 +2,7 @@
 
 from zpds.scene.config import SceneConfig
 from zpds.scene.fusion import SceneBoundaryFusion, StageATransitionFusion
+from zpds.scene.sampling import representative_frame_indices
 from zpds.scene.schemas import (
     BoundaryScore,
     SceneProposal,
@@ -17,4 +18,5 @@ __all__ = [
     "StageATransitionFusion",
     "TransitionProposal",
     "VLMReviewResult",
+    "representative_frame_indices",
 ]
