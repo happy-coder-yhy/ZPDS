@@ -7,6 +7,8 @@ datasets/
 .cache/
 .pytest_cache/
 .pytest-tmp*/
+.pytest-lenovo/
+.codex_pytest_tmp/
 __pycache__/
 *.egg-info/
 clean_report.txt

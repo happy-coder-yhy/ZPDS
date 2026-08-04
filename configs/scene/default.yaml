@@ -1,0 +1,75 @@
+scene:
+  enabled: true
+  output_dir: ../../output/scene
+
+  stage_a:
+    smoothing_window_frames: 5
+    merge_window_s: 0.5
+    weights:
+      histogram: 0.25
+      ssim: 0.30
+      optical_flow: 0.30
+      brightness: 0.15
+
+    histogram:
+      enabled: true
+      h_bins: 32
+      s_bins: 32
+      method: bhattacharyya
+      threshold: 0.45
+
+    ssim:
+      enabled: true
+      gaussian_window_size: 11
+      gaussian_sigma: 1.5
+      hard_cut_similarity: 0.45
+      gradual_similarity: 0.82
+      gradual_window_frames: 5
+      gradual_min_frames: 3
+
+    optical_flow:
+      enabled: true
+      pyr_scale: 0.5
+      levels: 3
+      window_size: 15
+      iterations: 3
+      poly_n: 5
+      poly_sigma: 1.2
+      grid_step: 8
+      min_correspondences: 16
+      ransac_reproj_threshold: 2.0
+      residual_threshold_px: 1.8
+      residual_hard_scale_px: 6.0
+      freeze_motion_threshold_px: 0.08
+      freeze_min_frames: 5
+
+    brightness:
+      enabled: true
+      mean_jump_threshold: 0.22
+      black_pixel_value: 16
+      black_ratio_threshold: 0.95
+
+  stage_b:
+    enabled: true
+    model: facebook/dinov2-small
+    sample_fps: 1.0
+    candidate_context_s: 2.0
+    z_score_window: 30
+    z_score_threshold: 2.0
+    min_z_score_samples: 5
+    batch_size: 8
+    device: cpu
+
+  fusion:
+    min_scene_duration_s: 3.0
+    hysteresis_frames: 2
+    same_scene_similarity: 0.95
+    low_confidence_threshold: 0.6
+
+  vlm:
+    enabled: true
+    base_url: ""
+    model: ""
+    api_key_env: OPENAI_API_KEY
+    timeout_s: 60.0
+    review_confidence_threshold: 0.6
