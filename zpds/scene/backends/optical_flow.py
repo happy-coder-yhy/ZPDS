@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 
@@ -30,12 +30,34 @@ class FlowPairMetrics:
 class OpticalFlowTransitionDetector:
     source = "optical_flow"
 
-    def __init__(self, config: OpticalFlowConfig) -> None:
+    def __init__(
+        self,
+        config: OpticalFlowConfig,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
         self.config = config
+        self.progress_callback = progress_callback
+
+    def _analysis_gray(self, frame: np.ndarray) -> tuple[np.ndarray, float]:
+        gray = to_gray(frame)
+        height, width = gray.shape
+        longest = max(height, width)
+        if longest <= self.config.analysis_max_dimension:
+            return gray, 1.0
+        scale = self.config.analysis_max_dimension / longest
+        resized = cv2.resize(
+            gray,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+        return resized, scale
 
     def _pair_metrics(self, previous: np.ndarray, current: np.ndarray) -> FlowPairMetrics:
-        previous_gray = to_gray(previous)
-        current_gray = to_gray(current)
+        previous_gray, scale = self._analysis_gray(previous)
+        current_gray, current_scale = self._analysis_gray(current)
+        if current_gray.shape != previous_gray.shape or current_scale != scale:
+            raise ValueError("光流输入图像必须具有相同宽高")
         flow_buffer = np.zeros((*previous_gray.shape, 2), dtype=np.float32)
         flow = cv2.calcOpticalFlowFarneback(
             previous_gray,
@@ -50,9 +72,10 @@ class OpticalFlowTransitionDetector:
             0,
         )
         height, width = previous_gray.shape
-        offset = max(1, self.config.grid_step // 2)
-        y_values = np.arange(offset, height, self.config.grid_step)
-        x_values = np.arange(offset, width, self.config.grid_step)
+        grid_step = max(1, round(self.config.grid_step * scale))
+        offset = max(1, grid_step // 2)
+        y_values = np.arange(offset, height, grid_step)
+        x_values = np.arange(offset, width, grid_step)
         if not len(x_values) or not len(y_values):
             return FlowPairMetrics(0.0, 0.0, 0.0)
         grid_x, grid_y = np.meshgrid(x_values, y_values)
@@ -73,7 +96,10 @@ class OpticalFlowTransitionDetector:
                 source,
                 destination,
                 method=cv2.RANSAC,
-                ransacReprojThreshold=self.config.ransac_reproj_threshold,
+                ransacReprojThreshold=max(
+                    0.5,
+                    self.config.ransac_reproj_threshold * scale,
+                ),
             )
             if matrix is not None and np.all(np.isfinite(matrix)):
                 homogeneous = np.column_stack((source, np.ones(len(source), dtype=np.float32)))
@@ -88,14 +114,22 @@ class OpticalFlowTransitionDetector:
 
         residual = np.linalg.norm(sampled_flow - predicted_flow, axis=1)
         residual_motion = float(np.percentile(residual, 90)) if len(residual) else 0.0
-        return FlowPairMetrics(raw_motion, residual_motion, inlier_ratio)
+        # 配置阈值以原图像素为单位，缩放计算后换算回来。
+        return FlowPairMetrics(
+            raw_motion / scale,
+            residual_motion / scale,
+            inlier_ratio,
+        )
 
     def _all_metrics(self, frames: Sequence[np.ndarray]) -> list[FlowPairMetrics]:
         metrics = [FlowPairMetrics(0.0, 0.0, 1.0)]
-        metrics.extend(
-            self._pair_metrics(previous, current)
-            for previous, current in pairwise(frames)
-        )
+        total = max(0, len(frames) - 1)
+        for completed, (previous, current) in enumerate(pairwise(frames), start=1):
+            metrics.append(self._pair_metrics(previous, current))
+            if self.progress_callback is not None and (
+                completed == total or completed % 10 == 0
+            ):
+                self.progress_callback(completed, total)
         return metrics
 
     def score_frames(
@@ -130,8 +164,10 @@ class OpticalFlowTransitionDetector:
         *,
         fps: float,
         start_timestamp_ns: int = 0,
+        frame_scores: DetectorFrameScores | None = None,
     ) -> list[TransitionProposal]:
-        frame_scores = self.score_frames(frames, fps=fps)
+        if frame_scores is None:
+            frame_scores = self.score_frames(frames, fps=fps)
         residuals = frame_scores.diagnostics.get("residual_motion_px", ())
         raw_motion = frame_scores.diagnostics.get("raw_motion_px", ())
         transition_indices = [

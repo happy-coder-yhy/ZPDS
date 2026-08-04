@@ -2,6 +2,11 @@ scene:
   enabled: true
   output_dir: ../../output/scene
 
+  governance:
+    calibration_status: provisional
+    soft_boundary_action: quarantine
+    auto_finalize_soft_boundaries: false
+
   stage_a:
     smoothing_window_frames: 5
     merge_window_s: 0.5
@@ -29,6 +34,8 @@ scene:
 
     optical_flow:
       enabled: true
+      # 光流按比例缩小到最长边 320px，输出位移仍换算为原图像素。
+      analysis_max_dimension: 320
       pyr_scale: 0.5
       levels: 3
       window_size: 15
@@ -56,7 +63,8 @@ scene:
     candidate_context_s: 2.0
     z_score_window: 30
     z_score_threshold: 2.0
-    min_z_score_samples: 5
+    # ±2 秒、1 FPS 的单候选窗口只有 5 帧，至少 3 个邻居即可计算局部 z-score。
+    min_z_score_samples: 3
     batch_size: 8
     device: cpu
 

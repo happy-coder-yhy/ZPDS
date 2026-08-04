@@ -49,6 +49,19 @@ def _config_hash(document: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _deep_merge(
+    base: dict[str, Any],
+    override: dict[str, Any],
+) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
 @dataclass(frozen=True)
 class HistogramConfig:
     enabled: bool = True
@@ -106,6 +119,7 @@ class SSIMConfig:
 @dataclass(frozen=True)
 class OpticalFlowConfig:
     enabled: bool = True
+    analysis_max_dimension: int = 320
     pyr_scale: float = 0.5
     levels: int = 3
     window_size: int = 15
@@ -124,6 +138,10 @@ class OpticalFlowConfig:
     def from_mapping(cls, value: dict[str, Any]) -> OpticalFlowConfig:
         config = cls(
             enabled=bool(value.get("enabled", True)),
+            analysis_max_dimension=_positive_int(
+                value.get("analysis_max_dimension", 320),
+                "scene.stage_a.optical_flow.analysis_max_dimension",
+            ),
             pyr_scale=_unit(value.get("pyr_scale", 0.5), "scene.stage_a.optical_flow.pyr_scale"),
             levels=_positive_int(value.get("levels", 3), "scene.stage_a.optical_flow.levels"),
             window_size=_positive_int(value.get("window_size", 15), "scene.stage_a.optical_flow.window_size"),
@@ -212,7 +230,7 @@ class DinoConfig:
     candidate_context_s: float = 2.0
     z_score_window: int = 30
     z_score_threshold: float = 2.0
-    min_z_score_samples: int = 5
+    min_z_score_samples: int = 3
     batch_size: int = 8
     device: str = "cpu"
 
@@ -225,7 +243,7 @@ class DinoConfig:
             candidate_context_s=_positive(value.get("candidate_context_s", 2.0), "scene.stage_b.candidate_context_s"),
             z_score_window=_positive_int(value.get("z_score_window", 30), "scene.stage_b.z_score_window"),
             z_score_threshold=_positive(value.get("z_score_threshold", 2.0), "scene.stage_b.z_score_threshold"),
-            min_z_score_samples=_positive_int(value.get("min_z_score_samples", 5), "scene.stage_b.min_z_score_samples"),
+            min_z_score_samples=_positive_int(value.get("min_z_score_samples", 3), "scene.stage_b.min_z_score_samples"),
             batch_size=_positive_int(value.get("batch_size", 8), "scene.stage_b.batch_size"),
             device=str(value.get("device", "cpu")),
         )
@@ -280,15 +298,52 @@ class VLMConfig:
 
 
 @dataclass(frozen=True)
+class SceneGovernanceConfig:
+    calibration_status: str = "provisional"
+    soft_boundary_action: str = "quarantine"
+    auto_finalize_soft_boundaries: bool = False
+
+    @classmethod
+    def from_mapping(cls, value: dict[str, Any]) -> SceneGovernanceConfig:
+        config = cls(
+            calibration_status=str(
+                value.get("calibration_status", "provisional")
+            ),
+            soft_boundary_action=str(
+                value.get("soft_boundary_action", "quarantine")
+            ),
+            auto_finalize_soft_boundaries=bool(
+                value.get("auto_finalize_soft_boundaries", False)
+            ),
+        )
+        if config.calibration_status not in {"provisional", "calibrated"}:
+            raise ValueError(
+                "scene.governance.calibration_status 必须是 provisional 或 calibrated"
+            )
+        if config.soft_boundary_action not in {"quarantine", "accept"}:
+            raise ValueError(
+                "scene.governance.soft_boundary_action 必须是 quarantine 或 accept"
+            )
+        if config.calibration_status == "provisional":
+            if config.soft_boundary_action != "quarantine":
+                raise ValueError("未经金标校准的软边界必须进入 quarantine")
+            if config.auto_finalize_soft_boundaries:
+                raise ValueError("未经金标校准时禁止自动定稿软边界")
+        return config
+
+
+@dataclass(frozen=True)
 class SceneConfig:
     path: Path
     document: dict[str, Any]
+    profile: str | None
     enabled: bool
     output_dir: Path
     stage_a: StageAConfig
     stage_b: DinoConfig
     fusion: FusionConfig
     vlm: VLMConfig
+    governance: SceneGovernanceConfig
     config_hash: str
 
     @classmethod
@@ -299,6 +354,46 @@ class SceneConfig:
         with config_path.open(encoding="utf-8") as file:
             loaded = yaml.safe_load(file)
         document = copy.deepcopy(_mapping(loaded, "配置文件顶层"))
+        return cls._from_document(document, config_path=config_path)
+
+    @classmethod
+    def load_with_profile(
+        cls,
+        default_path: str | Path,
+        profile_path: str | Path,
+    ) -> SceneConfig:
+        default_config_path = Path(default_path).expanduser().resolve()
+        profile_config_path = Path(profile_path).expanduser().resolve()
+        if not default_config_path.is_file():
+            raise FileNotFoundError(f"Scene 默认配置文件不存在: {default_config_path}")
+        if not profile_config_path.is_file():
+            raise FileNotFoundError(f"Scene Profile 配置文件不存在: {profile_config_path}")
+        with default_config_path.open(encoding="utf-8") as file:
+            default_document = _mapping(yaml.safe_load(file), "Scene 默认配置顶层")
+        with profile_config_path.open(encoding="utf-8") as file:
+            profile_document = _mapping(yaml.safe_load(file), "Profile 配置顶层")
+        profile_name = str(profile_document.get("profile", "")).strip()
+        if not profile_name:
+            raise ValueError("Profile 配置必须包含非空 profile")
+        scene_override = _mapping(profile_document.get("scene"), "Profile.scene")
+        merged_document = copy.deepcopy(default_document)
+        merged_document["profile"] = profile_name
+        merged_document["scene"] = _deep_merge(
+            _mapping(default_document.get("scene"), "scene"),
+            scene_override,
+        )
+        return cls._from_document(
+            merged_document,
+            config_path=default_config_path,
+        )
+
+    @classmethod
+    def _from_document(
+        cls,
+        document: dict[str, Any],
+        *,
+        config_path: Path,
+    ) -> SceneConfig:
         scene = _mapping(document.get("scene"), "scene")
         output_raw = str(scene.get("output_dir", "../../output/scene"))
         output_dir = Path(output_raw).expanduser()
@@ -307,12 +402,20 @@ class SceneConfig:
         return cls(
             path=config_path,
             document=document,
+            profile=(
+                str(document["profile"]).strip()
+                if document.get("profile") is not None
+                else None
+            ),
             enabled=bool(scene.get("enabled", True)),
             output_dir=output_dir.resolve(),
             stage_a=StageAConfig.from_mapping(_mapping(scene.get("stage_a", {}), "scene.stage_a")),
             stage_b=DinoConfig.from_mapping(_mapping(scene.get("stage_b", {}), "scene.stage_b")),
             fusion=FusionConfig.from_mapping(_mapping(scene.get("fusion", {}), "scene.fusion")),
             vlm=VLMConfig.from_mapping(_mapping(scene.get("vlm", {}), "scene.vlm")),
+            governance=SceneGovernanceConfig.from_mapping(
+                _mapping(scene.get("governance", {}), "scene.governance")
+            ),
             config_hash=_config_hash(document),
         )
 
@@ -325,6 +428,7 @@ __all__ = [
     "OpticalFlowConfig",
     "SSIMConfig",
     "SceneConfig",
+    "SceneGovernanceConfig",
     "StageAConfig",
     "VLMConfig",
 ]

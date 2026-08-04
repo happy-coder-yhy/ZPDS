@@ -38,6 +38,11 @@ mcap = [
 ]
 hdf5 = ["h5py>=3.9"]
 hands = ["mediapipe>=0.10"]
+scene = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "transformers>=4.40",
+]
 privacy = [
     "ultralytics>=8.2",
     "easyocr>=1.7",

@@ -81,8 +81,10 @@ class SSIMTransitionDetector:
         *,
         fps: float,
         start_timestamp_ns: int = 0,
+        frame_scores: DetectorFrameScores | None = None,
     ) -> list[TransitionProposal]:
-        frame_scores = self.score_frames(frames, fps=fps)
+        if frame_scores is None:
+            frame_scores = self.score_frames(frames, fps=fps)
         similarities = frame_scores.diagnostics.get("similarity", ())
         hard_indices = [
             index
