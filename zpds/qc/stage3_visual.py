@@ -583,6 +583,9 @@ def check(
 def _check_stage3(context: dict) -> list[Decision]:
     """Stage 3 QCCascade 入口：从 context dict 提取参数并调用 check()。"""
     video_path = context.get("video_path", "")
+    # 无视频文件时跳过视觉检测（如 A2D JPEG 序列），避免 FileNotFoundError 噪音
+    if not video_path or not Path(video_path).exists():
+        return []
     stage_config = context.get("stage_config", {})
     evidence_dir = context.get("evidence_dir")
     fps = context.get("fps", 30.0)

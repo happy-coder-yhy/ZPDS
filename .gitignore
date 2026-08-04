@@ -25,4 +25,6 @@ AGENTS.md
 清洗算子与实验记录.md
 手部检测接口说明.md
 变更记录.md
+.env
 models/
+!zpds/privacy/models/

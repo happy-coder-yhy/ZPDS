@@ -34,6 +34,41 @@ from zpds_prepare.detectors.timestamp_gap import detect_timestamp_gaps
 from zpds_prepare.writers.candidate_writer import write_segment_candidates
 from zpds_prepare.writers.quality_writer import write_quality_issues
 from zpds.qc import QCCascade
+from zpds.qc.cascade import CascadeDistribution
+from zpds_prepare.decisions.issue_model import QualityIssue
+
+
+def _decisions_to_issues(decisions: list, stream_id: str) -> list:
+    """将级联 Decision 转换为 QualityIssue，供 segment_planner 消费。
+
+    只有 disposition 为 trim / split / keep_with_flag / quarantine 的决策才会被转换；
+    keep / reject 或 disposition 为空的决策不影响分段，被跳过。
+    """
+    issues = []
+    for d in decisions:
+        disp = d.disposition.value if d.disposition else None
+        if disp not in ("trim", "split", "keep_with_flag", "quarantine"):
+            continue
+        start_ns = d.timestamp_ns or d.detail.get("start_ns", 0)
+        end_ns = d.end_timestamp_ns or d.detail.get("end_ns", start_ns)
+        if end_ns <= start_ns:
+            end_ns = start_ns + 1  # 确保有效区间
+        issues.append(QualityIssue(
+            issue_type=d.reason.value,
+            stream_id=stream_id,
+            start_ns=int(start_ns),
+            end_ns=int(end_ns),
+            severity=d.severity.value,
+            decision=disp,
+            details={
+                "stage": d.stage,
+                "message": d.message,
+                "source": "qc_cascade",
+                **{k: v for k, v in (d.detail or {}).items()
+                   if k not in ("start_ns", "end_ns")},
+            },
+        ))
+    return issues
 
 CONFIG_PATH = "config.yaml"
 OUTPUT_DIR = "output"
@@ -348,8 +383,9 @@ def main():
     step_header(2, "QC 级联 (Stage 3/5/6/9/11)")
 
     cascade_decisions: list = []
-    cascade_report = None
-    cascade_distribution: dict = {}
+    cascade_issues: list = []  # Decision → QualityIssue 转换结果，供 segment_planner 消费
+    cascade_overall_pass = True
+    cascade_distribution = CascadeDistribution()
     if not args.skip_cascade:
         # 提取 IMU 数据供 Stage 6 使用
         imu_context: dict[str, object] = {}
@@ -385,23 +421,29 @@ def main():
             try:
                 cascade = QCCascade.from_profile(profile)
                 report = cascade.run(ctx)
-                cascade_report = report
-                cascade_distribution = cascade.distribution_dict()
                 cascade_decisions.extend(report.decisions)
+                if not report.overall_pass:
+                    cascade_overall_pass = False
+                for d in report.decisions:
+                    cascade_distribution.record(d)
+                # 转换为 QualityIssue 供 segment_planner 消费
+                cascade_issues.extend(
+                    _decisions_to_issues(report.decisions, stream_id)
+                )
                 print(f"  [{stream_id}] Stage 级联完成: "
                       f"{len(report.decisions)} decisions, "
                       f"overall_pass={report.overall_pass}")
             except Exception as exc:
                 print(f"  [{stream_id}] QC 级联异常: {exc}")
-        if cascade_report:
+        if cascade_decisions:
             cascade_path = output_dir / "cascade_report.json"
             import json as _json
             cascade_path.parent.mkdir(parents=True, exist_ok=True)
             cascade_data = {
-                "session_id": cascade_report.session_id,
-                "overall_pass": cascade_report.overall_pass,
-                "total_decisions": len(cascade_report.decisions),
-                "distribution": cascade_distribution,
+                "session_id": session_id,
+                "overall_pass": cascade_overall_pass,
+                "total_decisions": len(cascade_decisions),
+                "distribution": cascade_distribution.to_dict(),
                 "decisions": [
                     {
                         "stage": d.stage,
@@ -411,7 +453,7 @@ def main():
                         "disposition": d.disposition.value if d.disposition else None,
                         "detail": d.detail,
                     }
-                    for d in cascade_report.decisions
+                    for d in cascade_decisions
                 ],
             }
             cascade_path.write_text(
@@ -428,6 +470,10 @@ def main():
     step_header(3, "运行检测器")
 
     all_issues = []
+    # 合并级联产出的 Decision（已转为 QualityIssue），让级联发现的问题影响分段方案
+    if cascade_issues:
+        all_issues.extend(cascade_issues)
+        print(f"  从 QC 级联合并 {len(cascade_issues)} 条 issues")
     min_black_duration_ns = int(min_black_duration_s * 1_000_000_000)
     edge_tolerance_ns = int(edge_tolerance_s * 1_000_000_000)
     video_split_gap_ns = int(video_split_gap_s * 1_000_000_000)
