@@ -14,6 +14,7 @@ ZPDS Prepare — 主入口。
 """
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
@@ -382,23 +383,37 @@ def main():
     # ================================================================
     step_header(2, "QC 级联 (Stage 3/5/6/9/11)")
 
+    # 启用 QC 级联进度日志（INFO 级别）
+    logging.getLogger("zpds.qc").setLevel(logging.INFO)
+
     cascade_decisions: list = []
     cascade_issues: list = []  # Decision → QualityIssue 转换结果，供 segment_planner 消费
     cascade_overall_pass = True
     cascade_distribution = CascadeDistribution()
     if not args.skip_cascade:
-        # 提取 IMU 数据供 Stage 6 使用
+        # 提取 IMU 数据供 Stage 6 使用（支持多 IMU 流）
         imu_context: dict[str, object] = {}
+        imu_streams_data: list[dict] = []
         for imu_id, imu_s in session.imu_streams.items():
             df = imu_s.dataframe
-            imu_context["imu_timestamps_ns"] = df["timestamp_ns"].tolist()
-            imu_context["imu_stream_id"] = imu_id
             accel_cols = [c for c in df.columns if c in ("ax", "ay", "az")]
             gyro_cols = [c for c in df.columns if c in ("gx", "gy", "gz")]
+            stream_data: dict[str, object] = {
+                "stream_id": imu_id,
+                "timestamps_ns": df["timestamp_ns"].tolist(),
+            }
             if accel_cols + gyro_cols:
-                imu_context["imu_values"] = df[accel_cols + gyro_cols].to_numpy()
-                imu_context["imu_axis_names"] = accel_cols + gyro_cols
-            break  # 取第一个 IMU 流
+                stream_data["values"] = df[accel_cols + gyro_cols].to_numpy()
+                stream_data["axis_names"] = accel_cols + gyro_cols
+            imu_streams_data.append(stream_data)
+            # 向后兼容：保留第一个 IMU 的 flat keys
+            if not imu_context:
+                imu_context["imu_timestamps_ns"] = stream_data["timestamps_ns"]
+                imu_context["imu_stream_id"] = imu_id
+                if "values" in stream_data:
+                    imu_context["imu_values"] = stream_data["values"]
+                    imu_context["imu_axis_names"] = stream_data["axis_names"]
+        imu_context["imu_streams"] = imu_streams_data
 
         for stream_id, vs in session.video_streams.items():
             ctx: dict[str, object] = {
@@ -440,6 +455,7 @@ def main():
             import json as _json
             cascade_path.parent.mkdir(parents=True, exist_ok=True)
             cascade_data = {
+                "schema_version": "zpds.cascade_report.v1",
                 "session_id": session_id,
                 "overall_pass": cascade_overall_pass,
                 "total_decisions": len(cascade_decisions),
