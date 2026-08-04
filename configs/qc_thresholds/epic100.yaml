@@ -1,6 +1,13 @@
 # EPIC-KITCHENS-100 — QC 阈值
 profile: epic100
 
+# Stage 0: 隐私脱敏适用性
+privacy:
+  face:
+    applicability: unavailable      # 原视频未取回
+  text:
+    applicability: unavailable      # 原视频未取回
+
 stage1_structure:
   check_pkl_integrity: true
 

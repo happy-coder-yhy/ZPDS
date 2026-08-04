@@ -21,6 +21,7 @@ from zpds.qc.cascade import (
 
 def _register_builtin_stages():
     """导入各 stage 模块触发 @register_stage 装饰器执行。"""
+    from zpds.qc import stage0_privacy as _s0  # noqa: F401
     from zpds.qc import stage3_visual as _s3  # noqa: F401
     from zpds.qc import stage5_depth as _s5  # noqa: F401
     from zpds.qc import stage6_imu as _s6  # noqa: F401

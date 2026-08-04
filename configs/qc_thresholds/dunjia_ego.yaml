@@ -1,6 +1,13 @@
 # Dunjia Ego (遁甲) — QC 阈值
 profile: dunjia_ego
 
+# Stage 0: 隐私脱敏适用性
+privacy:
+  face:
+    applicability: not_applicable  # 夹爪相机，面向操作台
+  text:
+    applicability: applicable      # 画面可能含标签/文档
+
 stage2_time:
   max_gap_ms: 50
 

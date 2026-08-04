@@ -79,6 +79,11 @@ class ReasonCode(str, Enum):
     NEAR_DUPLICATE = "near_duplicate"
     # Stage 12 — 交付
     DELIVERY_CHECK_FAIL = "delivery_check_fail"
+    # Stage 0 — 隐私门（挂在级联最前，不改 Stage 0~12 编号）
+    PRIVACY_FACE_MASKED = "privacy_face_masked"
+    PRIVACY_PII_MASKED = "privacy_pii_masked"
+    PRIVACY_LLM_UNAVAILABLE = "privacy_llm_unavailable"
+    PRIVACY_COVERAGE_LOW = "privacy_coverage_low"
 
 
 @dataclass
