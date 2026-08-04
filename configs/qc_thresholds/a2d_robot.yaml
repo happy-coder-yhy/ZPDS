@@ -1,6 +1,13 @@
 # A2D Robot (真机) — QC 阈值
 profile: a2d_robot
 
+# Stage 0: 隐私脱敏适用性
+privacy:
+  face:
+    applicability: not_applicable  # 机器人相机
+  text:
+    applicability: applicable      # 画面可能含屏幕/标签
+
 stage2_time:
   max_gap_ms: 100
 

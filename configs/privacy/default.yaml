@@ -1,0 +1,41 @@
+# ZPDS Privacy 脱敏默认配置
+# 可被各 Profile 的 qc_thresholds/{profile}.yaml 中的 privacy 小节覆写
+
+privacy:
+  enabled: true
+
+  output:
+    codec: avc1            # H.264 fourcc (fallback: mp4v)
+
+  face:
+    backend: yolo11n_face
+    model_path: models/privacy/yolov11n-face.pt
+    confidence_threshold: 0.5
+    method: blur           # blur / pixelate
+    blur_ksize: 41
+    blur_sigma: 15
+    pixelate_blocks: 10
+    interval_frames: 1
+    min_area_ratio: 0.002  # 小于画面 0.2% 的检测框忽略（防误检噪声）
+
+  text:
+    backend: easyocr
+    ocr_langs: ["ch_sim", "en"]
+    yolo_text_model_path: ""   # 配置后启用 YOLO 文本区域提议；为空则 EasyOCR 全帧
+    min_text_height_ratio: 0.01
+    confidence_threshold: 0.3
+    interval_frames: 1
+
+  pii:
+    backend: llm           # 唯一后端；LLM 不可用时流程失败
+    llm_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    llm_model: qwen-plus
+    llm_timeout_s: 30
+    cache_enabled: true    # 按 text hash 缓存分类结果
+
+  redaction:
+    text_method: black_rect  # black_rect / blur / pixelate（防 OCR 泄漏，默认黑色矩形）
+    temporal_smoothing:
+      enabled: true
+      window_frames: 5
+      iou_threshold: 0.3

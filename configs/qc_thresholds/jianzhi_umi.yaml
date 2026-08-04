@@ -1,6 +1,13 @@
 # Jianzhi UMI (简智新创) — QC 阈值
 profile: jianzhi_umi
 
+# Stage 0: 隐私脱敏适用性
+privacy:
+  face:
+    applicability: not_applicable  # 双端夹爪相机
+  text:
+    applicability: applicable      # 画面可能含标签/文档
+
 stage2_time:
   max_gap_ms: 50
 
