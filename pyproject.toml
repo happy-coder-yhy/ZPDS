@@ -38,6 +38,11 @@ mcap = [
 ]
 hdf5 = ["h5py>=3.9"]
 hands = ["mediapipe>=0.10"]
+privacy = [
+    "ultralytics>=8.2",
+    "easyocr>=1.7",
+    "requests>=2.28",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
