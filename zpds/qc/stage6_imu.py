@@ -717,14 +717,44 @@ def check(
 
 @register_stage(6)
 def _check_stage6(context: dict) -> list[Decision]:
-    """Stage 6 QCCascade 入口：从 context dict 提取参数并调用 check()。"""
+    """Stage 6 QCCascade 入口：从 context dict 提取参数并调用 check()。
+
+    支持两种模式：
+    - 多 IMU 流：``context["imu_streams"]`` 为 list[dict]，每项含
+      ``stream_id``, ``timestamps_ns``, 可选 ``values``/``axis_names``
+    - 单 IMU 流（向后兼容）：从 ``context`` 的 flat keys 读取
+      ``imu_timestamps_ns``, ``imu_values``, ``imu_axis_names``
+    """
     stage_config = context.get("stage_config", {})
+    accel_range = context.get("imu_accel_range_mps2")
+    gyro_range = context.get("imu_gyro_range_rps")
+
+    decisions: list[Decision] = []
+
+    # 多 IMU 流模式
+    imu_streams = context.get("imu_streams")
+    if imu_streams:
+        for imu_data in imu_streams:
+            decisions.extend(
+                check(
+                    timestamps_ns=imu_data.get("timestamps_ns"),
+                    values=imu_data.get("values"),
+                    axis_names=imu_data.get("axis_names"),
+                    accel_range_mps2=accel_range,
+                    gyro_range_rps=gyro_range,
+                    stage_config=stage_config,
+                    stream_id=imu_data.get("stream_id", "imu"),
+                )
+            )
+        return decisions
+
+    # 向后兼容：单 IMU flat keys
     return check(
         timestamps_ns=context.get("imu_timestamps_ns"),
         values=context.get("imu_values"),
         axis_names=context.get("imu_axis_names"),
-        accel_range_mps2=context.get("imu_accel_range_mps2"),
-        gyro_range_rps=context.get("imu_gyro_range_rps"),
+        accel_range_mps2=accel_range,
+        gyro_range_rps=gyro_range,
         stage_config=stage_config,
         stream_id=context.get("stream_id", "imu"),
     )
