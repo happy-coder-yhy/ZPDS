@@ -415,6 +415,26 @@ def main():
                     imu_context["imu_axis_names"] = stream_data["axis_names"]
         imu_context["imu_streams"] = imu_streams_data
 
+        # 收集视频文件路径供 Stage 11 去重
+        all_video_paths: list[str] = [
+            str(vs.video_path) for vs in session.video_streams.values() if vs.video_path
+        ]
+        all_file_paths: list[str] = list(all_video_paths)
+        # 读取已有 inventory 供跨 session 比对
+        inventory_path = output_dir / "inventory.json"
+        if inventory_path.exists():
+            try:
+                inv = _json.loads(inventory_path.read_text(encoding="utf-8"))
+                for prev in inv.get("sessions", []):
+                    for vp in prev.get("video_paths", []):
+                        if vp not in all_video_paths:
+                            all_video_paths.append(vp)
+                    for fp in prev.get("file_paths", []):
+                        if fp not in all_file_paths:
+                            all_file_paths.append(fp)
+            except Exception:
+                pass
+
         for stream_id, vs in session.video_streams.items():
             ctx: dict[str, object] = {
                 "session_id": session_id,
@@ -424,14 +444,19 @@ def main():
                 "profile": profile,
                 "evidence_dir": str(output_dir / "evidence" / stream_id),
                 "stream_id": stream_id,
+                # Stage 11 去重：当前 session + 历史 inventory 的视频/文件路径
+                "video_paths": all_video_paths,
+                "file_paths": all_file_paths,
             }
             depth_s = session.depth_streams.get(stream_id)
             if depth_s is not None:
                 if depth_s.timestamps_ns:
                     ctx["rgb_timestamps_ns"] = vs.timestamps_ns
                     ctx["depth_timestamps_ns"] = depth_s.timestamps_ns
-                if hasattr(depth_s, "frame_dir") and depth_s.frame_dir:
-                    ctx["depth_dir"] = str(depth_s.frame_dir)
+                # 从 source_files 推导 depth_dir + 传 source_files 供 Stage 5 采样加载
+                if depth_s.source_files:
+                    ctx["depth_dir"] = str(depth_s.source_files[0].parent)
+                    ctx["depth_source_files"] = [str(p) for p in depth_s.source_files]
             ctx.update(imu_context)
             try:
                 cascade = QCCascade.from_profile(profile)
@@ -479,6 +504,34 @@ def main():
             print(f"  级联报告: {cascade_path.resolve()}")
     else:
         print("  QC 级联已跳过 (--skip-cascade)")
+
+    # 更新 inventory.json（跨 session 去重注册表）
+    if not args.skip_cascade:
+        try:
+            import json as _json2
+            inv: dict = {}
+            if inventory_path.exists():
+                inv = _json2.loads(inventory_path.read_text(encoding="utf-8"))
+            current_entry = {
+                "session_id": session_id,
+                "profile": profile,
+                "video_paths": [str(vs.video_path) for vs in session.video_streams.values() if vs.video_path],
+                "file_paths": [str(vs.video_path) for vs in session.video_streams.values() if vs.video_path],
+            }
+            sessions: list = inv.get("sessions", [])
+            # 覆盖同 session_id 的旧记录
+            sessions = [s for s in sessions if s.get("session_id") != session_id]
+            sessions.append(current_entry)
+            inv["sessions"] = sessions
+            inv["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            inventory_path.parent.mkdir(parents=True, exist_ok=True)
+            inventory_path.write_text(
+                _json2.dumps(inv, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"  去重注册表: {inventory_path.resolve()}")
+        except Exception:
+            pass
 
     # ================================================================
     # Step 3: 运行检测器（遍历所有流）

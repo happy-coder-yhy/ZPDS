@@ -502,7 +502,14 @@ def check(
 
 @register_stage(11)
 def _check_stage11(context: dict) -> list[Decision]:
-    """Stage 11 QCCascade 入口：从 context dict 提取参数并调用 check()。"""
+    """Stage 11 QCCascade 入口：从 context dict 提取参数并调用 check()。
+
+    Stage 11 是跨流 / 跨 session 的去重检查，只需在整个级联中运行一次。
+    使用 ``_stage11_done`` 上下文标记避免多 stream 重复执行。
+    """
+    if context.get("_stage11_done"):
+        return []
+    context["_stage11_done"] = True
     stage_config = context.get("stage_config", {})
     return check(
         file_paths=context.get("file_paths"),
