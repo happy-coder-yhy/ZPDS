@@ -6,9 +6,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 import yaml
 
-from scripts.run_scene_detection import read_video, run, run_scene_detection
+from scripts.run_scene_detection import build_parser, read_video, run, run_scene_detection
 from zpds.scene.backends.dino import DinoV2SmallEmbedder
 from zpds.scene.config import SceneConfig
 from zpds.scene.sampling import (
@@ -219,3 +220,33 @@ def test_short_scene_reuses_single_representative_frame() -> None:
     )
 
     assert representative_frame_indices(scene, fps=10.0, frame_count=10) == (0, 0, 0)
+
+
+def test_with_vlm_is_reserved_and_never_fabricates_reviews() -> None:
+    args = build_parser().parse_args(
+        [
+            "--input",
+            "unused.mp4",
+            "--stage",
+            "all",
+            "--with-vlm",
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="拒绝伪造复核结果"):
+        run(args)
+
+
+def test_with_vlm_rejects_non_all_stage() -> None:
+    args = build_parser().parse_args(
+        [
+            "--input",
+            "unused.mp4",
+            "--stage",
+            "1",
+            "--with-vlm",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="仅可与 --stage all"):
+        run(args)

@@ -138,6 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stage 2 候选帧，可重复指定；all 默认使用 Stage 1 候选边界",
     )
     parser.add_argument(
+        "--with-vlm",
+        action="store_true",
+        help="请求人员 B 的 VLM 复核流水线；仅可与 --stage all 一起使用",
+    )
+    parser.add_argument(
         "--output-json",
         help="可选调试 JSON；正式 parquet 由 scene writer 负责",
     )
@@ -370,6 +375,13 @@ def _write_json_atomic(path: Path, document: dict[str, object]) -> None:
 def run(args: argparse.Namespace) -> int:
     quiet = bool(getattr(args, "quiet", False))
     progress = None if quiet else ConsoleProgress()
+    if bool(getattr(args, "with_vlm", False)):
+        if args.stage != "all":
+            raise ValueError("--with-vlm 仅可与 --stage all 一起使用")
+        raise RuntimeError(
+            "--with-vlm 已保留为人员 B 流水线交接入口；"
+            "当前 zpds.scene.pipeline/VLMReviewer 尚未实现，拒绝伪造复核结果"
+        )
     profile_path = getattr(args, "profile", None)
     config = (
         SceneConfig.load_with_profile(args.config, profile_path)
