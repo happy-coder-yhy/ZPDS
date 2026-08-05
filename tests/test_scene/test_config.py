@@ -34,7 +34,10 @@ def test_default_config_loads_all_required_sections() -> None:
     assert config.stage_b.z_score_threshold == 2.0
     assert config.fusion.min_scene_duration_s == 3.0
     assert config.fusion.same_scene_similarity == 0.95
-    assert config.vlm.api_key_env == "OPENAI_API_KEY"
+    assert config.vlm.api_key_env == "DASHSCOPE_API_KEY"
+    assert config.vlm.base_url == (
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
     assert config.output_dir == (DEFAULT_CONFIG.resolve().parent / "../../output/scene").resolve()
 
 

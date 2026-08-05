@@ -1,0 +1,19 @@
+# 场景-动作一致性 VLM 复核的 closed-set 标签集。
+# 新增标签必须同时更新人工复核说明与验收金标，不能静默扩充。
+scene_labels:
+  - kitchen
+  - living_room
+  - office
+  - workbench
+  - factory_floor
+  - outdoor
+  - other
+
+task_labels:
+  - cooking
+  - cleaning
+  - assembly
+  - packing
+  - tool_use
+  - document_handling
+  - other

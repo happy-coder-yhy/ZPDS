@@ -279,16 +279,29 @@ class VLMConfig:
     base_url: str = ""
     model: str = ""
     api_key_env: str = "OPENAI_API_KEY"
+    labels_path: str = ""
     timeout_s: float = 60.0
     review_confidence_threshold: float = 0.6
 
     @classmethod
-    def from_mapping(cls, value: dict[str, Any]) -> VLMConfig:
+    def from_mapping(
+        cls,
+        value: dict[str, Any],
+        *,
+        config_path: Path | None = None,
+    ) -> VLMConfig:
+        labels_raw = str(value.get("labels_path", ""))
+        if labels_raw:
+            labels_path = Path(labels_raw).expanduser()
+            if not labels_path.is_absolute() and config_path is not None:
+                labels_path = config_path.parent / labels_path
+            labels_raw = str(labels_path.resolve())
         config = cls(
             enabled=bool(value.get("enabled", True)),
             base_url=str(value.get("base_url", "")),
             model=str(value.get("model", "")),
             api_key_env=str(value.get("api_key_env", "OPENAI_API_KEY")),
+            labels_path=labels_raw,
             timeout_s=_positive(value.get("timeout_s", 60.0), "scene.vlm.timeout_s"),
             review_confidence_threshold=_unit(value.get("review_confidence_threshold", 0.6), "scene.vlm.review_confidence_threshold"),
         )
@@ -412,7 +425,10 @@ class SceneConfig:
             stage_a=StageAConfig.from_mapping(_mapping(scene.get("stage_a", {}), "scene.stage_a")),
             stage_b=DinoConfig.from_mapping(_mapping(scene.get("stage_b", {}), "scene.stage_b")),
             fusion=FusionConfig.from_mapping(_mapping(scene.get("fusion", {}), "scene.fusion")),
-            vlm=VLMConfig.from_mapping(_mapping(scene.get("vlm", {}), "scene.vlm")),
+            vlm=VLMConfig.from_mapping(
+                _mapping(scene.get("vlm", {}), "scene.vlm"),
+                config_path=config_path,
+            ),
             governance=SceneGovernanceConfig.from_mapping(
                 _mapping(scene.get("governance", {}), "scene.governance")
             ),
