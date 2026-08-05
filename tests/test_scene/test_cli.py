@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import cv2
@@ -222,7 +223,7 @@ def test_short_scene_reuses_single_representative_frame() -> None:
     assert representative_frame_indices(scene, fps=10.0, frame_count=10) == (0, 0, 0)
 
 
-def test_with_vlm_is_reserved_and_never_fabricates_reviews() -> None:
+def test_with_vlm_wiring_requires_existing_video() -> None:
     args = build_parser().parse_args(
         [
             "--input",
@@ -233,7 +234,7 @@ def test_with_vlm_is_reserved_and_never_fabricates_reviews() -> None:
         ]
     )
 
-    with pytest.raises(RuntimeError, match="拒绝伪造复核结果"):
+    with pytest.raises(FileNotFoundError, match="输入视频不存在"):
         run(args)
 
 
@@ -250,3 +251,23 @@ def test_with_vlm_rejects_non_all_stage() -> None:
 
     with pytest.raises(ValueError, match="仅可与 --stage all"):
         run(args)
+
+
+def test_load_dotenv_sets_missing_variables(tmp_path: Path) -> None:
+    from scripts.run_scene_detection import _load_dotenv
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# comment\nVLM_MODEL=qwen3.5-omni-flash\n"
+        'DASHSCOPE_API_KEY="secret-key"\n',
+        encoding="utf-8",
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.delenv("VLM_MODEL", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    try:
+        _load_dotenv(env_file)
+        assert os.environ["VLM_MODEL"] == "qwen3.5-omni-flash"
+        assert os.environ["DASHSCOPE_API_KEY"] == "secret-key"
+    finally:
+        monkeypatch.undo()
