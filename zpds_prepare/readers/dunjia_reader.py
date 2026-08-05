@@ -550,6 +550,55 @@ def transcode_depth_video(
 
 
 # ================================================================
+# 深度帧采样（供 QC Stage 5 使用）
+# ================================================================
+
+
+def sample_depth_frames(
+    mcap_path: str,
+    total_count: int,
+    *,
+    topic: str | None = None,
+    max_samples: int = 100,
+) -> list:
+    """从 MCAP 深度通道采样解码帧（纯内存，不落盘）。
+
+    每 ``ceil(total_count / max_samples)`` 帧取 1 帧，上限 ``max_samples``。
+    返回解码后的 numpy 数组列表，可直接传入 Stage 5 的 ``depth_frames``。
+    """
+    import cv2
+
+    if total_count <= 0:
+        return []
+
+    step = max(1, total_count // max_samples)
+    sample_indices: set[int] = set(range(0, total_count, step))
+    # 确保不超过 max_samples
+    if len(sample_indices) > max_samples:
+        sample_indices = set(sorted(sample_indices)[:max_samples])
+
+    if topic is None:
+        topic = TOPIC_DEPTH
+
+    samples: list = []
+    reader, fh = _open_mcap(mcap_path)
+    try:
+        depth_idx = 0
+        for _schema, channel, _msg, decoded in reader.iter_decoded_messages():
+            if channel.topic != topic:
+                continue
+            if depth_idx in sample_indices:
+                nparr = np.frombuffer(decoded.data, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+                if img is not None and img.ndim == 2:
+                    samples.append(img)
+            depth_idx += 1
+        return samples
+    finally:
+        fh.close()
+
+
+# ================================================================
 # 标定
 # ================================================================
 
@@ -828,6 +877,12 @@ def read_session(
                 "preserves_log_time": True,
             },
         )
+        # 采样解码深度帧供 QC Stage 5 使用（纯内存，不落盘）
+        if include_depth and depth_frames:
+            depth_streams["ego_depth"].depth_frames = sample_depth_frames(
+                dataset_path,
+                len(depth_frames),
+            )
     elif require_depth:
         raise FileNotFoundError(
             f"Dunjia MCAP 缺少必需深度 Topic: {TOPIC_DEPTH}"

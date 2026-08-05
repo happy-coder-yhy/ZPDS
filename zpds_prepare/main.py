@@ -453,8 +453,13 @@ def main():
                 if depth_s.timestamps_ns:
                     ctx["rgb_timestamps_ns"] = vs.timestamps_ns
                     ctx["depth_timestamps_ns"] = depth_s.timestamps_ns
-                # 从 source_files 推导 depth_dir + 传 source_files 供 Stage 5 采样加载
-                if depth_s.source_files:
+                # 深度帧数据（供 Stage 5 使用，按优先级）：
+                #   1. depth_frames — MCAP 等容器解码后的 numpy 采样帧（纯内存）
+                #   2. depth_dir     — 已有 PNG 序列目录
+                #   3. depth_source_files — 可独立读取的深度源文件列表
+                if depth_s.depth_frames:
+                    ctx["depth_frames"] = depth_s.depth_frames
+                if depth_s.source_files and depth_s.source_kind != "mcap_compressed_image":
                     ctx["depth_dir"] = str(depth_s.source_files[0].parent)
                     ctx["depth_source_files"] = [str(p) for p in depth_s.source_files]
             ctx.update(imu_context)
