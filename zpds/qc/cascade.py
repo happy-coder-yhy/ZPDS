@@ -213,6 +213,9 @@ class QCCascade:
             stage_cfg = self._stage_configs.get(stage, {})
             ctx = {**context, "stage_config": stage_cfg, "stage": stage}
 
+            logger.info(
+                "Stage %d (%s): 开始检查...", stage, checker.__name__
+            )
             try:
                 decisions = checker(ctx)
             except Exception:
@@ -228,6 +231,13 @@ class QCCascade:
 
             if not isinstance(decisions, list):
                 decisions = []
+
+            logger.info(
+                "Stage %d (%s): 完成, %d decisions",
+                stage,
+                checker.__name__,
+                len(decisions),
+            )
 
             for d in decisions:
                 report.decisions.append(d)
