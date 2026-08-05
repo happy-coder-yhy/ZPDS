@@ -65,5 +65,5 @@ target-version = "py310"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "--basetemp=.pytest-lenovo/tmp"
-cache_dir = ".pytest-lenovo/cache"
+addopts = "--basetemp=.pytest-tmp"
+cache_dir = ".pytest-tmp/cache"
