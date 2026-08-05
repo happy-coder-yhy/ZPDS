@@ -579,11 +579,39 @@ def check(
 
 @register_stage(5)
 def _check_stage5(context: dict) -> list[Decision]:
-    """Stage 5 QCCascade 入口：从 context dict 提取参数并调用 check()。"""
+    """Stage 5 QCCascade 入口：从 context dict 提取参数并调用 check()。
+
+    支持三种深度数据来源（优先级从高到低）：
+    1. ``depth_frames`` — 已加载的 numpy 帧列表
+    2. ``depth_dir`` — PNG 序列目录（Stage 5 自动 glob + cv2 加载）
+    3. ``depth_source_files`` — 深度源文件路径列表（Stage 5 采样加载）
+    """
     stage_config = context.get("stage_config", {})
+    depth_frames = context.get("depth_frames")
+    depth_dir = context.get("depth_dir")
+    depth_source_files = context.get("depth_source_files")
+
+    # 无 depth_frames/depth_dir 但有 source_files 时，采样加载
+    if depth_frames is None and not depth_dir and depth_source_files:
+        import cv2
+
+        sample: list[np.ndarray] = []
+        step = max(1, len(depth_source_files) // 100)
+        for pf in depth_source_files[::step]:
+            img = cv2.imread(str(pf), cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                sample.append(img)
+            if len(sample) >= 100:
+                break
+        if sample:
+            depth_frames = sample
+        # 同时设置 depth_dir 供 PNG glob 回退路径
+        if depth_source_files:
+            depth_dir = str(Path(depth_source_files[0]).parent)
+
     return check(
-        depth_frames=context.get("depth_frames"),
-        depth_dir=context.get("depth_dir"),
+        depth_frames=depth_frames,
+        depth_dir=depth_dir,
         rgb_timestamps_ns=context.get("rgb_timestamps_ns"),
         depth_timestamps_ns=context.get("depth_timestamps_ns"),
         invalid_value=context.get("depth_invalid_value"),
