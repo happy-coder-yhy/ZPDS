@@ -45,12 +45,22 @@ from segment.image_undistorter import plan_undistortion
 from segment.imu_normalizer import normalize_imu_df, write_imu
 from segment.magnetic_encoder_writer import write_magnetic_encoder_stream
 from segment.mask_normalizer import normalize_masks, write_mask_parquet
+from segment.preview import create_preview
 from segment.sample_map import (
     generate_sample_map,
     generate_sample_map_from_timestamps,
     write_sample_map,
 )
-from segment.segment_writer import build_segment_json, sha256_hex, write_segment_json
+from segment.segment_writer import (
+    build_dataset_json,
+    build_revision_json,
+    build_segment_json,
+    package_version,
+    sha256_hex,
+    write_dataset_json,
+    write_revision_json,
+    write_segment_json,
+)
 from segment.validator import (
     validate_segment,
     write_annotation_validation_report,
@@ -374,6 +384,25 @@ def generate_segment(
         vr["undistortion"] = undistortion_detail
         video_results.append(vr)
 
+    # ---- ⑥.5 前端预览压缩：保留原视频，另存 <stream_id>_preview.mp4 ----
+    preview_cfg = cfg.get("preview", {})
+    preview_count = 0
+    if preview_cfg.get("enabled", True):
+        for vm, vr in zip(video_meta, video_results):
+            stream_id = vr["stream_id"]
+            preview_path = (
+                Path(output_dir) / "data" / f"{stream_id}_preview.mp4"
+            )
+            create_preview(
+                vm["output_mp4"],
+                preview_path,
+                max_width=int(preview_cfg.get("max_width", 1280)),
+                crf=int(preview_cfg.get("crf", 28)),
+                preset=str(preview_cfg.get("preset", "veryfast")),
+            )
+            vr["preview_uri"] = f"data/{stream_id}_preview.mp4"
+            preview_count += 1
+
     # ---- ⑦ 标定与 segment.json ----
     write_calibration(calibration, output_dir)
     segment = build_segment_json(
@@ -415,7 +444,9 @@ def generate_segment(
         "segment_id": segment_id,
         "status": validation["status"],
         "duration_s": duration_ns / 1_000_000_000,
+        "video_streams": [vm["stream_id"] for vm in video_meta],
         "rgb_frames": video_results[0]["output_frames"] if video_results else 0,
+        "preview_count": preview_count,
         "imu_samples": sum(ir["rows"] for ir in imu_results),
         "depth_frames": sum(dr["frames"] for dr in depth_results),
         "time_series_samples": sum(
@@ -511,6 +542,10 @@ def main():
         output_root = Path("output") / subdir / "prepared_segments"
     else:
         output_root = Path(args.output)
+
+    # ZPDS dataset 结构：prepared_segments/<prep_revision>/<segment_id>/
+    prep_revision = REVISION
+    revision_root = output_root / prep_revision
 
     if not candidates_path.exists():
         print(f"错误: 候选文件不存在: {candidates_path}")
@@ -801,7 +836,7 @@ def main():
 
     for idx, cand in enumerate(candidates):
         seg_id = f"seg_{idx + 1:06d}"
-        seg_dir = output_root / seg_id
+        seg_dir = revision_root / seg_id
 
         source_start = cand["source_start_ns"]
         source_end = cand["source_end_ns"]
@@ -907,6 +942,74 @@ def main():
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     print(f"  汇总文件:    {summary_path.resolve()}")
+
+    # ---- 写出 dataset.json 与 revision.json（ZPDS dataset 结构） ----
+    dataset_root = output_root.parent
+    dataset_id = dataset_root.name
+    config_path = Path(args.config).expanduser().resolve()
+    config_hash = "sha256:" + sha256_hex(str(config_path))
+    source_type = {"guida": "ego", "dunjia": "ego", "epic": "ego"}.get(
+        profile, "teleoperation"
+    )
+    dataset_doc = build_dataset_json(
+        dataset_id=dataset_id,
+        prep_revision=prep_revision,
+        name=dataset_id,
+        description=f"{profile} 清洗后的 Prepared Segment 数据集",
+        source_types=[source_type],
+    )
+
+    # changes 从实际执行的配置与清洗步骤生成，不写死。
+    output_cfg = cfg.get("output", {})
+    target_fps = output_cfg.get("target_fps", 30)
+    codec = output_cfg.get("rgb_codec", "avc1")
+    changes: list[str] = ["按候选区间裁剪无效首尾"]
+    changes.append(f"RGB 转 {codec} CFR {target_fps}fps")
+    depth_enabled = bool(
+        cfg.get(profile, {}).get("depth", {}).get("enabled", False)
+    )
+    if depth_enabled:
+        changes.append("深度保留原频率无损写出")
+    if profile == "umi":
+        changes.append("磁编码器/VIO 保留原始值与双时钟")
+    if cfg.get("preview", {}).get("enabled", True):
+        changes.append("生成 <stream_id>_preview.mp4 压缩预览（保留原视频）")
+    changes.append(
+        "长度单位按 zpds/prepared/conventions.py（mm）；"
+        "ZPDS 数据标准示例为 m，冲突待解决"
+    )
+    revision_doc = build_revision_json(
+        prep_revision=prep_revision,
+        pipeline_name=f"zpds.{Path(__file__).stem}",
+        pipeline_version=package_version(),
+        config_hash=config_hash,
+        changes=changes,
+        run_stats={
+            "profile": profile,
+            "source_session_id": source_session_id,
+            "segment_count": len(results),
+            "video_stream_ids": sorted(
+                {
+                    stream_id
+                    for result in results
+                    for stream_id in result.get("video_streams", [])
+                }
+            ),
+            "rgb_frames_total": total_rgb,
+            "imu_samples_total": total_imu,
+            "depth_frames_total": sum(
+                result.get("depth_frames", 0) for result in results
+            ),
+            "preview_count_total": sum(
+                result.get("preview_count", 0) for result in results
+            ),
+        },
+    )
+    dataset_path_out = write_dataset_json(dataset_doc, dataset_root)
+    revision_path_out = write_revision_json(revision_doc, revision_root)
+    print(f"  dataset.json:  {dataset_path_out}")
+    print(f"  revision.json: {revision_path_out}")
+    print(f"  修订目录:      {revision_root.resolve()}")
 
     return 0 if fail_count == 0 else 1
 
