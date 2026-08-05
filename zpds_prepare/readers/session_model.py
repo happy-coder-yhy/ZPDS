@@ -72,6 +72,7 @@ class DepthStream:
     unit: str = "unknown"
     invalid_value: int | float | None = None
     frame_id: str = "depth_optical_frame"
+    depth_frames: list[Any] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
