@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
 
 from . import config
 from .llm import classify_text_blocks
@@ -33,7 +32,7 @@ def _match_strong_pii(text: str) -> str:
     return ""
 
 # 模型/OCR reader 单例,避免每次调用重复加载
-_yolo_model: Optional[YOLO] = None
+_yolo_model: Optional[Any] = None
 _ocr_reader = None
 
 
@@ -48,9 +47,13 @@ class TextBox:
     privacy_type: str = ""           # LLM 给出的隐私类别
 
 
-def get_yolo() -> YOLO:
+def get_yolo() -> Any:
     global _yolo_model
     if _yolo_model is None:
+        # Ultralytics 会在导入时全局替换 cv2.imread。延迟到真正需要
+        # 文本检测模型时再导入，避免普通 privacy/schema 导入污染深度流水线。
+        from ultralytics import YOLO
+
         if not config.YOLO_MODEL_PATH.exists():
             raise FileNotFoundError(
                 f"YOLO 模型不存在: {config.YOLO_MODEL_PATH}\n"
