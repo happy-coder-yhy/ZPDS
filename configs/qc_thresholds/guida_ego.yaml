@@ -30,6 +30,12 @@ scene:
     hysteresis_frames: 2
     same_scene_similarity: 0.95
     low_confidence_threshold: 0.60
+# Stage 0: 隐私脱敏适用性
+privacy:
+  face:
+    applicability: applicable      # 头戴相机，可能拍到操作者/旁人面部
+  text:
+    applicability: applicable      # 画面可能含标签/文档
 
 stage2_time:
   max_gap_ms: 40           # 时间戳最大允许间隔 (ms)
