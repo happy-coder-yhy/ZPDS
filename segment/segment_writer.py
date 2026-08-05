@@ -7,6 +7,9 @@ streams 列表根据传入的 video_results 和 imu_results 动态生成，
 
 import hashlib
 import json
+import subprocess
+from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 
@@ -20,6 +23,147 @@ def sha256_hex(path: str) -> str:
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+def _utc_now_iso() -> str:
+    """当前 UTC 时间，ISO-8601 格式（Z 后缀）。"""
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _git_commit_short() -> str:
+    """读取当前 git commit 短哈希；失败时返回 "unknown"。"""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        commit = result.stdout.strip()
+        if result.returncode == 0 and commit:
+            return commit
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
+def package_version() -> str:
+    """读取 zpds 包版本；安装元数据缺失时回退到 ``zpds.__version__``。"""
+    try:
+        installed = version("zpds")
+    except PackageNotFoundError:
+        installed = ""
+    if installed:
+        return installed
+    try:
+        import zpds
+    except Exception:  # noqa: BLE001 - 版本探测不应阻断产物生成
+        return "unknown"
+    return str(getattr(zpds, "__version__", "unknown"))
+
+
+def build_dataset_json(
+    *,
+    dataset_id: str,
+    prep_revision: str,
+    name: str | None = None,
+    description: str | None = None,
+    source_types: list[str] | None = None,
+    dataset_version: str | None = None,
+    zrds_version: str = "0.1.0",
+    default_experience_version: str | None = None,
+) -> dict:
+    """构建 dataset.json（ZPDS 数据标准最小字段）。"""
+    if dataset_version is None:
+        dataset_version = package_version()
+    document: dict[str, object] = {
+        "zrds_version": zrds_version,
+        "dataset_id": dataset_id,
+        "dataset_version": dataset_version,
+        "name": name or dataset_id,
+        "description": description or "",
+        "created_at": _utc_now_iso(),
+        "source_types": source_types or [],
+        "default_prep_revision": prep_revision,
+    }
+    if default_experience_version is not None:
+        document["default_experience_version"] = default_experience_version
+    return document
+
+
+def build_revision_json(
+    *,
+    prep_revision: str,
+    pipeline_name: str,
+    pipeline_version: str | None = None,
+    config_hash: str,
+    code_commit: str | None = None,
+    changes: list[str] | None = None,
+    parent_revision: str | None = None,
+    run_stats: dict[str, object] | None = None,
+) -> dict:
+    """构建 prepared_segments/<prep_revision>/revision.json。
+
+    长度单位以 ``zpds.prepared.conventions.LENGTH_UNIT`` 为权威来源；
+    ZPDS 数据标准示例写为 m，当前实现为 mm，冲突在
+    ``length_unit_source`` 与 ``changes`` 中显式记录，不静默假设。
+    """
+    from zpds.prepared.conventions import LENGTH_UNIT
+
+    if pipeline_version is None:
+        pipeline_version = package_version()
+    document: dict[str, object] = {
+        "zrds_version": "0.1.0",
+        "prep_revision": prep_revision,
+        "parent_revision": parent_revision,
+        "created_at": _utc_now_iso(),
+        "pipeline": {
+            "name": pipeline_name,
+            "version": pipeline_version,
+            "code_commit": code_commit or _git_commit_short(),
+            "config_hash": config_hash,
+        },
+        "conventions": {
+            "time_unit": "ns",
+            "time_interval": "[start_ns,end_ns)",
+            "segment_time_origin_ns": 0,
+            "length_unit": LENGTH_UNIT,
+            "length_unit_source": "zpds/prepared/conventions.py",
+            "angle_unit": "rad",
+            "quaternion_order": "xyzw",
+            "pose_notation": "T_parent_child",
+        },
+        "changes": changes or [],
+    }
+    if run_stats is not None:
+        document["run_stats"] = run_stats
+    return document
+
+
+def _write_json_atomic(document: dict, path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(
+        json.dumps(document, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return str(path)
+
+
+def write_dataset_json(document: dict, dataset_root: str | Path) -> str:
+    """写出 dataset.json 到 dataset 根目录。"""
+    return _write_json_atomic(document, Path(dataset_root) / "dataset.json")
+
+
+def write_revision_json(document: dict, revision_dir: str | Path) -> str:
+    """写出 revision.json 到 prepared_segments/<prep_revision>/。"""
+    return _write_json_atomic(document, Path(revision_dir) / "revision.json")
 
 
 def build_segment_json(
@@ -107,7 +251,7 @@ def build_segment_json(
     # RGB 视频流 — 每个 video_result 生成一个 stream entry
     for vr in (video_results or []):
         stream_id = vr["stream_id"]
-        streams.append({
+        entry = {
             "stream_id": stream_id,
             "role": vr.get("role", "observation"),
             "modality": "rgb",
@@ -138,7 +282,10 @@ def build_segment_json(
                     {"status": "not_requested", "detail": "no calibration evaluation"},
                 ),
             },
-        })
+        }
+        if vr.get("preview_uri"):
+            entry["preview_uri"] = vr["preview_uri"]
+        streams.append(entry)
 
     # Guida 等按原始频率无损写出的深度流
     for dr in (depth_results or []):

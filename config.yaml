@@ -102,3 +102,11 @@ hands:
 segment:
   min_duration_s: 1.0         # 最小 segment 时长
   max_duration_s: 120.0       # 最大 segment 时长
+
+# ---- 前端预览压缩 ----
+# 为清洗结果中的每个 MP4 生成 <stream_id>_preview.mp4（保留原视频）。
+preview:
+  enabled: true
+  max_width: 1280             # 超过此宽度时缩放，不足则保持原分辨率（不放大）
+  crf: 28                     # H.264 CRF，越大越小
+  preset: veryfast
