@@ -75,6 +75,7 @@ class ReasonCode(str, Enum):
     # Stage 10 — 语义
     SEMANTIC_INCONSISTENCY = "semantic_inconsistency"
     SEMANTIC_NOT_RUN = "semantic_not_run"
+    SCENE_BOUNDARY_LOW_CONFIDENCE = "scene_boundary_low_confidence"
     # Stage 11 — 去重
     NEAR_DUPLICATE = "near_duplicate"
     # Stage 12 — 交付

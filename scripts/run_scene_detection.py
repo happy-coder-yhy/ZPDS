@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -24,7 +25,32 @@ from zpds.scene.backends import (
 )
 from zpds.scene.config import SceneConfig
 from zpds.scene.fusion import SceneBoundaryFusion, StageATransitionFusion
+from zpds.scene.pipeline import run_scene_pipeline
+from zpds.scene.preview import write_scene_previews
 from zpds.scene.schemas import BoundaryScore, SceneProposal, TransitionProposal
+from zpds.scene.validator import sha256_file, validate_scene_outputs
+from zpds.scene.vlm_review import (
+    OpenAICompatibleVLMReviewer,
+    load_scene_labels,
+)
+from zpds.scene.writer import write_scene_run
+
+
+def _load_dotenv(path: str | Path = ".env") -> None:
+    """把 .env 中的 KEY=VALUE 注入进程环境；已存在的变量不覆盖。"""
+
+    env_path = Path(path).expanduser()
+    if not env_path.is_file():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 class StageBBackend(Protocol):
@@ -145,6 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-json",
         help="可选调试 JSON；正式 parquet 由 scene writer 负责",
+    )
+    parser.add_argument(
+        "--output",
+        help="正式产物目录（parquet/run_summary/preview）；默认取配置 output_dir",
     )
     parser.add_argument(
         "--quiet",
@@ -375,13 +405,9 @@ def _write_json_atomic(path: Path, document: dict[str, object]) -> None:
 def run(args: argparse.Namespace) -> int:
     quiet = bool(getattr(args, "quiet", False))
     progress = None if quiet else ConsoleProgress()
-    if bool(getattr(args, "with_vlm", False)):
-        if args.stage != "all":
-            raise ValueError("--with-vlm 仅可与 --stage all 一起使用")
-        raise RuntimeError(
-            "--with-vlm 已保留为人员 B 流水线交接入口；"
-            "当前 zpds.scene.pipeline/VLMReviewer 尚未实现，拒绝伪造复核结果"
-        )
+    with_vlm = bool(getattr(args, "with_vlm", False))
+    if with_vlm and args.stage != "all":
+        raise ValueError("--with-vlm 仅可与 --stage all 一起使用")
     profile_path = getattr(args, "profile", None)
     config = (
         SceneConfig.load_with_profile(args.config, profile_path)
@@ -395,6 +421,14 @@ def run(args: argparse.Namespace) -> int:
         print(
             f"已读取 {len(video.frames)} 帧，{video.width}x{video.height} @ {video.fps:g} FPS",
             file=sys.stderr,
+        )
+    if with_vlm:
+        return _run_with_vlm(
+            args,
+            video,
+            config,
+            progress=progress,
+            quiet=quiet,
         )
     started = time.perf_counter()
     result = run_scene_detection(
@@ -413,6 +447,106 @@ def run(args: argparse.Namespace) -> int:
         print(json.dumps(document, indent=2, ensure_ascii=False))
     if not quiet:
         print(f"完成，总耗时 {time.perf_counter() - started:.1f} 秒", file=sys.stderr)
+    return 0
+
+
+def _run_with_vlm(
+    args: argparse.Namespace,
+    video: VideoFrames,
+    config: SceneConfig,
+    *,
+    progress: ConsoleProgress | None,
+    quiet: bool,
+) -> int:
+    """人员 B：完整 scene 分割 + VLM 复核 + 写出 + 校验。"""
+
+    _load_dotenv()
+    if not config.vlm.labels_path.strip():
+        raise RuntimeError("--with-vlm 需要配置 scene.vlm.labels_path")
+    labels = load_scene_labels(config.vlm.labels_path)
+    reviewer = OpenAICompatibleVLMReviewer(
+        config.vlm,
+        labels=labels,
+        config_hash=config.config_hash,
+    )
+    raw_sha256_before = sha256_file(video.path)
+    started = time.perf_counter()
+    run = run_scene_pipeline(
+        video.frames,
+        fps=video.fps,
+        config=config,
+        vlm_reviewer=reviewer,
+        labels=labels,
+        start_ns=args.start_ns,
+        progress=progress,
+    )
+    if not quiet:
+        print(
+            f"scene+VLM 完成，总耗时 {time.perf_counter() - started:.1f} 秒",
+            file=sys.stderr,
+        )
+    output_dir = (
+        Path(args.output).expanduser().resolve()
+        if getattr(args, "output", None)
+        else config.output_dir
+    )
+    written = write_scene_run(
+        output_dir,
+        input_path=video.path,
+        config_hash=config.config_hash,
+        profile=config.profile,
+        fps=video.fps,
+        frame_count=len(video.frames),
+        start_ns=args.start_ns,
+        end_ns=run.end_ns,
+        scenes=run.scenes,
+        vlm_results=run.vlm_results,
+        review_queue=run.review_queue,
+        skipped=run.skipped,
+        skip_reason=run.skip_reason,
+    )
+    previews = []
+    if not run.skipped and run.scenes:
+        previews = write_scene_previews(
+            written.output_dir,
+            video.frames,
+            run.scenes,
+            fps=video.fps,
+            start_ns=args.start_ns,
+        )
+    validation = validate_scene_outputs(
+        written.output_dir,
+        raw_path=video.path,
+        raw_sha256_before=raw_sha256_before,
+        expected_scene_count=len(run.scenes) if not run.skipped else None,
+        expect_artifacts=not run.skipped,
+    )
+    document: dict[str, object] = {
+        "input": str(video.path),
+        "profile": config.profile,
+        "config_hash": config.config_hash,
+        "fps": video.fps,
+        "frame_count": len(video.frames),
+        "start_ns": args.start_ns,
+        "end_ns": run.end_ns,
+        "skipped": run.skipped,
+        "skip_reason": run.skip_reason,
+        "scene_count": len(run.scenes),
+        "vlm_reviewed": len(run.vlm_results),
+        "review_queue_scene_ids": [
+            result.scene_id for result in run.review_queue
+        ],
+        "metrics": [asdict(metric) for metric in run.metrics],
+        "decisions": [asdict(decision) for decision in run.decisions],
+        "output_dir": str(written.output_dir),
+        "previews": [str(path) for path in previews],
+        "validation_ok": validation.ok,
+        "validation_issues": list(validation.issues),
+    }
+    if args.output_json:
+        _write_json_atomic(Path(args.output_json).expanduser().resolve(), document)
+    else:
+        print(json.dumps(document, indent=2, ensure_ascii=False))
     return 0
 
 
