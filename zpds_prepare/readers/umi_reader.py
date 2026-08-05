@@ -314,8 +314,8 @@ def read_session(
     try:
         # ---- 收集所有流数据 ----
         cam_data: dict[str, dict] = {
-            "robot0": {"frames": [], "has_calib": False, "width": 0, "height": 0},
-            "robot1": {"frames": [], "has_calib": False, "width": 0, "height": 0},
+            "robot0": {"frames": [], "has_calib": False, "width": 0, "height": 0, "calibration": None},
+            "robot1": {"frames": [], "has_calib": False, "width": 0, "height": 0, "calibration": None},
         }
         imu_data: dict[str, list[dict]] = {"robot0": [], "robot1": []}
         encoder_data: dict[str, list[dict]] = {
@@ -348,17 +348,43 @@ def read_session(
                     "h264_size": len(decoded.data),
                 })
 
-            # ---- 标定消息 (提取分辨率) ----
+            # ---- 标定消息 (提取分辨率 + 完整标定) ----
             elif topic == TOPIC_ROBOT0_CALIB:
                 if not cam_data["robot0"]["has_calib"]:
                     cam_data["robot0"]["width"] = decoded.width
                     cam_data["robot0"]["height"] = decoded.height
                     cam_data["robot0"]["has_calib"] = True
+                    cam_data["robot0"]["calibration"] = {
+                        "width": decoded.width,
+                        "height": decoded.height,
+                        "frame_id": getattr(decoded, "frame_id", ""),
+                        "distortion_model": getattr(
+                            decoded, "distortion_model", "unknown",
+                        ),
+                        "K": list(getattr(decoded, "K", [])),
+                        "D": list(getattr(decoded, "D", [])),
+                        "R": list(getattr(decoded, "R", [])),
+                        "P": list(getattr(decoded, "P", [])),
+                        "T_b_c": list(getattr(decoded, "T_b_c", [])),
+                    }
             elif topic == TOPIC_ROBOT1_CALIB:
                 if not cam_data["robot1"]["has_calib"]:
                     cam_data["robot1"]["width"] = decoded.width
                     cam_data["robot1"]["height"] = decoded.height
                     cam_data["robot1"]["has_calib"] = True
+                    cam_data["robot1"]["calibration"] = {
+                        "width": decoded.width,
+                        "height": decoded.height,
+                        "frame_id": getattr(decoded, "frame_id", ""),
+                        "distortion_model": getattr(
+                            decoded, "distortion_model", "unknown",
+                        ),
+                        "K": list(getattr(decoded, "K", [])),
+                        "D": list(getattr(decoded, "D", [])),
+                        "R": list(getattr(decoded, "R", [])),
+                        "P": list(getattr(decoded, "P", [])),
+                        "T_b_c": list(getattr(decoded, "T_b_c", [])),
+                    }
 
             # ---- IMU 消息 (IMUMeasurement) ----
             elif topic == TOPIC_ROBOT0_IMU:
@@ -455,6 +481,37 @@ def read_session(
     finally:
         fh.close()
 
+    # ---- 构建标定 dict（模拟 A2D 格式）----
+    calibration: dict[str, object] = {
+        "calibration_id": "umi_mcap_calibration",
+        "cameras": [],
+    }
+    calib_cameras: list[dict] = []
+    for robot_id in ["robot0", "robot1"]:
+        cd = cam_data.get(robot_id, {})
+        calib_raw = cd.get("calibration")
+        if calib_raw is None:
+            continue
+        K = calib_raw.get("K", [])
+        calib_cameras.append({
+            "camera_id": f"{robot_id}_camera0",
+            "model": "pinhole",
+            "intrinsics": {
+                "fx": K[0] if len(K) > 0 else None,
+                "fy": K[4] if len(K) > 4 else None,
+                "cx": K[2] if len(K) > 2 else None,
+                "cy": K[5] if len(K) > 5 else None,
+                "distortion_model": calib_raw.get("distortion_model", "unknown"),
+                "distortion_coeffs": list(calib_raw.get("D", [])),
+            },
+            "resolution": {
+                "width": calib_raw.get("width"),
+                "height": calib_raw.get("height"),
+            },
+            "source": "mcap_camera_calibration",
+        })
+    calibration["cameras"] = calib_cameras
+
     # ---- 构建 meta ----
     meta = {
         "device": "UMI",
@@ -463,6 +520,7 @@ def read_session(
         "width": width,
         "height": height,
         "imu_sample_rate": round(imu_rate, 1),
+        "calibration": calibration,
     }
 
     # ---- 构建 video_streams ----

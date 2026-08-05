@@ -379,9 +379,9 @@ def main():
               f"bbox={ann_s.bbox_format}")
 
     # ================================================================
-    # Step 2: QC 级联（Stage 3/5/6/9/11）
+    # Step 2: QC 级联（Stage 3/5/6/7/8/9/11）
     # ================================================================
-    step_header(2, "QC 级联 (Stage 3/5/6/9/11)")
+    step_header(2, "QC 级联 (Stage 3/5/6/7/8/9/11)")
 
     # 启用 QC 级联进度日志（INFO 级别）
     logging.getLogger("zpds.qc").setLevel(logging.INFO)
@@ -447,6 +447,11 @@ def main():
                 # Stage 11 去重：当前 session + 历史 inventory 的视频/文件路径
                 "video_paths": all_video_paths,
                 "file_paths": all_file_paths,
+                # Stage 7 机器人信号：TimeSeriesStream 对象（session 级，幂等守卫防重复）
+                "time_series_streams": session.time_series_streams,
+                # Stage 8 标定：标定数据 + 视频流（用于分辨率一致性校验）
+                "calibration": session.meta.get("calibration"),
+                "video_streams_for_calib": session.video_streams,
             }
             depth_s = session.depth_streams.get(stream_id)
             if depth_s is not None:

@@ -678,7 +678,11 @@ def read_session(
         # ---- 第一遍扫描：收集所有流数据 ----
         cam_data: dict[str, dict] = {}
         for cam_name in ["camera0", "camera1", "camera2"]:
-            cam_data[cam_name] = {"frames": [], "has_calib": False, "width": 0, "height": 0}
+            cam_data[cam_name] = {
+                "frames": [], "has_calib": False,
+                "width": 0, "height": 0,
+                "calibration": None,
+            }
 
         imu_rows: list[dict] = []
         depth_frames: list[dict] = []
@@ -708,13 +712,25 @@ def read_session(
                     })
                     break
 
-            # ---- 标定消息 (提取分辨率) ----
+            # ---- 标定消息 (提取分辨率 + 完整标定) ----
             for cam_name, calib_topic in CALIB_TOPICS.items():
                 if topic == calib_topic and cam_name in cam_data:
                     if not cam_data[cam_name]["has_calib"]:
                         cam_data[cam_name]["width"] = decoded.width
                         cam_data[cam_name]["height"] = decoded.height
                         cam_data[cam_name]["has_calib"] = True
+                        cam_data[cam_name]["calibration"] = {
+                            "width": decoded.width,
+                            "height": decoded.height,
+                            "frame_id": getattr(decoded, "frame_id", ""),
+                            "K": list(getattr(decoded, "K", [])),
+                            "D": list(getattr(decoded, "D", [])),
+                            "R": list(getattr(decoded, "R", [])),
+                            "P": list(getattr(decoded, "P", [])),
+                            "distortion_model": getattr(
+                                decoded, "distortion_model", "unknown",
+                            ),
+                        }
                     break
 
             # ---- IMU 消息 ----
@@ -782,6 +798,38 @@ def read_session(
     finally:
         fh.close()
 
+    # ---- 构建标定 dict（模拟 A2D 格式）----
+    calibration: dict[str, object] = {
+        "calibration_id": "dunjia_mcap_calibration",
+        "cameras": [],
+    }
+    calib_cameras: list[dict] = []
+    cam_name_map = {"camera0": "camera0", "camera1": "camera1", "camera2": "camera2"}
+    for cam_name in ["camera0", "camera1", "camera2"]:
+        cd = cam_data.get(cam_name, {})
+        calib_raw = cd.get("calibration")
+        if calib_raw is None:
+            continue
+        K = calib_raw.get("K", [])
+        calib_cameras.append({
+            "camera_id": cam_name_map.get(cam_name, cam_name),
+            "model": "pinhole",
+            "intrinsics": {
+                "fx": K[0] if len(K) > 0 else None,
+                "fy": K[4] if len(K) > 4 else None,
+                "cx": K[2] if len(K) > 2 else None,
+                "cy": K[5] if len(K) > 5 else None,
+                "distortion_model": calib_raw.get("distortion_model", "unknown"),
+                "distortion_coeffs": list(calib_raw.get("D", [])),
+            },
+            "resolution": {
+                "width": calib_raw.get("width"),
+                "height": calib_raw.get("height"),
+            },
+            "source": "mcap_camera_calibration",
+        })
+    calibration["cameras"] = calib_cameras
+
     # ---- 构建 meta ----
     meta = {
         "device": "Dunjia",
@@ -791,6 +839,7 @@ def read_session(
         "height": c0_height,
         "dropped_frames": camera0_dropped,
         "imu_sample_rate": round(imu_rate, 1),
+        "calibration": calibration,
     }
 
     # ---- 构建 video_streams ----
