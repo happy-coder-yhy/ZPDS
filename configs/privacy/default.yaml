@@ -11,12 +11,12 @@ privacy:
     backend: yolo11n_face
     # 相对路径按配置文件所在目录解析（configs/privacy/）→ ../../ 到项目根
     model_path: ../../zpds/privacy/models/yolov11n-face.pt
-    confidence_threshold: 0.5
+    confidence_threshold: 0.65  # 墨现验证：0.52-0.58 均为误检（无五官结构），宁缺毋滥
     method: blur           # blur / pixelate
     blur_ksize: 41
     blur_sigma: 15
     pixelate_blocks: 10
-    interval_frames: 1
+    interval_frames: 5     # 每 N 帧完整检测；中间帧 KLT 光流传播遮挡区域
     min_area_ratio: 0.002  # 小于画面 0.2% 的检测框忽略（防误检噪声）
 
   text:
@@ -25,7 +25,7 @@ privacy:
     yolo_text_model_path: ""   # 配置后启用 YOLO 文本区域提议；为空则 EasyOCR 全帧
     min_text_height_ratio: 0.01
     confidence_threshold: 0.3
-    interval_frames: 1
+    interval_frames: 10    # 每 N 帧完整检测；中间帧 KLT 光流传播遮挡区域
 
   pii:
     backend: llm           # 唯一后端；LLM 不可用时流程失败

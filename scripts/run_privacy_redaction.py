@@ -24,6 +24,9 @@ def main() -> int:
     parser.add_argument("--skip-faces", action="store_true", help="跳过人脸模糊")
     parser.add_argument("--skip-text", action="store_true", help="跳过文本检测与遮挡")
     parser.add_argument("--max-frames", type=int, default=None, help="最多处理帧数（调试用）")
+    parser.add_argument("--reset-frames", default=None,
+                        help="强制检测帧号（逗号分隔，如 100,250；"
+                             "场景边界等画面布局剧变点，命中时重置 KLT 传播缓存）")
     args = parser.parse_args()
 
     input_path = Path(args.input).expanduser().resolve()
@@ -67,6 +70,12 @@ def main() -> int:
     # ---- 运行 Pipeline ----
     from zpds.privacy.pipeline import PrivacyPipeline
 
+    reset_frames = None
+    if args.reset_frames:
+        reset_frames = {
+            int(v) for v in args.reset_frames.split(",") if v.strip()
+        }
+
     pipeline = PrivacyPipeline(
         input_path,
         config=pcfg,
@@ -74,6 +83,10 @@ def main() -> int:
         profile=args.profile,
         session_id=session_id,
         max_frames=args.max_frames,
+        # 稀疏检测：间隔从配置读取，中间帧 KLT 光流传播
+        face_interval=pcfg.face_interval_frames,
+        text_interval=pcfg.text_interval_frames,
+        reset_frames=reset_frames,
     )
 
     print(f"\n脱敏开始: {input_path}")
