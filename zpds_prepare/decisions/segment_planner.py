@@ -39,6 +39,7 @@ def plan_segments(
     session_end_ns: int,
     min_duration_ns: int = 1_000_000_000,
     max_duration_ns: int = 120_000_000_000,
+    no_split: bool = False,
 ) -> list[CandidateSegment]:
     """根据 Issues 生成候选 Segment。
 
@@ -54,11 +55,14 @@ def plan_segments(
         session_end_ns: 原始 Session 结束时间 (设备时钟)
         min_duration_ns: 最短有效 Segment（默认 1s）
         max_duration_ns: 最长有效 Segment（默认 120s）
+        no_split: True 时忽略所有 split 决策，产出单一连续 segment。
+                  split 问题仍记录在 issues_in_span 中，但不触发切分。
 
     Returns:
-        CandidateSegment 列表，按时间排序
+        CandidateSegment 列表，按时间排序；no_split=True 时最多返回一个。
     """
     # ---- 1. 分离 trim 和 split ----
+    # 注：no_split 降级已在调用方通过 downgrade_split_issues() 完成
     head_trims: list[QualityIssue] = []
     tail_trims: list[QualityIssue] = []
     splits: list[QualityIssue] = []
@@ -168,6 +172,29 @@ def plan_segments(
         ))
 
     return candidates
+
+
+def downgrade_split_issues(issues: list[QualityIssue]) -> int:
+    """将所有 split 决策降级为 keep_with_flag。
+
+    供 ``no_split`` 模式使用：调用方在 ``get_issue_summary()`` 和
+    ``plan_segments()`` 之前调用此函数，确保汇总和分段都反映降级后的状态。
+
+    Returns:
+        被降级的 issue 数量。
+    """
+    count = 0
+    for iss in issues:
+        if iss.decision == "split":
+            iss.decision = "keep_with_flag"
+            count += 1
+    if count:
+        import logging
+        _log = logging.getLogger(__name__)
+        _log.info(
+            "no_split 模式：%d 个 split 决策降级为 keep_with_flag", count,
+        )
+    return count
 
 
 def get_issue_summary(issues: list[QualityIssue]) -> dict:
