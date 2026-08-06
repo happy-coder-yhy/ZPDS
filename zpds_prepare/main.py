@@ -272,8 +272,13 @@ def _run_scene_analysis(
     *,
     video_path: str | Path,
     profile: str,
+    output_dir: Path,
 ) -> dict[str, object]:
-    """运行场景分割 + VLM 复核，返回 ScenePipelineRun 与 SceneConfig。"""
+    """运行场景分割 + VLM 复核，返回 ScenePipelineRun 与 SceneConfig。
+
+    运行结果落盘到 ``{output_dir}/scene/``（scene_proposals.parquet、
+    vlm_review.parquet、run_summary.json），与 hands 目录同层。
+    """
     from zpds.scene.config import SceneConfig
     from zpds.scene.pipeline import run_scene_pipeline
     from zpds.scene.vlm_review import (
@@ -281,6 +286,7 @@ def _run_scene_analysis(
         VLMUnavailableError,
         load_scene_labels,
     )
+    from zpds.scene.writer import write_scene_run
 
     scene_config_path = Path("configs/scene/default.yaml")
     profile_config_name = {
@@ -330,6 +336,25 @@ def _run_scene_analysis(
             config=scene_config,
             vlm_reviewer=None,
         )
+    if run is not None and not run.skipped:
+        scene_dir = Path(output_dir) / "scene"
+        scene_dir.mkdir(parents=True, exist_ok=True)
+        written = write_scene_run(
+            scene_dir,
+            input_path=video_path,
+            config_hash=run.config_hash,
+            profile=run.profile or profile,
+            fps=run.fps,
+            frame_count=run.frame_count,
+            start_ns=run.start_ns,
+            end_ns=run.end_ns,
+            scenes=run.scenes,
+            vlm_results=run.vlm_results,
+            review_queue=run.review_queue,
+            skipped=run.skipped,
+            skip_reason=run.skip_reason,
+        )
+        print(f"  → 场景报告: {written.summary_file}")
     return {"scene_pipeline_run": run, "scene_config": scene_config}
 
 
@@ -645,6 +670,7 @@ def main():
             scene_result = _run_scene_analysis(
                 video_path=pv.video_path,
                 profile=profile,
+                output_dir=output_dir,
             )
             scene_pipeline_run = scene_result["scene_pipeline_run"]
             scene_config = scene_result["scene_config"]
