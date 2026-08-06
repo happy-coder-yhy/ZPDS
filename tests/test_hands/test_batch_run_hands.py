@@ -86,6 +86,7 @@ def test_existing_complete_output_can_be_skipped(tmp_path: Path) -> None:
     )
     paths = batch_run_hands._output_paths(
         tmp_path / "hands",
+        segment_dir,
         segment_id,
         stream_id,
     )
@@ -135,6 +136,7 @@ def test_changed_max_frames_prevents_skip(tmp_path: Path) -> None:
     )
     paths = batch_run_hands._output_paths(
         tmp_path / "hands",
+        segment_dir,
         segment_id,
         stream_id,
     )

@@ -55,8 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-root",
-        default="output/hands",
-        help="批处理输出根目录",
+        default=None,
+        help=(
+            "批处理输出根目录；不提供时写入各 Segment 目录下的 "
+            "hands/<stream_id>/"
+        ),
     )
     parser.add_argument("--summary-output", help="批处理汇总 JSON 路径")
     parser.add_argument("--max-frames", type=int, help="每个 Segment 最多处理帧数")
@@ -161,11 +164,16 @@ def _expected_provenance(
 
 
 def _output_paths(
-    output_root: Path,
+    output_root: Path | None,
+    segment_dir: Path,
     segment_id: str,
     stream_id: str,
 ) -> dict[str, Path]:
-    directory = output_root / segment_id / stream_id
+    directory = (
+        output_root / segment_id / stream_id
+        if output_root is not None
+        else segment_dir / "hands" / stream_id
+    )
     return {
         "directory": directory,
         "parquet": directory / "hands_2d.parquet",
@@ -332,11 +340,19 @@ def run(args: argparse.Namespace) -> int:
     started_at = _utc_now()
     segments_root = Path(args.segments_root).expanduser().resolve()
     config_path = Path(args.config).expanduser().resolve()
-    output_root = Path(args.output_root).expanduser().resolve()
+    output_root = (
+        Path(args.output_root).expanduser().resolve()
+        if args.output_root
+        else None
+    )
     summary_path = (
         Path(args.summary_output).expanduser().resolve()
         if args.summary_output
-        else output_root / "batch_summary.json"
+        else (
+            output_root / "batch_summary.json"
+            if output_root is not None
+            else segments_root / "hands_batch_summary.json"
+        )
     )
     if args.max_frames is not None and args.max_frames <= 0:
         raise ValueError("--max-frames 必须大于 0")
@@ -397,7 +413,12 @@ def run(args: argparse.Namespace) -> int:
                 segment_dir,
                 args.stream_id,
             )
-            paths = _output_paths(output_root, segment_id, stream_id)
+            paths = _output_paths(
+                output_root,
+                segment_dir,
+                segment_id,
+                stream_id,
+            )
             item.update(
                 {
                     "segment_id": segment_id,

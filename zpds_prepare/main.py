@@ -221,7 +221,8 @@ def _run_hand_analysis(
         model_version=runtime.model_version,
         active_backend=runtime.active_backend,
     )
-    hand_dir = output_dir / "hands"
+    # 手部产物放入 Prepared Segment 目录下（对齐 batch 首个 segment 命名）。
+    hand_dir = _hands_output_dir(output_dir)
     hand_dir.mkdir(parents=True, exist_ok=True)
     hands_parquet = hand_dir / "hands_2d.parquet"
     write_hand_observations(
@@ -266,6 +267,17 @@ def _read_video_frames(
     if not frames:
         raise ValueError(f"视频没有可解码帧: {video_path}")
     return frames, fps
+
+
+def _hands_output_dir(output_dir: Path) -> Path:
+    """手部产物目录：对齐 batch 首个 segment（prepared_segments/r0001/seg_000001/hands）。"""
+    return (
+        output_dir
+        / "prepared_segments"
+        / "r0001"
+        / "seg_000001"
+        / "hands"
+    )
 
 
 def _run_scene_analysis(
