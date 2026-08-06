@@ -96,6 +96,7 @@ def transcode_rgb(
     index_frames: list[dict],
     target_fps: float = 30.0,
     frame_transform: Callable[[np.ndarray], np.ndarray] | None = None,
+    use_cache: bool = True,
 ) -> dict:
     """裁剪并转码 RGB 视频。
 
@@ -110,6 +111,9 @@ def transcode_rgb(
         index_frames: 帧索引列表 (每项含 seq, timestamp_ns)
         target_fps: 目标恒定帧率
         frame_transform: 可选逐帧确定性变换。提供时使用 OpenCV 写出路径。
+        use_cache: 帧数匹配时复用已有产物（默认 True）。
+            脱敏流程必须传 False——已有产物可能是上次脱敏的重编码版本
+            （二次编码会抹平人脸细节导致脱敏漏检）。
 
     Returns:
         {
@@ -138,7 +142,12 @@ def transcode_rgb(
 
     # 只复用可解码且帧数精确匹配 sample map 的缓存。
     output_file = Path(output_mp4)
-    if frame_transform is None and output_file.exists() and output_file.stat().st_size > 0:
+    if (
+        use_cache
+        and frame_transform is None
+        and output_file.exists()
+        and output_file.stat().st_size > 0
+    ):
         cached_probe = _probe_video(output_file)
         if (
             cached_probe is not None

@@ -27,6 +27,7 @@ from zpds.privacy.estimator_factory import (
     PrivacyEstimatorError,
     PrivacyEstimatorFactory,
 )
+from zpds.privacy.propagation import KLTRegionPropagator
 from zpds.privacy.redaction import FrameRedactor, TemporalSmoother
 from zpds.privacy.schemas import (
     PIIClassification,
@@ -83,10 +84,12 @@ class PrivacyPipeline:
         face_detector: FaceDetector | None = None,
         text_detector: TextDetector | None = None,
         pii_classifier: PIIClassifier | None = None,
-        # 间隔采样（每 N 帧检测一次，中间帧复用上次结果）
+        # 间隔采样（每 N 帧检测一次，中间帧用 KLT 光流传播检测结果）
         face_interval: int = 1,
         text_interval: int = 1,
         max_frames: int | None = None,
+        # 强制检测帧（场景边界等画面布局剧变点）：检测 + 重置传播缓存
+        reset_frames: set[int] | None = None,
     ) -> None:
         self._video_path = Path(video_path)
         if not self._video_path.is_file():
@@ -96,6 +99,7 @@ class PrivacyPipeline:
         self._policy = policy or PrivacyBackendPolicy.from_profile(profile or "guida_ego")
         self._session_id = session_id or self._video_path.stem
         self._max_frames = max_frames
+        self._reset_frames = set(reset_frames or ())
 
         # 后端
         factory = PrivacyEstimatorFactory(self._config, self._policy)
@@ -173,9 +177,9 @@ class PrivacyPipeline:
         frames_processed = 0
         started_at = time.perf_counter()
 
-        # 缓存：间隔帧之间复用上次检测结果
-        cached_faces: list = []
-        cached_texts: list = []
+        # KLT 传播器：检测帧之间逐帧传播遮挡区域（惰性创建，需要帧尺寸）
+        propagator: KLTRegionPropagator | None = None
+        prev_gray: np.ndarray | None = None
 
         try:
             frame_index = 0
@@ -189,60 +193,86 @@ class PrivacyPipeline:
                 timestamp_ns = int(frame_index / fps * 1_000_000_000)
                 t0 = time.perf_counter()
 
-                # ---- 人脸检测（间隔采样） ----
+                if propagator is None:
+                    h, w = frame.shape[:2]
+                    propagator = KLTRegionPropagator(w, h)
+                is_force = frame_index in self._reset_frames
+
+                # ---- 传播：把上一帧的 track 跟到本帧（中间帧不跑模型） ----
+                if is_force:
+                    propagator.reset()  # 场景边界：布局剧变，旧 track 作废
+                    prev_gray = None
+                if propagator.track_count:
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    if prev_gray is not None:
+                        propagator.step(prev_gray, gray)
+                    prev_gray = gray
+                else:
+                    prev_gray = None
+
+                # ---- 人脸检测（间隔采样 + 强制帧） ----
                 face_ms = 0.0
-                faces: list = []
-                if self._face_detector is not None and frame_index % self._face_interval == 0:
+                if self._face_detector is not None and (
+                    frame_index % self._face_interval == 0 or is_force
+                ):
                     t_face = time.perf_counter()
                     faces = self._face_detector.detect(frame, frame_index, timestamp_ns)
                     face_ms = (time.perf_counter() - t_face) * 1000
-                    cached_faces = faces
-                elif self._face_detector is not None:
-                    faces = cached_faces
+                    propagator.sync_faces(
+                        faces,
+                        face_method=self._config.face_method,  # type: ignore[arg-type]
+                    )
 
-                # ---- 文本检测（间隔采样） ----
+                # ---- 文本检测（间隔采样 + 强制帧） ----
                 text_ms = 0.0
-                texts: list = []
-                if self._text_detector is not None and frame_index % self._text_interval == 0:
-                    t_text = time.perf_counter()
-                    texts = self._text_detector.detect(frame, frame_index, timestamp_ns)
-                    text_ms = (time.perf_counter() - t_text) * 1000
-                    cached_texts = texts
-                elif self._text_detector is not None:
-                    texts = cached_texts
-
-                # ---- PII 分类（LLM，按 text hash 缓存） ----
                 pii_ms = 0.0
                 pii_results: list[PIIClassification] = []
                 llm_available = False
-                if texts and self._pii_classifier is not None:
-                    t_pii = time.perf_counter()
-                    try:
-                        pii_results = self._pii_classifier.classify(list(texts))
-                        llm_available = True
-                    except Exception:
-                        llm_available = False
-                    pii_ms = (time.perf_counter() - t_pii) * 1000
+                if self._text_detector is not None and (
+                    frame_index % self._text_interval == 0 or is_force
+                ):
+                    t_text = time.perf_counter()
+                    texts = self._text_detector.detect(frame, frame_index, timestamp_ns)
+                    text_ms = (time.perf_counter() - t_text) * 1000
 
-                # ---- 生成遮挡区域 ----
-                regions: list[RedactionRegion] = []
-                for f in faces:
-                    regions.append(RedactionRegion(
-                        kind="face",
-                        bbox_xyxy=f.bbox_xyxy,
-                        method=self._config.face_method,  # type: ignore[arg-type]
-                        category="face",
-                        confidence=f.confidence,
-                    ))
-                for p in pii_results:
-                    if p.decision == "mask":
-                        regions.append(RedactionRegion(
-                            kind="text",
-                            bbox_xyxy=p.text.bbox_xyxy,
-                            method=self._config.redaction_text_method,  # type: ignore[arg-type]
-                            category=p.category,
-                            confidence=p.confidence,
-                        ))
+                    # ---- PII 分类（LLM，按 text hash 缓存；仅检测帧） ----
+                    if texts and self._pii_classifier is not None:
+                        t_pii = time.perf_counter()
+                        try:
+                            pii_results = self._pii_classifier.classify(list(texts))
+                            llm_available = True
+                        except Exception:
+                            llm_available = False
+                        pii_ms = (time.perf_counter() - t_pii) * 1000
+
+                    # 仅 mask 的文本进入传播（keep 的不遮挡）
+                    mask_texts = [
+                        p.text for p in pii_results if p.decision == "mask"
+                    ]
+                    if mask_texts:
+                        propagator.sync_texts(
+                            mask_texts,
+                            text_method=self._config.redaction_text_method,  # type: ignore[arg-type]
+                            categories={
+                                id(p.text): p.category
+                                for p in pii_results
+                                if p.decision == "mask"
+                            },
+                        )
+
+                # 检测/同步后若新增 track 而本帧 gray 未记录（首帧/reset 帧），
+                # 以本帧 gray 作为 KLT 传播链起点（points 必须与 prev 帧对齐）
+                if propagator.track_count and prev_gray is None:
+                    prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+                # ---- 当前帧的遮挡信息（检测帧与中间帧一致，来自传播器） ----
+                faces = propagator.faces(
+                    frame_index, timestamp_ns, self._runtime.face_backend
+                )
+                texts = propagator.texts(
+                    frame_index, timestamp_ns, self._runtime.text_backend
+                )
+                regions = propagator.regions()
 
                 # 跨帧平滑
                 face_regions = [r for r in regions if r.kind == "face"]
@@ -281,6 +311,7 @@ class PrivacyPipeline:
                 )
                 stat.add(record)
                 frames_processed += 1
+                frame_index += 1
                 yield record
 
         finally:

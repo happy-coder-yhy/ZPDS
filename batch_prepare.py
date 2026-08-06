@@ -242,12 +242,17 @@ def _redact_segment_videos(
     video_results: list[dict],
     output_dir: Path,
     profile: str,
+    reset_frames: set[int] | None = None,
 ) -> int:
     """对转码后的 segment 视频做隐私脱敏，原地覆盖 ``output_mp4``。
 
     按 Profile 路由（face/text 适用性）：
     - 两者都不适用（如遁甲/UMI/A2D 无操作者人脸时仍可能拍文本，text 默认 applicable）
     - 人脸模糊 + 文本遮挡后覆盖原转码产物，脱敏版即训练用产物
+
+    Args:
+        reset_frames: 相对本视频的强制检测帧号（场景边界等布局剧变点），
+            命中时重新完整检测并重置 KLT 传播缓存。
 
     Returns:
         完成脱敏的视频流数量。
@@ -294,6 +299,10 @@ def _redact_segment_videos(
             policy=policy,
             profile=profile,
             session_id=stream_id,
+            # 稀疏检测：检测帧之间用 KLT 光流传播遮挡区域
+            face_interval=pcfg.face_interval_frames,
+            text_interval=pcfg.text_interval_frames,
+            reset_frames=reset_frames,
         )
         records = pipeline.run_to_list()
         manifest = pipeline.build_manifest()
@@ -345,6 +354,7 @@ def generate_segment(
     experience_dir: str | None = None,
     experience_version: str | None = None,
     privacy_enabled: bool = False,
+    privacy_reset_frames: set[int] | None = None,
 ) -> dict:
     """为单个候选区间生成完整 Prepared Segment。
 
@@ -540,6 +550,8 @@ def generate_segment(
             index_frames=vs.index_frames,
             target_fps=target_fps,
             frame_transform=undistortion.frame_transform,
+            # 脱敏必须基于干净转码（已有产物可能是上次脱敏的重编码版）
+            use_cache=not privacy_enabled,
         )
         vr["stream_id"] = vm["stream_id"]
         vr["sample_map_uri"] = vm["sample_map_uri"]
@@ -557,6 +569,7 @@ def generate_segment(
             video_results,
             Path(output_dir),
             profile,
+            reset_frames=privacy_reset_frames,
         )
         print(f"  隐私脱敏: {redacted_count} 个视频流")
 
@@ -735,6 +748,38 @@ def main():
         print(f"错误: 候选文件不存在: {candidates_path}")
         print(f"请先运行: python -m zpds_prepare.main \"{dataset_path}\" --profile {profile}")
         return 1
+
+    # ---- 隐私脱敏：场景边界（scene_proposals.parquet）作为强制检测帧 ----
+    # 场景切换后画面布局剧变，KLT 传播必然失效，在这些帧重新完整检测。
+    # 注意：scene run 的时间戳是"帧号/fps 重算"的（run_summary 中 start_ns=0），
+    # 与 candidates 的原始 MKV 时间戳不同轴 → 边界直接换算为完整视频帧号。
+    scene_boundary_frames: list[int] = []
+    if args.with_privacy:
+        scene_dir = output_root.parent / "scene"
+        scene_file = scene_dir / "scene_proposals.parquet"
+        if scene_file.is_file():
+            try:
+                scene_fps = 30.0
+                summary_file = scene_dir / "run_summary.json"
+                if summary_file.is_file():
+                    scene_fps = float(
+                        json.loads(
+                            summary_file.read_text(encoding="utf-8")
+                        ).get("fps", 30.0)
+                    )
+                scene_df = pd.read_parquet(str(scene_file))
+                if not scene_df.empty and "start_ns" in scene_df.columns:
+                    scene_boundary_frames = sorted(
+                        int(round(v / 1_000_000_000 * scene_fps))
+                        for v in scene_df["start_ns"].tolist()
+                    )
+                    print(f"场景边界: {len(scene_boundary_frames)} 个帧号"
+                          f"（脱敏强制检测帧，来自 {scene_file.name}）")
+            except Exception as exc:  # noqa: BLE001 - 边界读取失败不阻断脱敏
+                print(f"[warn] 读取场景边界失败，脱敏退化为纯间隔采样: {exc}")
+        else:
+            print("[warn] 未找到场景产物 (scene_proposals.parquet)，"
+                  "脱敏使用纯间隔采样")
 
     with open(candidates_path, "r", encoding="utf-8") as f:
         candidates_doc = json.load(f)
@@ -1037,6 +1082,25 @@ def main():
 
         t0 = time.time()
 
+        # 场景边界帧号 → 相对本 segment 的帧号（只保留区间内的）
+        reset_frames: set[int] = set()
+        if scene_boundary_frames:
+            target_fps = float(cfg["output"]["target_fps"])
+            # candidate 起点对应的完整视频帧：candidate 时间戳是原始
+            # MKV 时间轴，session 首帧时间戳即完整视频第 0 帧
+            first_ts = 0
+            if hasattr(session, "primary_video"):
+                pv_local = session.primary_video
+                if pv_local is not None and getattr(pv_local, "index_frames", None):
+                    first_ts = int(pv_local.index_frames[0]["timestamp_ns"])
+            cand_start_frame = round(
+                (source_start - first_ts) / 1_000_000_000 * target_fps
+            ) if first_ts else 0
+            for boundary_frame in scene_boundary_frames:
+                rel = int(boundary_frame) - cand_start_frame
+                if 0 <= rel <= duration_s * target_fps + 1:
+                    reset_frames.add(rel)
+
         try:
             result = generate_segment(
                 dataset_path=dataset_path,
@@ -1055,6 +1119,7 @@ def main():
                 experience_dir=args.experience_dir,
                 experience_version=args.experience_version,
                 privacy_enabled=args.with_privacy,
+                privacy_reset_frames=reset_frames if reset_frames else None,
             )
             elapsed = time.time() - t0
             result["elapsed_s"] = round(elapsed, 1)
