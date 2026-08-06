@@ -299,6 +299,7 @@ def test_batch_rejects_incomplete_wilor_frame_statistics(
     segment_dir.mkdir()
     paths = batch_run_hands._output_paths(
         tmp_path / "hands",
+        segment_dir,
         "seg_000001",
         "ego_rgb",
     )

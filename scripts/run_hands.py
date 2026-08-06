@@ -114,16 +114,11 @@ def _read_segment_json(segment_dir: Path) -> dict[str, Any]:
 
 
 def _default_output_path(
-    segment_id: str,
+    segment_dir: Path,
     video_stream_id: str,
 ) -> Path:
-    return (
-        Path("output")
-        / "hands"
-        / segment_id
-        / video_stream_id
-        / "hands_2d.parquet"
-    )
+    """手部产物写入 Prepared Segment 目录下的 hands/<stream_id>/。"""
+    return segment_dir / "hands" / video_stream_id / "hands_2d.parquet"
 
 
 def _image_dimensions(
@@ -258,7 +253,7 @@ def run(
             Path(args.output).expanduser()
             if args.output
             else _default_output_path(
-                reader.segment_id,
+                segment_dir,
                 reader.video_stream_id,
             )
         ).resolve()
