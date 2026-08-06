@@ -53,7 +53,7 @@ stage3_visual:
     p95_threshold: 245         # P95 强度阈值
     p99_threshold: 250         # P99 强度阈值
     consecutive_min: 3         # 连续过曝最少帧数
-    sample_interval: 1         # 采样间隔
+    sample_interval: 1
 
   # D14 模糊检测
   blur:
@@ -61,6 +61,7 @@ stage3_visual:
     laplacian_threshold: 80.0  # Laplacian 方差阈值 (1280×720)
     consecutive_min: 3         # 连续模糊最少帧数
     sample_interval: 1
+    quarantine_duration_s: 1.0  # 模糊段达此时长(s) → split 切分；更短 → keep_with_flag 打标
 
 stage4_video_timing:
   vfr_tolerance: 0.01       # VFR 容忍度

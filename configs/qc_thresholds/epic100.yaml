@@ -58,6 +58,7 @@ stage3_visual:
     laplacian_threshold: 100.0
     consecutive_min: 3
     sample_interval: 1
+    quarantine_duration_s: 1.0  # 模糊段达此时长(s) → split 切分；更短 → keep_with_flag 打标
 
 stage5_depth:
   # EPIC 无深度流
