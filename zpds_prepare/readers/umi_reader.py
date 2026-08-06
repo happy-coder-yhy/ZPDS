@@ -21,6 +21,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pandas as pd
 from mcap.reader import make_reader
@@ -246,6 +247,21 @@ def _default_cache_dir(dataset_path: str) -> Path:
     return Path.cwd() / "output" / ".cache" / "umi" / (
         f"{source.stem}-{cache_key}"
     )
+
+
+def _probe_video_size(video_path: str | Path) -> tuple[int, int] | None:
+    """用 OpenCV 实测视频帧宽高；探测失败返回 None。"""
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        return None
+    try:
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        capture.release()
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
 
 
 def get_video_for_topic(
@@ -544,6 +560,19 @@ def read_session(
             topic,
             cache_dir=cache_dir,
         )
+        # 视频流分辨率以实测编码为准；标定消息的 width/height 可能过期
+        # （如标定 640x480、实际 H264 1600x1300），保留在 calibration dict 中比对。
+        measured = _probe_video_size(video_path)
+        stream_width = (
+            measured[0]
+            if measured is not None
+            else cam_data[robot_id]["width"]
+        )
+        stream_height = (
+            measured[1]
+            if measured is not None
+            else cam_data[robot_id]["height"]
+        )
 
         video_streams[stream_id] = VideoStream(
             stream_id=stream_id,
@@ -551,8 +580,8 @@ def read_session(
             index_frames=frames,
             video_path=video_path,
             fps=round(cam_fps, 1),
-            width=cam_data[robot_id]["width"],
-            height=cam_data[robot_id]["height"],
+            width=stream_width,
+            height=stream_height,
             frame_count=len(frames),
         )
 

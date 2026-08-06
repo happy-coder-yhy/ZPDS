@@ -14,4 +14,6 @@ class JianzhiUmiProfile(BaseProfile):
                 "human_hand": "not_applicable",
                 "end_effector": "applicable",
             },
+            # 双端 UMI 以 robot0 端相机为主视角
+            primary_stream_id="robot0_camera0",
         )

@@ -31,6 +31,7 @@ class A2DRobotProfile(BaseProfile):
                 "human_hand": "not_applicable",
                 "end_effector": "applicable",
             },
+            primary_stream_id="head_rgb",
         )
 
     @property
