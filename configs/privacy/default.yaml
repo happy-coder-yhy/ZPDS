@@ -9,7 +9,8 @@ privacy:
 
   face:
     backend: yolo11n_face
-    model_path: models/privacy/yolov11n-face.pt
+    # 相对路径按配置文件所在目录解析（configs/privacy/）→ ../../ 到项目根
+    model_path: ../../zpds/privacy/models/yolov11n-face.pt
     confidence_threshold: 0.5
     method: blur           # blur / pixelate
     blur_ksize: 41

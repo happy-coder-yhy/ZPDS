@@ -285,6 +285,24 @@ def build_segment_json(
         }
         if vr.get("preview_uri"):
             entry["preview_uri"] = vr["preview_uri"]
+        if vr.get("redacted"):
+            entry["redaction"] = {
+                "status": "applied",
+                "operation": (
+                    "face_blur_text_redact"
+                    if vr.get("redaction_face") and vr.get("redaction_text")
+                    else "face_blur"
+                    if vr.get("redaction_face")
+                    else "text_redact"
+                ),
+                "manifest_uri": vr.get("redaction_manifest_uri", ""),
+                "stats": vr.get("redaction_stats", {}),
+            }
+        elif vr.get("redaction_skipped"):
+            entry["redaction"] = {
+                "status": "skipped",
+                "reason": vr.get("redaction_skip_reason", ""),
+            }
         streams.append(entry)
 
     # Guida 等按原始频率无损写出的深度流

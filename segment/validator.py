@@ -303,6 +303,9 @@ def validate_depth_streams(seg_dir: Path, segment: dict) -> dict:
             if image is None:
                 errors.append(f"[{stream_id}] Depth PNG unreadable: {path}")
                 continue
+            # 部分 opencv 版本/读取路径返回 (H, W, 1)，单通道合法
+            if image.ndim == 3 and image.shape[-1] == 1:
+                image = image[:, :, 0]
             if image.ndim != 2:
                 errors.append(
                     f"[{stream_id}] Depth PNG must be single-channel: "

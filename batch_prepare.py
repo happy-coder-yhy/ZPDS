@@ -23,6 +23,7 @@ ZPDS 批量 Prepared Segment 生成。
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -82,6 +83,25 @@ REVISION = "r0001"
 def load_config(config_path: str = CONFIG_PATH) -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _load_dotenv(path: str | Path = ".env") -> None:
+    """把 .env 的 KEY=VALUE 注入进程环境；已存在的变量不覆盖。
+
+    与 zpds_prepare.main 的 _load_dotenv 保持一致（LLM API key 等）。
+    """
+    env_path = Path(path).expanduser()
+    if not env_path.is_file():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def _sha256_manifest(paths: list[Path], root: Path) -> str:
@@ -165,6 +185,148 @@ def _build_guida_source_assets(dataset_path: str, session) -> list[dict]:
     return assets
 
 
+def _overlay_redactions(
+    records,
+    video_path: Path,
+    *,
+    face_method: str = "blur",
+    text_method: str = "black_rect",
+    blur_ksize: int = 41,
+    blur_sigma: int = 15,
+) -> None:
+    """按逐帧遮挡区域重渲染视频并原地覆盖（等长，无丢帧）。
+
+    ``zpds.privacy.writer.write_redacted_video`` 会跳过无遮挡帧（丢帧）
+    且要求首帧存在遮挡区域，不适合 segment 转码产物的等长覆盖。
+    这里重读原视频逐帧渲染：无区域的帧写原帧，保证帧数与时序一致。
+    """
+    import cv2
+
+    from zpds.privacy.redaction import FrameRedactor
+
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise ValueError(f"无法打开视频: {video_path}")
+    fps = float(capture.get(cv2.CAP_PROP_FPS)) or 30.0
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    tmp_path = video_path.with_name(f"{video_path.stem}.redacting.mp4")
+
+    # OpenH264 不可用（CLAUDE.md），直接用 mp4v；avc1 在部分 opencv 版本
+    # 构造成功但写帧时才失败，不能用 isOpened() 判断，直接 mp4v 最稳。
+    writer = cv2.VideoWriter(
+        str(tmp_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
+    )
+    redactor = FrameRedactor(
+        face_method=face_method,
+        text_method=text_method,
+        blur_ksize=blur_ksize,
+        blur_sigma=blur_sigma,
+    )
+    try:
+        for record in records:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            if record.regions:
+                frame = redactor.apply(frame, record.regions)
+            writer.write(frame)
+    finally:
+        capture.release()
+        writer.release()
+    os.replace(tmp_path, video_path)
+
+
+def _redact_segment_videos(
+    video_meta: list[dict],
+    video_results: list[dict],
+    output_dir: Path,
+    profile: str,
+) -> int:
+    """对转码后的 segment 视频做隐私脱敏，原地覆盖 ``output_mp4``。
+
+    按 Profile 路由（face/text 适用性）：
+    - 两者都不适用（如遁甲/UMI/A2D 无操作者人脸时仍可能拍文本，text 默认 applicable）
+    - 人脸模糊 + 文本遮挡后覆盖原转码产物，脱敏版即训练用产物
+
+    Returns:
+        完成脱敏的视频流数量。
+    """
+    from zpds.privacy.backend_router import PrivacyBackendPolicy
+    from zpds.privacy.config import PrivacyConfig
+    from zpds.privacy.pipeline import PrivacyPipeline
+    from zpds.privacy.writer import write_manifest
+
+    policy = PrivacyBackendPolicy.from_profile(profile)
+    if not policy.face_enabled and not policy.text_enabled:
+        for vr in video_results:
+            vr["redaction_skipped"] = True
+            vr["redaction_skip_reason"] = (
+                f"profile {profile}: face={policy.face_applicability}, "
+                f"text={policy.text_applicability}"
+            )
+        return 0
+
+    # 项目根绝对路径（batch_prepare 可能从任意 cwd 启动）
+    config_path = Path(__file__).resolve().parent / "configs/privacy/default.yaml"
+    try:
+        pcfg = PrivacyConfig.load(config_path)
+    except FileNotFoundError:
+        print(f"[warn] 隐私配置不存在 ({config_path})，使用默认值")
+        pcfg = PrivacyConfig.defaults()
+
+    redacted_count = 0
+    for vm, vr in zip(video_meta, video_results):
+        stream_id = vr["stream_id"]
+        mp4_path = Path(vm["output_mp4"])
+        if not mp4_path.is_file():
+            vr["redaction_skipped"] = True
+            vr["redaction_skip_reason"] = f"转码产物不存在: {mp4_path}"
+            continue
+        print(
+            f"  脱敏 [{stream_id}]: "
+            f"人脸={'启用' if policy.face_enabled else '跳过'} "
+            f"文本={'启用' if policy.text_enabled else '跳过'}"
+        )
+        pipeline = PrivacyPipeline(
+            mp4_path,
+            config=pcfg,
+            policy=policy,
+            profile=profile,
+            session_id=stream_id,
+        )
+        records = pipeline.run_to_list()
+        manifest = pipeline.build_manifest()
+
+        # 原地覆盖：脱敏视频即为训练用产物（等长重渲染，无丢帧）
+        _overlay_redactions(
+            records,
+            mp4_path,
+            face_method=pcfg.face_method,
+            text_method=pcfg.redaction_text_method,
+            blur_ksize=pcfg.face_blur_ksize,
+            blur_sigma=pcfg.face_blur_sigma,
+        )
+        manifest_path = mp4_path.parent / f"{stream_id}_redaction_manifest.parquet"
+        write_manifest(records, manifest, manifest_path)
+
+        vr["redacted"] = True
+        vr["redaction_manifest_uri"] = f"data/{stream_id}_redaction_manifest.parquet"
+        vr["redaction_face"] = policy.face_enabled
+        vr["redaction_text"] = policy.text_enabled
+        vr["redaction_stats"] = {
+            "frames_processed": manifest.total_frames,
+            "frames_with_faces": manifest.frames_with_faces,
+            "frames_with_text": manifest.frames_with_text,
+            "face_regions": manifest.total_face_regions,
+            "text_regions": manifest.total_text_regions,
+            "pii_categories_found": list(manifest.pii_categories_found),
+            "llm_available": manifest.llm_available,
+        }
+        redacted_count += 1
+    return redacted_count
+
+
 def generate_segment(
     dataset_path: str,
     source_start_ns: int,
@@ -182,6 +344,7 @@ def generate_segment(
     depth_npz_path: str | None = None,
     experience_dir: str | None = None,
     experience_version: str | None = None,
+    privacy_enabled: bool = False,
 ) -> dict:
     """为单个候选区间生成完整 Prepared Segment。
 
@@ -384,6 +547,19 @@ def generate_segment(
         vr["undistortion"] = undistortion_detail
         video_results.append(vr)
 
+    # ---- ⑥.8 隐私脱敏：对转码产物原地脱敏（人脸模糊 + 文本遮挡） ----
+    # 训练集只出脱敏版；QC 在 main.py 阶段用原始视频判断，不受影响。
+    # 脱敏先于预览执行，确保 preview 也是脱敏后的画面。
+    redacted_count = 0
+    if privacy_enabled:
+        redacted_count = _redact_segment_videos(
+            video_meta,
+            video_results,
+            Path(output_dir),
+            profile,
+        )
+        print(f"  隐私脱敏: {redacted_count} 个视频流")
+
     # ---- ⑥.5 前端预览压缩：保留原视频，另存 <stream_id>_preview.mp4 ----
     preview_cfg = cfg.get("preview", {})
     preview_count = 0
@@ -509,6 +685,12 @@ def main():
         help="数据源 profile (默认: guida)",
     )
     parser.add_argument(
+        "--with-privacy",
+        action="store_true",
+        help="对转码后的视频执行隐私脱敏（人脸模糊 + 文本遮挡），"
+             "训练集只出脱敏版",
+    )
+    parser.add_argument(
         "--experience-dir",
         default=None,
         help="可选：将已声明的 Prepared 标注导入此 Experience 目录",
@@ -520,6 +702,8 @@ def main():
     )
     args = parser.parse_args()
 
+    # 项目根绝对路径（batch_prepare 可能从任意 cwd 启动）
+    _load_dotenv(Path(__file__).resolve().parent / ".env")
     profile = args.profile
 
     # ---- 加载配置和候选方案 ----
@@ -870,6 +1054,7 @@ def main():
                 source_assets=source_assets,
                 experience_dir=args.experience_dir,
                 experience_version=args.experience_version,
+                privacy_enabled=args.with_privacy,
             )
             elapsed = time.time() - t0
             result["elapsed_s"] = round(elapsed, 1)
