@@ -12,6 +12,24 @@ from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+_PROFILE_REGISTRY_NAMES = {
+    "guida": "guida_ego",
+    "dunjia": "dunjia_ego",
+    "umi": "jianzhi_umi",
+    "epic": "epic100",
+    "a2d": "a2d_robot",
+}
+
+
+def _primary_stream_id(profile: str) -> str | None:
+    """按 profile 声明的主相机 stream_id；无声明（单相机）返回 None。"""
+    from zpds.profiles.registry import get
+
+    registered = get(_PROFILE_REGISTRY_NAMES.get(profile, profile))
+    if registered is None:
+        return None
+    return registered.primary_stream_id
+
 
 def sha256_hex(path: str) -> str:
     """计算文件 SHA-256。"""
@@ -249,6 +267,7 @@ def build_segment_json(
     streams: list[dict] = []
 
     # RGB 视频流 — 每个 video_result 生成一个 stream entry
+    primary_stream_id = _primary_stream_id(profile)
     for vr in (video_results or []):
         stream_id = vr["stream_id"]
         entry = {
@@ -283,6 +302,10 @@ def build_segment_json(
                 ),
             },
         }
+        if primary_stream_id is not None:
+            entry["is_primary"] = (
+                "true" if stream_id == primary_stream_id else "false"
+            )
         if vr.get("preview_uri"):
             entry["preview_uri"] = vr["preview_uri"]
         if vr.get("redacted"):

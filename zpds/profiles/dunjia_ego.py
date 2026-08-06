@@ -14,4 +14,5 @@ class DunjiaEgoProfile(BaseProfile):
                 "human_hand": "not_applicable",
                 "end_effector": "applicable",
             },
+            primary_stream_id="camera0",
         )

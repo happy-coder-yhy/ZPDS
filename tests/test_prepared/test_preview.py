@@ -135,3 +135,51 @@ class TestSegmentJsonPreviewUri:
             source_assets=[],
         )
         assert "preview_uri" not in segment["streams"][0]
+
+
+class TestSegmentJsonIsPrimary:
+    def _segment(self, profile: str, stream_ids: list[str]) -> dict:
+        span = {
+            "source_start_ns": 0,
+            "source_end_ns": 1_000_000_000,
+            "duration_s": 1.0,
+            "total_frames_in_span": 30,
+            "reason": {"start": "test", "end": "test"},
+            "trimmed_head_frames": 0,
+            "trimmed_tail_frames": 0,
+        }
+        return build_segment_json(
+            dataset_path=".",
+            span=span,
+            video_results=[
+                {
+                    "stream_id": stream_id,
+                    "width": 1280,
+                    "height": 720,
+                    "output_fps": 30.0,
+                }
+                for stream_id in stream_ids
+            ],
+            source_assets=[],
+            profile=profile,
+        )
+
+    def test_dunjia_marks_camera0_primary(self) -> None:
+        segment = self._segment("dunjia", ["camera0", "camera1", "camera2"])
+        by_id = {stream["stream_id"]: stream for stream in segment["streams"]}
+        assert by_id["camera0"]["is_primary"] == "true"
+        assert by_id["camera1"]["is_primary"] == "false"
+        assert by_id["camera2"]["is_primary"] == "false"
+
+    def test_single_camera_omits_is_primary(self) -> None:
+        segment = self._segment("guida", ["ego_rgb"])
+        assert "is_primary" not in segment["streams"][0]
+
+    def test_umi_bimanual_marks_robot0_primary(self) -> None:
+        segment = self._segment(
+            "umi",
+            ["robot0_camera0", "robot1_camera0"],
+        )
+        by_id = {stream["stream_id"]: stream for stream in segment["streams"]}
+        assert by_id["robot0_camera0"]["is_primary"] == "true"
+        assert by_id["robot1_camera0"]["is_primary"] == "false"
