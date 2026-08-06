@@ -36,7 +36,17 @@ def detect_timeseries_structure(
     issues: list[QualityIssue] = []
     stream_id = ts_stream.stream_id
     timestamps = np.array(ts_stream.timestamps_ns, dtype=np.int64)
-    rows = np.asarray(ts_stream.rows, dtype=np.float64)
+    if hasattr(ts_stream.rows, "select_dtypes"):
+        # UMI 等时序行含 log_time/publish_time 等非数值列，
+        # 数值检查只取数值列，行数保持原样。
+        numeric_frame = ts_stream.rows.select_dtypes(include=[np.number])
+        rows = (
+            numeric_frame.to_numpy(dtype=np.float64)
+            if not numeric_frame.empty
+            else np.zeros((len(ts_stream.rows), 0), dtype=np.float64)
+        )
+    else:
+        rows = np.asarray(ts_stream.rows, dtype=np.float64)
     expected_rate = ts_stream.expected_rate_hz
     expected_interval_ns = int(1e9 / expected_rate) if expected_rate else None
 

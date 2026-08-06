@@ -37,7 +37,15 @@ def detect_action_quality(
     issues: list[QualityIssue] = []
     stream_id = ts_stream.stream_id
     timestamps = np.array(ts_stream.timestamps_ns, dtype=np.int64)
-    rows = np.asarray(ts_stream.rows, dtype=np.float64)
+    if hasattr(ts_stream.rows, "select_dtypes"):
+        numeric_frame = ts_stream.rows.select_dtypes(include=[np.number])
+        rows = (
+            numeric_frame.to_numpy(dtype=np.float64)
+            if not numeric_frame.empty
+            else np.zeros((len(ts_stream.rows), 0), dtype=np.float64)
+        )
+    else:
+        rows = np.asarray(ts_stream.rows, dtype=np.float64)
     fields = ts_stream.fields
     num_samples = len(timestamps)
     num_fields = ts_stream.num_fields
@@ -119,7 +127,6 @@ def detect_action_quality(
             pass
         else:
             finite_pos = pos_cols[finite_mask]
-            finite_ts = timestamps[finite_mask]
             if len(finite_pos) >= 2:
                 # 检查是否存在连续不变的指令
                 changes = np.any(np.abs(np.diff(finite_pos, axis=0)) > 0.0, axis=1)

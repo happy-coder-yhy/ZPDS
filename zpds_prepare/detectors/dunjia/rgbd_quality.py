@@ -291,7 +291,10 @@ def _sample_depth_frames(
             ts = depth_ts[frame_idx] if frame_idx < len(depth_ts) else 0
             total = img.size
             zero = int(np.sum(img == 0))
-            invalid = int(np.sum(_is_likely_invalid(v, np.iinfo(img.dtype).max) for v in [0, 65535]))
+            invalid = sum(
+                _is_likely_invalid(v, np.iinfo(img.dtype).max)
+                for v in [0, 65535]
+            )
 
             report.sampled_frames.append(
                 DepthFrameSample(

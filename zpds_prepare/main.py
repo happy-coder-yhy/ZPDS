@@ -15,13 +15,20 @@ ZPDS Prepare — 主入口。
 
 import argparse
 import logging
+import os
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
+import cv2
 import numpy as np
 import yaml
 
+from zpds.hands.schemas import PreparedFrame
+from zpds.qc import QCCascade
+from zpds.qc.cascade import CascadeDistribution
+from zpds_prepare.decisions.issue_model import QualityIssue
 from zpds_prepare.decisions.segment_planner import (
     downgrade_split_issues,
     get_issue_summary,
@@ -35,9 +42,6 @@ from zpds_prepare.detectors.imu_gap import detect_imu_gaps
 from zpds_prepare.detectors.timestamp_gap import detect_timestamp_gaps
 from zpds_prepare.writers.candidate_writer import write_segment_candidates
 from zpds_prepare.writers.quality_writer import write_quality_issues
-from zpds.qc import QCCascade
-from zpds.qc.cascade import CascadeDistribution
-from zpds_prepare.decisions.issue_model import QualityIssue
 
 
 def _decisions_to_issues(decisions: list, stream_id: str) -> list:
@@ -100,6 +104,235 @@ def step_header(n: int, title: str):
     print(f"{'=' * 60}")
 
 
+def _load_dotenv(path: str | Path = ".env") -> None:
+    """把 .env 的 KEY=VALUE 注入进程环境；已存在的变量不覆盖。"""
+
+    env_path = Path(path).expanduser()
+    if not env_path.is_file():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+class _RawVideoFrameSource:
+    """把原始视频包装成 PreparedFrameSource，供 HandsPipeline 消费。"""
+
+    def __init__(
+        self,
+        video_path: str | Path,
+        *,
+        timestamps_ns: list[int] | tuple[int, ...] | None,
+        session_id: str,
+        stream_id: str,
+    ) -> None:
+        self._video_path = Path(video_path)
+        self._timestamps = list(timestamps_ns or ())
+        self._session_id = session_id
+        self._stream_id = stream_id
+
+    @property
+    def segment_id(self) -> str:
+        return self._session_id
+
+    @property
+    def video_stream_id(self) -> str:
+        return self._stream_id
+
+    def __iter__(self) -> Iterator[PreparedFrame]:
+        capture = cv2.VideoCapture(str(self._video_path))
+        if not capture.isOpened():
+            raise FileNotFoundError(f"无法打开视频: {self._video_path}")
+        try:
+            index = 0
+            while True:
+                ok, frame_bgr = capture.read()
+                if not ok:
+                    break
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                timestamp_ns = (
+                    int(self._timestamps[index])
+                    if index < len(self._timestamps)
+                    else 0
+                )
+                yield PreparedFrame(
+                    frame_rgb=frame_rgb,
+                    output_frame_index=index,
+                    timestamp_ns=timestamp_ns,
+                    source_frame_index=index,
+                    source_timestamp_ns=timestamp_ns,
+                )
+                index += 1
+        finally:
+            capture.release()
+
+
+def _run_hand_analysis(
+    *,
+    video_path: str | Path,
+    timestamps_ns: list[int] | tuple[int, ...] | None,
+    output_dir: Path,
+    session_id: str,
+    stream_id: str,
+    source_kind: str = "ego",
+) -> dict[str, str]:
+    """运行手部检测（WiLoR，按配置路由）与手部清洗，返回报告与 parquet 路径。"""
+    from zpds.hands.backend_router import HandsBackendRouter
+    from zpds.hands.cleaning import HandVideoCleaningConfig, clean_hand_video
+    from zpds.hands.config import HandsPipelineConfig
+    from zpds.hands.estimator_factory import (
+        create_hand_estimator,
+        validate_estimator_runtime,
+    )
+    from zpds.hands.pipeline import HandsPipeline
+    from zpds.hands.wilor_preflight import check_wilor_assets
+    from zpds.hands.writer import write_hand_observations
+
+    runtime_config = HandsPipelineConfig.load(
+        str(Path(CONFIG_PATH).expanduser().resolve()),
+    )
+    router = HandsBackendRouter(runtime_config.backend_policy)
+    primary_model = router.select_backend(is_ego=source_kind == "ego")
+    if primary_model == "wilor":
+        preflight = check_wilor_assets(runtime_config.wilor)
+        if not preflight.ready:
+            raise RuntimeError(
+                "WiLoR 资产预检失败（请在有 WiLoR 权重的工作机运行）: "
+                + ("; ".join(preflight.errors) or "未知资产错误")
+            )
+    runtime = create_hand_estimator(primary_model, runtime_config)
+    validate_estimator_runtime(primary_model, runtime, runtime_config)
+    source = _RawVideoFrameSource(
+        video_path,
+        timestamps_ns=timestamps_ns,
+        session_id=session_id,
+        stream_id=stream_id,
+    )
+    pipeline = HandsPipeline(
+        source,
+        runtime.estimator,
+        model_name=runtime.model_name,
+        model_version=runtime.model_version,
+        active_backend=runtime.active_backend,
+    )
+    hand_dir = output_dir / "hands"
+    hand_dir.mkdir(parents=True, exist_ok=True)
+    hands_parquet = hand_dir / "hands_2d.parquet"
+    write_hand_observations(
+        pipeline,
+        hands_parquet,
+        prep_revision="r0001",
+        config_sha256=runtime_config.config_sha256,
+        run_meta={"source": "zpds_prepare.main", "profile": "hand_integration"},
+    )
+    cleaning_config = HandVideoCleaningConfig.load(
+        "configs/hands/cleaning_default.yaml"
+    )
+    result = clean_hand_video(
+        str(video_path),
+        str(hands_parquet),
+        str(hand_dir),
+        cleaning_config,
+    )
+    return {
+        "hands_parquet": str(hands_parquet),
+        "hand_cleaning_report_path": str(result.report_path),
+    }
+
+
+def _read_video_frames(
+    video_path: str | Path,
+) -> tuple[list[np.ndarray], float]:
+    """读取视频全部帧（BGR）与帧率，供场景分割使用。"""
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise FileNotFoundError(f"无法打开视频: {video_path}")
+    frames: list[np.ndarray] = []
+    fps = float(capture.get(cv2.CAP_PROP_FPS)) or 30.0
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            frames.append(frame)
+    finally:
+        capture.release()
+    if not frames:
+        raise ValueError(f"视频没有可解码帧: {video_path}")
+    return frames, fps
+
+
+def _run_scene_analysis(
+    *,
+    video_path: str | Path,
+    profile: str,
+) -> dict[str, object]:
+    """运行场景分割 + VLM 复核，返回 ScenePipelineRun 与 SceneConfig。"""
+    from zpds.scene.config import SceneConfig
+    from zpds.scene.pipeline import run_scene_pipeline
+    from zpds.scene.vlm_review import (
+        OpenAICompatibleVLMReviewer,
+        VLMUnavailableError,
+        load_scene_labels,
+    )
+
+    scene_config_path = Path("configs/scene/default.yaml")
+    profile_config_name = {
+        "guida": "guida_ego",
+        "dunjia": "dunjia_ego",
+        "umi": "jianzhi_umi",
+        "epic": "epic100",
+        "a2d": "a2d_robot",
+    }.get(profile, profile)
+    profile_path = (
+        Path("configs/qc_thresholds") / f"{profile_config_name}.yaml"
+    )
+    if profile_path.is_file():
+        scene_config = SceneConfig.load_with_profile(
+            scene_config_path, profile_path
+        )
+    else:
+        scene_config = SceneConfig.load(scene_config_path)
+    if not scene_config.enabled:
+        return {"scene_pipeline_run": None, "scene_config": scene_config}
+    frames, fps = _read_video_frames(video_path)
+    reviewer = None
+    if scene_config.vlm.enabled:
+        if not scene_config.vlm.labels_path.strip():
+            raise ValueError("scene.vlm.labels_path 未配置，无法运行 VLM 复核")
+        labels = load_scene_labels(scene_config.vlm.labels_path)
+        reviewer = OpenAICompatibleVLMReviewer(
+            scene_config.vlm,
+            labels=labels,
+            config_hash=scene_config.config_hash,
+        )
+    try:
+        run = run_scene_pipeline(
+            frames,
+            fps=fps,
+            config=scene_config,
+            vlm_reviewer=reviewer,
+        )
+    except VLMUnavailableError as exc:
+        print(
+            f"  VLM 复核不可用，仅产出 scene 分割 "
+            f"（Stage 10 记 SEMANTIC_NOT_RUN）: {exc}"
+        )
+        run = run_scene_pipeline(
+            frames,
+            fps=fps,
+            config=scene_config,
+            vlm_reviewer=None,
+        )
+    return {"scene_pipeline_run": run, "scene_config": scene_config}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="ZPDS Prepare — 从原始数据生成质量报告和候选分段方案"
@@ -135,6 +368,16 @@ def main():
         "--formal-robot-qc",
         action="store_true",
         help="[UMI] 写入正式 quality views 和 revision manifest；保留原始数据不变",
+    )
+    parser.add_argument(
+        "--with-hands",
+        action="store_true",
+        help="在主流程内运行手部检测与手部清洗，并把 hand_cleaning_report_path 传入 Stage 9",
+    )
+    parser.add_argument(
+        "--with-scene",
+        action="store_true",
+        help="在主流程内运行场景分割与 VLM 复核，并把 scene 结果传入 Stage 10",
     )
     parser.add_argument(
         "--skip-cascade",
@@ -224,6 +467,7 @@ def main():
         _, video_id = parse_epic_id(Path(dataset_path))
         output_dir = output_dir / video_id
 
+    _load_dotenv()
     start_time = time.time()
 
     # ================================================================
@@ -348,6 +592,77 @@ def main():
     session_id = session.session_id
     print(f"  Session ID:  {session_id}")
 
+    # ================================================================
+    # Step 1.5: 手部检测/清洗（Stage 9）与场景分割/VLM 复核（Stage 10）
+    # ================================================================
+    hand_report_path: str | None = None
+    scene_pipeline_run = None
+    scene_config = None
+
+    if args.with_hands and pv.video_path:
+        step_header(15, "手部检测与手部清洗（Stage 9 输入）")
+        from zpds.profiles.registry import get as _get_profile
+
+        _profile_name = {
+            "guida": "guida_ego",
+            "dunjia": "dunjia_ego",
+            "umi": "jianzhi_umi",
+            "epic": "epic100",
+            "a2d": "a2d_robot",
+        }.get(profile, profile)
+        _profile_obj = _get_profile(_profile_name)
+        _hand_applicable = (
+            _profile_obj is not None
+            and _profile_obj.modalities.get("human_hand") == "applicable"
+        )
+        if not _hand_applicable:
+            print("  手部分析跳过: human_hand=not_applicable")
+        else:
+            try:
+                hand_result = _run_hand_analysis(
+                    video_path=pv.video_path,
+                    timestamps_ns=pv.timestamps_ns,
+                    output_dir=output_dir,
+                    session_id=session_id,
+                    stream_id=next(iter(session.video_streams), "ego_rgb"),
+                )
+                hand_report_path = hand_result.get("hand_cleaning_report_path")
+                print(f"  手部报告:    {hand_report_path}")
+                print(f"  hands 2D:    {hand_result.get('hands_parquet')}")
+            except (
+                FileNotFoundError,
+                TypeError,
+                ValueError,
+                OSError,
+                ImportError,
+                RuntimeError,
+            ) as exc:
+                print(f"  手部分析跳过: {exc}")
+
+    if args.with_scene and pv.video_path:
+        step_header(16, "场景分割 + VLM 复核（Stage 10 输入）")
+        try:
+            scene_result = _run_scene_analysis(
+                video_path=pv.video_path,
+                profile=profile,
+            )
+            scene_pipeline_run = scene_result["scene_pipeline_run"]
+            scene_config = scene_result["scene_config"]
+            print(
+                f"  场景数:      {len(scene_pipeline_run.scenes)}，"
+                f"VLM 复核: {len(scene_pipeline_run.vlm_results)}，"
+                f"复核队列: {len(scene_pipeline_run.review_queue)}"
+            )
+        except (
+            FileNotFoundError,
+            TypeError,
+            ValueError,
+            OSError,
+            ImportError,
+            RuntimeError,
+        ) as exc:
+            print(f"  场景分析跳过: {exc}")
+
     # MCAP profile：显示双时间戳信息
     if profile in ("dunjia", "umi") and index_frames:
         first = index_frames[0]
@@ -441,9 +756,14 @@ def main():
             except Exception:
                 pass
 
+        robot_observation_checked_flag = False
         for stream_id, vs in session.video_streams.items():
+            robot_observation_checked = robot_observation_checked_flag
             ctx: dict[str, object] = {
                 "session_id": session_id,
+                "session": session,
+                "cfg": cfg,
+                "robot_observation_checked": robot_observation_checked,
                 "video_path": str(vs.video_path) if vs.video_path else "",
                 "fps": float(vs.fps),
                 "start_ns": int(vs.timestamps_ns[0]) if vs.timestamps_ns else 0,
@@ -458,6 +778,11 @@ def main():
                 # Stage 8 标定：标定数据 + 视频流（用于分辨率一致性校验）
                 "calibration": session.meta.get("calibration"),
                 "video_streams_for_calib": session.video_streams,
+                # Stage 9 手部清洗报告路径（--with-hands 时传入）
+                "hand_cleaning_report_path": hand_report_path,
+                # Stage 10 场景分割 + VLM 复核结果（--with-scene 时传入）
+                "scene_pipeline_run": scene_pipeline_run,
+                "scene_config": scene_config,
             }
             depth_s = session.depth_streams.get(stream_id)
             if depth_s is not None:
@@ -482,6 +807,8 @@ def main():
                     cascade_overall_pass = False
                 for d in report.decisions:
                     cascade_distribution.record(d)
+                # Stage 7 无手观测视图是 session 级检查，只需跑一次
+                robot_observation_checked_flag = True
                 # 转换为 QualityIssue 供 segment_planner 消费
                 cascade_issues.extend(
                     _decisions_to_issues(report.decisions, stream_id)
@@ -779,6 +1106,14 @@ def main():
     print(f"  QC 级联:     {'已跳过' if args.skip_cascade else f'{len(cascade_decisions)} decisions'}")
     print(f"  发现异常:    {summary['total']}")
     print(f"  候选 Segment: {len(candidates)}")
+    if hand_report_path:
+        print(f"  手部报告:    {hand_report_path}")
+    if scene_pipeline_run is not None and not scene_pipeline_run.skipped:
+        print(
+            f"  场景/VLM:    {len(scene_pipeline_run.scenes)} scenes, "
+            f"{len(scene_pipeline_run.vlm_results)} reviewed, "
+            f"{len(scene_pipeline_run.review_queue)} in review queue"
+        )
     print(f"  输出目录:    {output_dir.resolve()}")
     print(f"{'=' * 60}")
 

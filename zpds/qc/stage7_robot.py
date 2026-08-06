@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from zpds.core.decisions import Decision, Disposition, ReasonCode, Severity
 from zpds.qc.cascade import register_stage
+from zpds.qc.stage7_robot_observation import (
+    evaluate_no_hand_observation_views,
+)
 
 # ---------------------------------------------------------------------------
 # QualityIssue → Decision 映射
@@ -205,7 +208,7 @@ def check(
 
 @register_stage(7)
 def _check_stage7(context: dict) -> list[Decision]:
-    """Stage 7 QCCascade 入口：从 context dict 提取参数并调用 check()。
+    """Stage 7 QCCascade 入口：机器人信号质量 + 无手观测质量视图。
 
     Stage 7 是跨流 / 跨 session 的机器人信号检查，只需执行一次。
     使用 ``_stage7_done`` 上下文标记避免多 stream 重复执行。
@@ -218,7 +221,9 @@ def _check_stage7(context: dict) -> list[Decision]:
     if not stage_config.get("enabled", True):
         return []
 
-    # 适用性守卫：仅 robot / end_effector profile 运行
+    decisions: list[Decision] = []
+
+    # 适用性守卫：仅 robot / end_effector profile 运行机器人信号检查
     profile = context.get("profile")
     if profile:
         from zpds.profiles.registry import get
@@ -227,7 +232,7 @@ def _check_stage7(context: dict) -> list[Decision]:
         if registered is not None:
             modalities = registered.modalities
             if modalities.get("end_effector") != "applicable":
-                return [
+                decisions.append(
                     Decision(
                         stage=7,
                         reason=ReasonCode.CHECK_NOT_APPLICABLE,
@@ -238,12 +243,31 @@ def _check_stage7(context: dict) -> list[Decision]:
                         ),
                         disposition=Disposition.KEEP,
                         detail={"applicability": "not_applicable"},
-                    ),
-                ]
+                    )
+                )
 
     ts_streams = context.get("time_series_streams")
-    if not ts_streams:
-        return [
+    if ts_streams:
+        try:
+            decisions.extend(
+                check(ts_streams=ts_streams, stage_config=stage_config)
+            )
+        except Exception as exc:  # noqa: BLE001 - 信号检查失败不阻断无手视图
+            decisions.append(
+                Decision(
+                    stage=7,
+                    reason=ReasonCode.SOURCE_QUALITY_FLAG,
+                    severity=Severity.WARN,
+                    message=f"Robot signal check failed: {exc}",
+                    disposition=Disposition.KEEP_WITH_FLAG,
+                    detail={"error": str(exc)},
+                )
+            )
+    elif not any(
+        decision.reason == ReasonCode.CHECK_NOT_APPLICABLE
+        for decision in decisions
+    ):
+        decisions.append(
             Decision(
                 stage=7,
                 reason=ReasonCode.CHECK_NOT_APPLICABLE,
@@ -254,10 +278,13 @@ def _check_stage7(context: dict) -> list[Decision]:
                 ),
                 disposition=Disposition.KEEP,
                 detail={"applicability": "not_applicable"},
-            ),
-        ]
+            )
+        )
 
-    return check(ts_streams=ts_streams, stage_config=stage_config)
+    # 无手来源的观测质量视图（robot_observation_ready / end_effector_visible）
+    decisions.extend(evaluate_no_hand_observation_views(context))
+
+    return decisions
 
 
-__all__ = ["check", "_check_stage7"]
+__all__ = ["_check_stage7", "check"]
