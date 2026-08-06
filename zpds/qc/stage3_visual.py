@@ -23,7 +23,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from zpds.core.decisions import Decision, ReasonCode, Severity
+from zpds.core.decisions import Decision, Disposition, ReasonCode, Severity
 from zpds.qc.cascade import register_stage
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,9 @@ DEFAULT_OVEREXPOSURE_CONSECUTIVE_MIN = 3       # 连续过曝帧数最少触发�
 
 DEFAULT_BLUR_LAPLACIAN_THRESHOLD = 100.0       # Laplacian 方差阈值（低于此值视为模糊）
 DEFAULT_BLUR_CONSECUTIVE_MIN = 3               # 连续模糊帧数最少触发值
+# 模糊段时长达到该值 → split（作为缺口切分，两侧各成候选段）；
+# 短于该值 → keep_with_flag（打标保留，不切分）
+DEFAULT_BLUR_QUARANTINE_DURATION_S = 1.0
 
 # 已知分辨率下的自适应模糊阈值（经验值）
 BLUR_THRESHOLD_BY_RESOLUTION: dict[tuple[int, int], float] = {
@@ -295,6 +298,7 @@ def detect_blur(
     sample_interval: int = 1,
     evidence_dir: str | None = None,
     profile: str = "",
+    quarantine_duration_s: float | None = None,
 ) -> list[Decision]:
     """检测视频中的模糊帧。
 
@@ -323,6 +327,11 @@ def detect_blur(
         证据帧保存目录。
     profile : str
         Profile 名称（用于日志）。
+    quarantine_duration_s : Optional[float]
+        模糊段处置阈值（秒）：达到该时长的 span 产生 SPLIT 处置
+        （作为切分缺口，两侧各成候选段）；更短的 span 产生
+        KEEP_WITH_FLAG（打标保留）。None 时不设置处置
+        （保持旧行为：只记录，不影响分段）。
 
     Returns
     -------
@@ -423,6 +432,18 @@ def detect_blur(
 
         severity = Severity.WARN
 
+        # 处置：长模糊段作为切分缺口（两侧各成候选段，模糊段不进入训练数据）；
+        # 短模糊段打标保留（不切分，进入候选段的 issues_in_span 供下游标记）。
+        if quarantine_duration_s is not None and duration_s >= quarantine_duration_s:
+            disposition = Disposition.SPLIT
+            recommended = "split"
+        elif quarantine_duration_s is not None:
+            disposition = Disposition.KEEP_WITH_FLAG
+            recommended = "keep_with_flag"
+        else:
+            disposition = None
+            recommended = "quarantine"
+
         decisions.append(
             Decision(
                 stage=3,
@@ -435,6 +456,9 @@ def detect_blur(
                 ),
                 frame_idx=s,
                 timestamp_ns=t0_ns,
+                end_frame_idx=e,
+                end_timestamp_ns=t1_ns,
+                disposition=disposition,
                 detail={
                     "start_frame": s,
                     "end_frame": e,
@@ -446,7 +470,7 @@ def detect_blur(
                     "video_resolution": f"{video_width}x{video_height}",
                     "overall_blur_ratio": round(overall_ratio, 4),
                     "total_blur_frames": total_blur,
-                    "recommended_action": "quarantine",
+                    "recommended_action": recommended,
                 },
             )
         )
@@ -568,6 +592,9 @@ def check(
                 sample_interval=blur_cfg.get("sample_interval", 1),
                 evidence_dir=evidence_dir,
                 profile=profile,
+                quarantine_duration_s=blur_cfg.get(
+                    "quarantine_duration_s", DEFAULT_BLUR_QUARANTINE_DURATION_S
+                ),
             )
         )
 
