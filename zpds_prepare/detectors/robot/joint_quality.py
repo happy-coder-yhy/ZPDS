@@ -49,7 +49,15 @@ def detect_joint_quality(
     issues: list[QualityIssue] = []
     stream_id = ts_stream.stream_id
     timestamps = np.array(ts_stream.timestamps_ns, dtype=np.int64)
-    rows = np.asarray(ts_stream.rows, dtype=np.float64)
+    if hasattr(ts_stream.rows, "select_dtypes"):
+        numeric_frame = ts_stream.rows.select_dtypes(include=[np.number])
+        rows = (
+            numeric_frame.to_numpy(dtype=np.float64)
+            if not numeric_frame.empty
+            else np.zeros((len(ts_stream.rows), 0), dtype=np.float64)
+        )
+    else:
+        rows = np.asarray(ts_stream.rows, dtype=np.float64)
     fields = ts_stream.fields
     num_samples = len(timestamps)
 

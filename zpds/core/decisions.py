@@ -60,6 +60,12 @@ class ReasonCode(str, Enum):
     JOINT_LIMIT_VIOLATION = "joint_limit_violation"
     COMMAND_TIMEOUT = "command_timeout"
     GRIPPER_STALL = "gripper_stall"
+    ROBOT_OBSERVATION_READY = "robot_observation_ready"
+    ROBOT_OBSERVATION_NOT_READY = "robot_observation_not_ready"
+    END_EFFECTOR_VISIBLE = "end_effector_visible"
+    END_EFFECTOR_NOT_VISIBLE = "end_effector_not_visible"
+    ROBOT_VIEW_PASS = "robot_view_pass"
+    ROBOT_VIEW_FAIL = "robot_view_fail"
     # Stage 8 — 标定
     INTRINSICS_MISSING = "intrinsics_missing"
     EXTRINSICS_INVALID = "extrinsics_invalid"

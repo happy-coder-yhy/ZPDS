@@ -10,4 +10,8 @@ class GuidaEgoProfile(BaseProfile):
         super().__init__(
             name="guida_ego",
             description="墨现 Guida V2 头戴 ego 采集：color/depth MKV + index.jsonl + IMU CSV",
+            modalities={
+                "human_hand": "applicable",
+                "end_effector": "not_applicable",
+            },
         )
