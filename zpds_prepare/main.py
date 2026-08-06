@@ -23,6 +23,7 @@ import numpy as np
 import yaml
 
 from zpds_prepare.decisions.segment_planner import (
+    downgrade_split_issues,
     get_issue_summary,
     plan_segments,
 )
@@ -138,7 +139,12 @@ def main():
     parser.add_argument(
         "--skip-cascade",
         action="store_true",
-        help="跳过 QC 级联（Stage 3/5/6/9/11）",
+        help="跳过 QC 级联（Stage 3/5/6/7/8/9/11）",
+    )
+    parser.add_argument(
+        "--no-split",
+        action="store_true",
+        help="不切分视频：split 决策降级为 keep_with_flag，产出单一连续 segment",
     )
     parser.add_argument(
         "--epic-ho",
@@ -705,6 +711,9 @@ def main():
     # ================================================================
     step_header(4, "汇总分析")
 
+    if args.no_split:
+        downgrade_split_issues(all_issues)
+
     summary = get_issue_summary(all_issues)
     print(f"  总异常数: {summary['total']}")
     if summary["total"] > 0:
@@ -734,6 +743,7 @@ def main():
         session_end_ns=session_end_ns,
         min_duration_ns=int(min_duration_s * 1_000_000_000),
         max_duration_ns=int(max_duration_s * 1_000_000_000),
+        no_split=args.no_split,
     )
 
     print(f"  候选数: {len(candidates)}")

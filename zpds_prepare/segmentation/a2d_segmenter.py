@@ -22,6 +22,7 @@ import pandas as pd
 from zpds_prepare.decisions.issue_model import QualityIssue
 from zpds_prepare.decisions.segment_planner import (
     CandidateSegment,
+    downgrade_split_issues,
     plan_segments,
     get_issue_summary,
 )
@@ -130,6 +131,7 @@ def generate_a2d_candidates(
     session: Session,
     config: dict | None = None,
     alignment_dir: Path | None = None,
+    no_split: bool = False,
 ) -> tuple[list[CandidateSegment], list[QualityIssue], dict]:
     """为 A2D Session 生成候选 Segment。
 
@@ -218,6 +220,8 @@ def generate_a2d_candidates(
         all_issues.extend(issues)
 
     # ---- 5. 汇总 ----
+    if no_split:
+        downgrade_split_issues(all_issues)
     summary = get_issue_summary(all_issues)
     logger.info("总异常: %d, 按处置: %s", summary["total"], summary["by_decision"])
 
@@ -228,6 +232,7 @@ def generate_a2d_candidates(
         session_end_ns=session_end_ns,
         min_duration_ns=int(min_duration_s * 1_000_000_000),
         max_duration_ns=int(max_duration_s * 1_000_000_000),
+        no_split=no_split,
     )
 
     return candidates, all_issues, summary
@@ -277,6 +282,7 @@ def run_and_write(
     output_dir: Path,
     config: dict | None = None,
     alignment_dir: Path | None = None,
+    no_split: bool = False,
 ) -> Path:
     """完整流程：检测 → 规划 → 写出 segment_candidates.json。
 
@@ -284,7 +290,7 @@ def run_and_write(
         输出文件路径。
     """
     candidates, all_issues, summary = generate_a2d_candidates(
-        session, config, alignment_dir,
+        session, config, alignment_dir, no_split=no_split,
     )
 
     # 计算源范围

@@ -53,6 +53,7 @@ def run_pipeline(
     revision: str = "r0001",
     experience_dir: str | None = None,
     experience_version: str | None = None,
+    no_split: bool = False,
 ) -> int:
     """执行 A2D 完整 Pipeline。
 
@@ -197,6 +198,7 @@ def run_pipeline(
         output_dir=output_dir,
         config=config,
         alignment_dir=None,  # 第一轮无 alignment 目录
+        no_split=no_split,
     )
     print(f"  → {sc_path}")
 
@@ -354,6 +356,11 @@ def main():
         help="record_revision（默认: r0001）",
     )
     parser.add_argument(
+        "--no-split",
+        action="store_true",
+        help="不切分视频：split 决策降级为 keep_with_flag，产出单一连续 segment",
+    )
+    parser.add_argument(
         "--experience-dir",
         default=None,
         help="可选：将已声明的 Prepared 标注导入此 Experience 目录",
@@ -377,6 +384,7 @@ def main():
         revision=args.revision,
         experience_dir=args.experience_dir,
         experience_version=args.experience_version,
+        no_split=args.no_split,
     )
 
 
