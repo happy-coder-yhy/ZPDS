@@ -62,7 +62,8 @@ stage3_visual:
     laplacian_threshold: null    # null = auto-select by resolution
     consecutive_min: 3
     sample_interval: 1
-    quarantine_duration_s: 1.0  # 模糊段达此时长(s) → split 切分；更短 → keep_with_flag 打标
+    quarantine_duration_s: 1.0  # 模糊段切分时长阈值(s)，仅 blur_split_enabled 时生效
+    blur_split_enabled: false   # 默认不切分（保护动作完整性）；true 时长≥阈值才 split
 
 stage4_video_timing:
   vfr_tolerance: 0.01

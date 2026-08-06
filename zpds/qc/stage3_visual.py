@@ -41,9 +41,13 @@ DEFAULT_OVEREXPOSURE_CONSECUTIVE_MIN = 3       # 连续过曝帧数最少触发�
 
 DEFAULT_BLUR_LAPLACIAN_THRESHOLD = 100.0       # Laplacian 方差阈值（低于此值视为模糊）
 DEFAULT_BLUR_CONSECUTIVE_MIN = 3               # 连续模糊帧数最少触发值
-# 模糊段时长达到该值 → split（作为缺口切分，两侧各成候选段）；
-# 短于该值 → keep_with_flag（打标保留，不切分）
+# 模糊段处置阈值（秒）：仅在 blur_split_enabled=True 时生效——
+# 达到该时长的 span 才 split（作为切分缺口）；否则一律 keep_with_flag 打标。
+# 默认不切分：模糊段切开会破坏动作完整性（动作跨模糊段时两侧都不完整），
+# 模仿学习数据清洗的主流是细粒度标记而非切段（见 SCIZOR/HaptalAI）。
 DEFAULT_BLUR_QUARANTINE_DURATION_S = 1.0
+# 是否允许长模糊段切分（默认关闭，避免破坏完整动作）
+DEFAULT_BLUR_SPLIT_ENABLED = False
 
 # 已知分辨率下的自适应模糊阈值（经验值）
 BLUR_THRESHOLD_BY_RESOLUTION: dict[tuple[int, int], float] = {
@@ -298,12 +302,21 @@ def detect_blur(
     sample_interval: int = 1,
     evidence_dir: str | None = None,
     profile: str = "",
-    quarantine_duration_s: float | None = None,
+    quarantine_duration_s: float = DEFAULT_BLUR_QUARANTINE_DURATION_S,
+    blur_split_enabled: bool = DEFAULT_BLUR_SPLIT_ENABLED,
 ) -> list[Decision]:
     """检测视频中的模糊帧。
 
     使用 Laplacian 方差作为基础指标。
     阈值按分辨率自适应，并可通过 profile 配置覆盖。
+
+    处置策略（默认打标不切分）：
+    - 默认（blur_split_enabled=False）：所有模糊 span 产生
+      KEEP_WITH_FLAG —— 标记保留，不切分。模糊段切开可能破坏
+      动作完整性（动作跨模糊段时两侧都不完整）。
+    - blur_split_enabled=True 且 span 时长 >= quarantine_duration_s：
+      产生 SPLIT（作为切分缺口，两侧各成候选段），需要用户
+      显式确认动作边界后才启用。
 
     Parameters
     ----------
@@ -327,11 +340,10 @@ def detect_blur(
         证据帧保存目录。
     profile : str
         Profile 名称（用于日志）。
-    quarantine_duration_s : Optional[float]
-        模糊段处置阈值（秒）：达到该时长的 span 产生 SPLIT 处置
-        （作为切分缺口，两侧各成候选段）；更短的 span 产生
-        KEEP_WITH_FLAG（打标保留）。None 时不设置处置
-        （保持旧行为：只记录，不影响分段）。
+    quarantine_duration_s : float
+        模糊段切分时长阈值（秒），仅 blur_split_enabled=True 时生效。
+    blur_split_enabled : bool
+        是否允许长模糊段切分（默认 False：一律打标保留）。
 
     Returns
     -------
@@ -432,17 +444,14 @@ def detect_blur(
 
         severity = Severity.WARN
 
-        # 处置：长模糊段作为切分缺口（两侧各成候选段，模糊段不进入训练数据）；
-        # 短模糊段打标保留（不切分，进入候选段的 issues_in_span 供下游标记）。
-        if quarantine_duration_s is not None and duration_s >= quarantine_duration_s:
+        # 处置：默认打标保留（不切分，保护动作完整性）；
+        # 仅显式启用 blur_split_enabled 且 span 达到时长阈值时才切分。
+        if blur_split_enabled and duration_s >= quarantine_duration_s:
             disposition = Disposition.SPLIT
             recommended = "split"
-        elif quarantine_duration_s is not None:
+        else:
             disposition = Disposition.KEEP_WITH_FLAG
             recommended = "keep_with_flag"
-        else:
-            disposition = None
-            recommended = "quarantine"
 
         decisions.append(
             Decision(
@@ -594,6 +603,9 @@ def check(
                 profile=profile,
                 quarantine_duration_s=blur_cfg.get(
                     "quarantine_duration_s", DEFAULT_BLUR_QUARANTINE_DURATION_S
+                ),
+                blur_split_enabled=blur_cfg.get(
+                    "blur_split_enabled", DEFAULT_BLUR_SPLIT_ENABLED
                 ),
             )
         )

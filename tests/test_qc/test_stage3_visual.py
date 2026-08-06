@@ -207,14 +207,17 @@ class TestBlur:
         blur = [np.full((120, 160), 128, dtype=np.uint8) for _ in range(n_blur)]
         return sharp + blur + sharp
 
-    def test_long_blur_span_splits(self, tmp_path):
-        """模糊段时长 >= quarantine_duration_s → SPLIT 处置（切分缺口）。"""
+    def test_long_blur_span_splits_only_when_enabled(self, tmp_path):
+        """blur_split_enabled=True 且模糊段 >= 阈值 → SPLIT 处置。"""
         # 40 帧模糊 @30fps = 1.33s > 1.0s
         frames = self._make_sharp_blur_sharp(n_blur=40)
         vpath = str(tmp_path / "long_blur.mp4")
         _create_test_video(vpath, frames)
 
-        decisions = detect_blur(vpath, laplacian_threshold=5.0, quarantine_duration_s=1.0)
+        decisions = detect_blur(
+            vpath, laplacian_threshold=5.0,
+            quarantine_duration_s=1.0, blur_split_enabled=True,
+        )
         spans = [d for d in decisions if d.reason == ReasonCode.BLUR_DETECTED
                  and d.severity != Severity.INFO]
         assert len(spans) == 1
@@ -226,13 +229,16 @@ class TestBlur:
         assert spans[0].detail["end_frame"] == 50
 
     def test_short_blur_span_keep_with_flag(self, tmp_path):
-        """模糊段时长 < quarantine_duration_s → KEEP_WITH_FLAG 打标保留。"""
+        """模糊段 < 阈值 → KEEP_WITH_FLAG 打标保留（即使 split 开启）。"""
         # 10 帧模糊 @30fps = 0.33s < 1.0s
         frames = self._make_sharp_blur_sharp(n_blur=10)
         vpath = str(tmp_path / "short_blur.mp4")
         _create_test_video(vpath, frames)
 
-        decisions = detect_blur(vpath, laplacian_threshold=5.0, quarantine_duration_s=1.0)
+        decisions = detect_blur(
+            vpath, laplacian_threshold=5.0,
+            quarantine_duration_s=1.0, blur_split_enabled=True,
+        )
         spans = [d for d in decisions if d.reason == ReasonCode.BLUR_DETECTED
                  and d.severity != Severity.INFO]
         assert len(spans) == 1
@@ -240,18 +246,22 @@ class TestBlur:
         assert spans[0].disposition.value == "keep_with_flag"
         assert spans[0].detail["recommended_action"] == "keep_with_flag"
 
-    def test_no_quarantine_threshold_keeps_old_behavior(self, tmp_path):
-        """不传 quarantine_duration_s → 不设置处置（旧行为：只记录）。"""
+    def test_default_no_split_keeps_action_complete(self, tmp_path):
+        """默认（blur_split_enabled=False）：长模糊段也只打标不切分。
+
+        保护动作完整性：模糊段切开会把跨段的完整动作劈成两半。
+        """
         frames = self._make_sharp_blur_sharp(n_blur=40)
-        vpath = str(tmp_path / "nothresh.mp4")
+        vpath = str(tmp_path / "default.mp4")
         _create_test_video(vpath, frames)
 
         decisions = detect_blur(vpath, laplacian_threshold=5.0)
         spans = [d for d in decisions if d.reason == ReasonCode.BLUR_DETECTED
                  and d.severity != Severity.INFO]
         assert len(spans) == 1
-        assert spans[0].disposition is None
-        assert spans[0].detail["recommended_action"] == "quarantine"
+        assert spans[0].disposition is not None
+        assert spans[0].disposition.value == "keep_with_flag"
+        assert spans[0].detail["recommended_action"] == "keep_with_flag"
 
 
 # ---------------------------------------------------------------------------
