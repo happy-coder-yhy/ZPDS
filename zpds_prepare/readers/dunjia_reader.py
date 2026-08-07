@@ -347,6 +347,7 @@ def reconstruct_video(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
              "-i", raw_h264, "-c", "copy", output_path],
             capture_output=True, text=True, check=False,
+            encoding="utf-8", errors="replace",
         )
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg 重封装失败 ({topic}): {result.stderr.strip()}")

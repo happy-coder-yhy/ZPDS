@@ -203,7 +203,8 @@ def decode_opus_to_wav(
             "-c:a", "pcm_s16le",
             str(out),
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300,
+                              encoding="utf-8", errors="replace")
         if proc.returncode != 0:
             raise RuntimeError(
                 f"ffmpeg 解码失败 (rc={proc.returncode}): {proc.stderr.strip()}"

@@ -14,6 +14,7 @@ ZPDS Prepare — 主入口。
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -269,15 +270,123 @@ def _read_video_frames(
     return frames, fps
 
 
-def _hands_output_dir(output_dir: Path) -> Path:
-    """手部产物目录：对齐 batch 首个 segment（prepared_segments/r0001/seg_000001/hands）。"""
+def _first_segment_dir(output_dir: Path) -> Path:
+    """batch 首个 segment 目录：prepared_segments/r0001/seg_000001。
+
+    hands/scene 等辅助产物统一放这里，与 batch_prepare 的输出结构对齐。
+    """
     return (
         output_dir
         / "prepared_segments"
         / "r0001"
         / "seg_000001"
-        / "hands"
     )
+
+
+def _hands_output_dir(output_dir: Path) -> Path:
+    """手部产物目录：对齐 batch 首个 segment（prepared_segments/r0001/seg_000001/hands）。"""
+    return _first_segment_dir(output_dir) / "hands"
+
+
+def _split_csv(value: object) -> tuple[str, ...]:
+    """反序列化 scene writer 的逗号连接字符串字段。"""
+    return tuple(part for part in str(value or "").split(",") if part)
+
+
+def _scene_proposal_from_row(row: dict) -> "SceneProposal":
+    """从 scene_proposals.parquet 行重建 SceneProposal（writer 列逆变换）。"""
+    from zpds.scene.schemas import SceneProposal
+
+    return SceneProposal(
+        scene_id=str(row["scene_id"]),
+        start_ns=int(row["start_ns"]),
+        end_ns=int(row["end_ns"]),
+        confidence=float(row["confidence"]),
+        sources=_split_csv(row.get("sources")),
+        boundary_scores=json.loads(str(row.get("boundary_scores") or "{}")),
+        evidence_uris=_split_csv(row.get("evidence_uris")),
+        short_span=bool(row.get("short_span", False)),
+        producer=str(row.get("producer", "zpds.scene")),
+        version=str(row.get("version", "v1")),
+        config_hash=str(row.get("config_hash", "")),
+    )
+
+
+def _vlm_review_from_row(row: dict) -> "VLMReviewResult":
+    """从 vlm_review.parquet 行重建 VLMReviewResult（writer 列逆变换）。"""
+    from zpds.scene.schemas import VLMReviewResult
+
+    return VLMReviewResult(
+        scene_id=str(row["scene_id"]),
+        scene_label=str(row["scene_label"]),
+        task_label=str(row["task_label"]),
+        decision=str(row["decision"]),
+        confidence=float(row["confidence"]),
+        reasons=str(row["reasons"]),
+        evidence_frame_uris=_split_csv(row.get("evidence_frame_uris")),
+        producer=str(row.get("producer", "zpds.scene.vlm")),
+        version=str(row.get("version", "v1")),
+        config_hash=str(row.get("config_hash", "")),
+    )
+
+
+def _try_reuse_scene_run(
+    *,
+    scene_config,
+    profile: str,
+    output_dir: Path,
+    frames: list,
+    fps: float,
+) -> dict[str, object] | None:
+    """复用已有场景产物：frame_count + config_hash 一致则跳过分割与 VLM。
+
+    与手部复用同模式。返回与 _run_scene_analysis 同形的 dict；
+    不可复用（产物缺失/校验失败/不一致）时返回 None。
+    """
+    from zpds.scene.pipeline import ScenePipelineRun
+
+    scene_dir = _first_segment_dir(Path(output_dir)) / "scene"
+    summary_file = scene_dir / "run_summary.json"
+    proposals_file = scene_dir / "scene_proposals.parquet"
+    if not (summary_file.is_file() and proposals_file.is_file()):
+        return None
+    try:
+        import pandas as _pd
+
+        summary = json.loads(summary_file.read_text(encoding="utf-8"))
+        if int(summary.get("frame_count", -1)) != len(frames):
+            return None
+        if str(summary.get("config_hash", "")) != scene_config.config_hash:
+            return None
+        scenes = tuple(
+            _scene_proposal_from_row(dict(row))
+            for row in _pd.read_parquet(str(proposals_file)).to_dict("records")
+        )
+        vlm_file = scene_dir / "vlm_review.parquet"
+        vlm_results: tuple = ()
+        if vlm_file.is_file():
+            vlm_results = tuple(
+                _vlm_review_from_row(dict(row))
+                for row in _pd.read_parquet(str(vlm_file)).to_dict("records")
+            )
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"  场景产物校验失败，重新分析: {exc}")
+        return None
+    run = ScenePipelineRun(
+        skipped=False,
+        skip_reason=None,
+        frame_count=len(frames),
+        fps=fps,
+        start_ns=int(summary.get("start_ns", 0)),
+        end_ns=int(summary.get("end_ns", 0)),
+        config_hash=scene_config.config_hash,
+        profile=profile,
+        scenes=scenes,
+        vlm_results=vlm_results,
+    )
+    print(f"  场景产物已复用（帧数 {len(frames)}、config 一致）: {scene_dir}")
+    print(f"  场景数: {len(scenes)}，VLM 复核: {len(vlm_results)}")
+    return {"scene_pipeline_run": run, "scene_config": scene_config}
 
 
 def _run_scene_analysis(
@@ -288,8 +397,9 @@ def _run_scene_analysis(
 ) -> dict[str, object]:
     """运行场景分割 + VLM 复核，返回 ScenePipelineRun 与 SceneConfig。
 
-    运行结果落盘到 ``{output_dir}/scene/``（scene_proposals.parquet、
-    vlm_review.parquet、run_summary.json），与 hands 目录同层。
+    运行结果落盘到 ``{output_dir}/prepared_segments/r0001/seg_000001/scene/``
+    （scene_proposals.parquet、vlm_review.parquet、run_summary.json），
+    与 hands 目录同层。
     """
     from zpds.scene.config import SceneConfig
     from zpds.scene.pipeline import run_scene_pipeline
@@ -320,6 +430,18 @@ def _run_scene_analysis(
     if not scene_config.enabled:
         return {"scene_pipeline_run": None, "scene_config": scene_config}
     frames, fps = _read_video_frames(video_path)
+
+    # ---- 场景产物复用（帧数 + config_hash 一致则跳过分割与 VLM） ----
+    reused = _try_reuse_scene_run(
+        scene_config=scene_config,
+        profile=profile,
+        output_dir=output_dir,
+        frames=frames,
+        fps=fps,
+    )
+    if reused is not None:
+        return reused
+
     reviewer = None
     if scene_config.vlm.enabled:
         if not scene_config.vlm.labels_path.strip():
@@ -330,6 +452,7 @@ def _run_scene_analysis(
             labels=labels,
             config_hash=scene_config.config_hash,
         )
+    vlm_unavailable_reason: str | None = None
     try:
         run = run_scene_pipeline(
             frames,
@@ -338,8 +461,9 @@ def _run_scene_analysis(
             vlm_reviewer=reviewer,
         )
     except VLMUnavailableError as exc:
+        vlm_unavailable_reason = str(exc)
         print(
-            f"  VLM 复核不可用，仅产出 scene 分割 "
+            f"  [WARN] VLM 复核不可用，仅产出 scene 分割 "
             f"（Stage 10 记 SEMANTIC_NOT_RUN）: {exc}"
         )
         run = run_scene_pipeline(
@@ -349,7 +473,7 @@ def _run_scene_analysis(
             vlm_reviewer=None,
         )
     if run is not None and not run.skipped:
-        scene_dir = Path(output_dir) / "scene"
+        scene_dir = _first_segment_dir(Path(output_dir)) / "scene"
         scene_dir.mkdir(parents=True, exist_ok=True)
         written = write_scene_run(
             scene_dir,
@@ -365,6 +489,7 @@ def _run_scene_analysis(
             review_queue=run.review_queue,
             skipped=run.skipped,
             skip_reason=run.skip_reason,
+            vlm_unavailable_reason=vlm_unavailable_reason,
         )
         print(f"  → 场景报告: {written.summary_file}")
     return {"scene_pipeline_run": run, "scene_config": scene_config}
@@ -503,6 +628,13 @@ def main():
         from zpds_prepare.readers.epic_inventory import parse_epic_id
         _, video_id = parse_epic_id(Path(dataset_path))
         output_dir = output_dir / video_id
+
+    # 中文路径 fail-fast：输出 PNG/MP4 由 cv2.imread/imwrite 处理，
+    # 不支持非 ASCII 路径（静默失败），命中立即报错而不是跑一段再挂。
+    if not output_dir.as_posix().isascii():
+        print(f"错误: 输出目录必须为纯 ASCII 路径（cv2 不支持中文路径）: {output_dir}")
+        print("请改用英文目录，例如: --output output/taodai2/")
+        return 1
 
     _load_dotenv()
     start_time = time.time()
@@ -655,26 +787,51 @@ def main():
         if not _hand_applicable:
             print("  手部分析跳过: human_hand=not_applicable")
         else:
-            try:
-                hand_result = _run_hand_analysis(
-                    video_path=pv.video_path,
-                    timestamps_ns=pv.timestamps_ns,
-                    output_dir=output_dir,
-                    session_id=session_id,
-                    stream_id=next(iter(session.video_streams), "ego_rgb"),
-                )
-                hand_report_path = hand_result.get("hand_cleaning_report_path")
-                print(f"  手部报告:    {hand_report_path}")
-                print(f"  hands 2D:    {hand_result.get('hands_parquet')}")
-            except (
-                FileNotFoundError,
-                TypeError,
-                ValueError,
-                OSError,
-                ImportError,
-                RuntimeError,
-            ) as exc:
-                print(f"  手部分析跳过: {exc}")
+            hand_dir = _hands_output_dir(output_dir)
+            report_file = hand_dir / "hand_cleaning_report.json"
+            hands_parquet_file = hand_dir / "hands_2d.parquet"
+            reused = False
+            if report_file.is_file() and hands_parquet_file.is_file():
+                try:
+                    _rep = json.loads(report_file.read_text(encoding="utf-8"))
+                    _src = _rep.get("source", {})
+                    if int(_src.get("advertised_frame_count", -1)) == len(
+                        pv.timestamps_ns
+                    ):
+                        hand_report_path = str(report_file)
+                        print(f"  手部产物已存在，复用（帧数一致）: {hand_dir}")
+                        print(f"  手部报告:    {hand_report_path}")
+                        print(f"  hands 2D:    {hands_parquet_file}")
+                        reused = True
+                    else:
+                        print(
+                            "  手部产物帧数不匹配，重新推理: "
+                            f"报告 {_src.get('advertised_frame_count')} "
+                            f"vs 当前 {len(pv.timestamps_ns)}"
+                        )
+                except (ValueError, KeyError, OSError) as exc:
+                    print(f"  手部产物校验失败，重新推理: {exc}")
+            if not reused:
+                try:
+                    hand_result = _run_hand_analysis(
+                        video_path=pv.video_path,
+                        timestamps_ns=pv.timestamps_ns,
+                        output_dir=output_dir,
+                        session_id=session_id,
+                        stream_id=next(iter(session.video_streams), "ego_rgb"),
+                    )
+                    hand_report_path = hand_result.get("hand_cleaning_report_path")
+                    print(f"  手部报告:    {hand_report_path}")
+                    print(f"  hands 2D:    {hand_result.get('hands_parquet')}")
+                except (
+                    FileNotFoundError,
+                    TypeError,
+                    ValueError,
+                    OSError,
+                    ImportError,
+                    RuntimeError,
+                ) as exc:
+                    print(f"  手部分析跳过: {exc}")
 
     if args.with_scene and pv.video_path:
         step_header(16, "场景分割 + VLM 复核（Stage 10 输入）")
