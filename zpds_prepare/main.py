@@ -822,6 +822,26 @@ def main():
                 "scene_pipeline_run": scene_pipeline_run,
                 "scene_config": scene_config,
             }
+            # Stage 12 音频质量：把 Session 音频流转为 QC 可消费格式
+            audio_streams_data: list[dict] = []
+            for audio_id, audio_s in session.audio_streams.items():
+                audio_streams_data.append({
+                    "stream_id": audio_id,
+                    "timestamps_ns": [p["timestamp_ns"] for p in audio_s.packets],
+                    "packets": audio_s.num_packets,
+                    "duration_s": (
+                        audio_s.duration_ns / 1e9 if audio_s.num_packets >= 2 else 0.0
+                    ),
+                    "source_topic": "/robot0/sensor/audio",
+                    "source_format": audio_s.format,
+                })
+            if audio_streams_data:
+                ctx["audio_streams"] = audio_streams_data
+                # 向后兼容 flat keys（清洗阶段无 WAV，只传时间戳/包数/时长）
+                first_audio = audio_streams_data[0]
+                ctx["audio_timestamps_ns"] = first_audio["timestamps_ns"]
+                ctx["audio_duration_s"] = first_audio["duration_s"]
+                ctx["audio_packets"] = first_audio["packets"]
             depth_s = session.depth_streams.get(stream_id)
             if depth_s is not None:
                 if depth_s.timestamps_ns:
