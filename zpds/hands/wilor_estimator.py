@@ -219,27 +219,7 @@ class WiLoRHandEstimator:
 
         # ---- 运行级终止检查 ----
         if self._run_aborted:
-            primary = ModelAttemptResult(
-                model_name="wilor",
-                backend_name="wilor",
-                status="not_run",
-                hands=[],
-                inference_ms=0.0,
-                failure_reason=f"Run aborted: {self._abort_reason}",
-                model_version=self._model_info.model_version,
-                checkpoint_sha256=self._model_info.checkpoint_sha256,
-                device=self._model_info.device,
-            )
-            return HandFrameResult(
-                timestamp_ms=timestamp_ms,
-                requested_model="wilor",
-                primary=primary,
-                fallback=None,
-                fallback_attempted=False,
-                fallback_used=False,
-                effective_model=None,
-                effective_hands=[],
-            )
+            return self._aborted_result(timestamp_ms)
 
         # ---- 输入校验 ----
         try:
@@ -291,6 +271,125 @@ class WiLoRHandEstimator:
         result = self.estimate_frame(frame_rgb, timestamp_ms)
         return list(result.effective_hands)
 
+    def estimate_batch(
+        self,
+        frames_rgb: list[np.ndarray],
+        timestamps_ms: list[int],
+    ) -> list[HandFrameResult]:
+        """对多帧批量推理，返回逐帧 :class:`HandFrameResult`。
+
+        与 :meth:`estimate_frame` 语义一致（帧状态 / 统计 / 失败分类 /
+        回退调度），差异仅在推理路径：adapter.detect_batch 一次调用覆盖
+        全部帧（backend 跨帧合并 batch），inference_ms 按帧均摊。
+
+        运行级异常直接抛出（与逐帧路径一致）；单帧级异常按帧记录为
+        failed 后继续，不中断批内其余帧。
+
+        Args:
+            frames_rgb: RGB uint8 图像列表。
+            timestamps_ms: 与 frames_rgb 等长的严格递增时间戳列表。
+
+        Returns:
+            与输入等长的 :class:`HandFrameResult` 列表。
+        """
+        if len(frames_rgb) != len(timestamps_ms):
+            raise ValueError(
+                "frames_rgb 与 timestamps_ms 长度必须一致: "
+                f"{len(frames_rgb)} vs {len(timestamps_ms)}"
+            )
+        n = len(frames_rgb)
+        if n == 0:
+            return []
+
+        results: list[HandFrameResult] = []
+        valid: list[int] = []  # 通过输入校验、需要真正推理的帧索引
+
+        # ---- 1. 逐帧输入校验（与 estimate_frame 同语义） ----
+        for i in range(n):
+            self._stats.total_frames += 1
+
+            if self._run_aborted:
+                results.append(self._aborted_result(timestamps_ms[i]))
+                continue
+
+            try:
+                _validate_input(frames_rgb[i], timestamps_ms[i])
+                if timestamps_ms[i] <= self._last_timestamp_ms:
+                    raise ValueError(
+                        f"timestamp_ms 必须严格递增: "
+                        f"当前 {timestamps_ms[i]} ≤ 上次 {self._last_timestamp_ms}"
+                    )
+            except (TypeError, ValueError) as exc:
+                self._stats.skipped_invalid_input += 1
+                results.append(self._invalid_input_result(
+                    timestamp_ms=timestamps_ms[i],
+                    reason=str(exc),
+                ))
+                continue
+
+            self._last_timestamp_ms = timestamps_ms[i]
+            valid.append(i)
+
+        # ---- 2. 单次批量推理（有效帧） ----
+        if valid:
+            t_start = time.perf_counter()
+            try:
+                per_frame_dets = self._adapter.detect_batch(
+                    [frames_rgb[i] for i in valid],
+                    [timestamps_ms[i] for i in valid],
+                )
+            except Exception as exc:
+                level = self.classify_error(exc)
+                if level == "run_level":
+                    self._run_aborted = True
+                    self._abort_reason = f"{type(exc).__name__}: {exc}"
+                    self._run_errors.append({
+                        "failure_type": type(exc).__name__,
+                        "failure_reason": str(exc),
+                        "level": "run_level",
+                    })
+                    raise  # 运行级异常直接抛出
+                # 单帧级：整批记失败，不中断后续帧
+                elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+                for i in valid:
+                    results[i] = self._record_frame_failure(
+                        elapsed_ms / len(valid),
+                        f"{type(exc).__name__}: {exc}",
+                    )
+            else:
+                elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+                per_frame_ms = elapsed_ms / len(valid)
+                for i, dets in zip(valid, per_frame_dets):
+                    results[i] = self._result_from_detections(
+                        frames_rgb[i], dets, timestamps_ms[i], per_frame_ms,
+                    )
+
+        # ---- 3. 运行级检查 + 对照/回退（仅有效帧，与 estimate_frame 对齐） ----
+        for i in valid:
+            self.should_abort()
+            if (
+                self._config.fallback_policy.compare_with_mediapipe
+                and self._fallback is not None
+            ):
+                self._run_comparison(frames_rgb[i], timestamps_ms[i])
+            results[i] = self._apply_fallback_policy(
+                frame_rgb=frames_rgb[i],
+                timestamp_ms=timestamps_ms[i],
+                primary=results[i].primary,
+            )
+
+        return results
+
+    @property
+    def supports_batch(self) -> bool:
+        """是否支持跨帧批量推理（pipeline 据此选择 buffered 循环）。
+
+        对照模式（WiLoR + MediaPipe 并行）不支持批量，保持逐帧。
+        """
+        if self._config.fallback_policy.compare_with_mediapipe:
+            return False
+        return callable(getattr(self._adapter, "detect_batch", None))
+
     # ---- 内部 ----
 
     def _run_wilor(
@@ -308,48 +407,8 @@ class WiLoRHandEstimator:
             detections = self._adapter.detect(frame_rgb, timestamp_ms)
             inference_ms = (time.perf_counter() - t_start) * 1000
 
-            self._consecutive_failures = 0
-            self._inference_times.append(inference_ms)
-            self._stats.total_inference_ms += inference_ms
-
-            if detections:
-                self._stats.detected += 1
-                status = "detected"
-                # 按 YOLO 置信度排序，最多保留 2 只手（filter low-confidence false positives）
-                detections = sorted(
-                    detections, key=lambda d: d.detection_score, reverse=True
-                )[:2]
-                hands: list[RawHandResult] = []
-                for det in detections:
-                    try:
-                        iw = det.transform.original_width if det.transform else frame_rgb.shape[1]
-                        ih = det.transform.original_height if det.transform else frame_rgb.shape[0]
-                        raw = convert_wilor_to_raw_hand_result(
-                            det,
-                            mapping=WILOR_TO_HANDS_V1_V1,
-                            image_width=iw,
-                            image_height=ih,
-                        )
-                        if raw is not None:
-                            hands.append(raw)
-                    except Exception:
-                        # 单个 detection 转换失败不拖垮整帧
-                        pass
-            else:
-                self._stats.no_hand += 1
-                status = "no_hand"
-                hands = []
-
-            return ModelAttemptResult(
-                model_name="wilor",
-                backend_name="wilor",
-                status=status,  # type: ignore[arg-type]
-                hands=hands,
-                inference_ms=inference_ms,
-                failure_reason=None,
-                model_version=self._model_info.model_version,
-                checkpoint_sha256=self._model_info.checkpoint_sha256,
-                device=self._model_info.device,
+            return self._result_from_detections(
+                frame_rgb, detections, timestamp_ms, inference_ms,
             )
 
         except NotImplementedError:
@@ -376,6 +435,62 @@ class WiLoRHandEstimator:
                 inference_ms,
                 f"{type(exc).__name__}: {exc}",
             )
+
+    def _result_from_detections(
+        self,
+        frame_rgb: np.ndarray,
+        detections: list,
+        timestamp_ms: int,
+        inference_ms: float,
+    ) -> ModelAttemptResult:
+        """从检测结果组装 ModelAttemptResult，并更新帧统计。
+
+        单帧（_run_wilor）与批量（estimate_batch）路径共用，保证
+        detected / no_hand 状态的统计与结果语义完全一致。
+        """
+        self._consecutive_failures = 0
+        self._inference_times.append(inference_ms)
+        self._stats.total_inference_ms += inference_ms
+
+        if detections:
+            self._stats.detected += 1
+            status = "detected"
+            # 按 YOLO 置信度排序，最多保留 2 只手（filter low-confidence false positives）
+            detections = sorted(
+                detections, key=lambda d: d.detection_score, reverse=True
+            )[:2]
+            hands: list[RawHandResult] = []
+            for det in detections:
+                try:
+                    iw = det.transform.original_width if det.transform else frame_rgb.shape[1]
+                    ih = det.transform.original_height if det.transform else frame_rgb.shape[0]
+                    raw = convert_wilor_to_raw_hand_result(
+                        det,
+                        mapping=WILOR_TO_HANDS_V1_V1,
+                        image_width=iw,
+                        image_height=ih,
+                    )
+                    if raw is not None:
+                        hands.append(raw)
+                except Exception:
+                    # 单个 detection 转换失败不拖垮整帧
+                    pass
+        else:
+            self._stats.no_hand += 1
+            status = "no_hand"
+            hands = []
+
+        return ModelAttemptResult(
+            model_name="wilor",
+            backend_name="wilor",
+            status=status,  # type: ignore[arg-type]
+            hands=hands,
+            inference_ms=inference_ms,
+            failure_reason=None,
+            model_version=self._model_info.model_version,
+            checkpoint_sha256=self._model_info.checkpoint_sha256,
+            device=self._model_info.device,
+        )
 
     def _record_frame_failure(
         self,
@@ -537,6 +652,30 @@ class WiLoRHandEstimator:
         """对照模式：无论 WiLoR 结果如何，同时运行 MediaPipe。"""
         comparison = self._run_mediapipe_fallback(frame_rgb, timestamp_ms)
         self._comparison_runs.append(comparison)
+
+    def _aborted_result(self, timestamp_ms: int) -> HandFrameResult:
+        """构造运行级终止（not_run）的 HandFrameResult。"""
+        primary = ModelAttemptResult(
+            model_name="wilor",
+            backend_name="wilor",
+            status="not_run",
+            hands=[],
+            inference_ms=0.0,
+            failure_reason=f"Run aborted: {self._abort_reason}",
+            model_version=self._model_info.model_version,
+            checkpoint_sha256=self._model_info.checkpoint_sha256,
+            device=self._model_info.device,
+        )
+        return HandFrameResult(
+            timestamp_ms=timestamp_ms,
+            requested_model="wilor",
+            primary=primary,
+            fallback=None,
+            fallback_attempted=False,
+            fallback_used=False,
+            effective_model=None,
+            effective_hands=[],
+        )
 
     def _invalid_input_result(
         self,

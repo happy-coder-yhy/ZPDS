@@ -113,6 +113,7 @@ class WiLoRConfig:
 
     device: str = "cpu"  # "cpu" | "cuda" | "cuda:0"
     precision: str = "float32"  # "float32" | "float16"
+    inference_batch_size: int = 16  # 跨帧 batch 推理的每批手数
 
     model_version: str = ""
 
@@ -129,6 +130,10 @@ class WiLoRConfig:
         if self.precision not in {"float32", "float16"}:
             raise ValueError(
                 f"precision 必须是 float32 或 float16，实际 {self.precision!r}"
+            )
+        if self.inference_batch_size < 1:
+            raise ValueError(
+                f"inference_batch_size 必须 ≥ 1，实际 {self.inference_batch_size}"
             )
         if not self.model_version.strip():
             raise ValueError("model_version 不能为空")

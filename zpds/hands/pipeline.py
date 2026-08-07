@@ -22,6 +22,9 @@ from zpds.hands.schemas import (
     RawHandResult,
 )
 
+# 跨帧 batch 推理的缓冲帧数（estimator 支持 estimate_batch 时启用）
+_BATCH_FRAMES = 16
+
 
 class PreparedFrameSource(Protocol):
     """Pipeline 所需的 Prepared Segment Reader 最小接口。"""
@@ -210,6 +213,28 @@ class HandsPipeline:
         previous_timestamp_ms: int | None = None
         started_at = time.perf_counter()
 
+        # 跨帧 batch：estimator 同时具备 estimate_batch 且声明支持时启用，
+        # 否则退回逐帧（MediaPipe 等轻量后端不受影响）。
+        _estimate_batch = getattr(self._estimator, "estimate_batch", None)
+        batchable = callable(_estimate_batch) and bool(
+            getattr(self._estimator, "supports_batch", False)
+        )
+        pending: list[tuple[PreparedFrame, int]] = []
+
+        def _apply_record(record: FrameInferenceRecord) -> None:
+            """更新帧级统计（单帧与批量路径共用）。"""
+            nonlocal observations_created, frames_with_hands
+            nonlocal frames_no_hand, frames_failed, frames_skipped_invalid_input
+            if record.effective_hands:
+                frames_with_hands += 1
+                observations_created += len(record.effective_hands)
+            if record.inference_status == "no_hand":
+                frames_no_hand += 1
+            elif record.inference_status == "failed":
+                frames_failed += 1
+            elif record.inference_status == "skipped_invalid_input":
+                frames_skipped_invalid_input += 1
+
         try:
             for frame in self._reader:
                 if (
@@ -223,58 +248,30 @@ class HandsPipeline:
                 )
                 previous_timestamp_ms = timestamp_ms
 
-                inference_started_at = time.perf_counter()
-                try:
-                    (
-                        inference_status,
-                        primary_results,
-                        effective_results,
-                        failure_reason,
-                        inference_ms,
-                        frame_result,
-                    ) = self._estimate_frame(
-                        frame,
-                        timestamp_ms,
-                    )
-                # 模型适配器属于第三方边界；任何单帧异常都必须转为 failed
-                # 状态，不能使后续 Prepared 帧丢失。
-                except Exception as error:  # noqa: BLE001
-                    inference_ms = (
-                        time.perf_counter() - inference_started_at
-                    ) * 1000.0
-                    self._frame_errors[frame.output_frame_index] = error
-                    record = FrameInferenceRecord(
-                        frame=frame,
-                        inference_status="failed",
-                        failure_reason=f"{type(error).__name__}: {error}",
-                        active_backend=self._active_backend,
-                        inference_ms=inference_ms,
-                    )
-                    frames_failed += 1
-                else:
-                    record = FrameInferenceRecord(
-                        frame=frame,
-                        inference_status=inference_status,
-                        raw_hands=tuple(primary_results),
-                        effective_hands=tuple(effective_results),
-                        frame_result=frame_result,
-                        failure_reason=failure_reason,
-                        active_backend=self._active_backend,
-                        inference_ms=inference_ms,
-                    )
-                    if effective_results:
-                        frames_with_hands += 1
-                        observations_created += len(effective_results)
-                    if inference_status == "no_hand":
-                        frames_no_hand += 1
-                    elif inference_status == "failed":
-                        frames_failed += 1
-                    elif inference_status == "skipped_invalid_input":
-                        frames_skipped_invalid_input += 1
+                if batchable:
+                    pending.append((frame, timestamp_ms))
+                    if len(pending) >= _BATCH_FRAMES:
+                        for record in self._process_pending(pending):
+                            frames_processed += 1
+                            _apply_record(record)
+                            self._frame_statistics.add(record)
+                            yield record
+                        pending = []
+                    continue
 
+                record = self._run_single_frame(frame, timestamp_ms)
                 frames_processed += 1
+                _apply_record(record)
                 self._frame_statistics.add(record)
                 yield record
+
+            # 尾部不足一批的残帧
+            if batchable and pending:
+                for record in self._process_pending(pending):
+                    frames_processed += 1
+                    _apply_record(record)
+                    self._frame_statistics.add(record)
+                    yield record
         finally:
             self._stats = PipelineStats(
                 frames_processed=frames_processed,
@@ -285,6 +282,108 @@ class HandsPipeline:
                 frames_skipped_invalid_input=frames_skipped_invalid_input,
                 elapsed_seconds=time.perf_counter() - started_at,
             )
+
+    def _run_single_frame(
+        self,
+        frame: PreparedFrame,
+        timestamp_ms: int,
+    ) -> FrameInferenceRecord:
+        """单帧推理并构造 FrameInferenceRecord。
+
+        try/except 语义与旧主循环一致：模型适配器属于第三方边界，
+        任何单帧异常都必须转为 failed，不能使后续 Prepared 帧丢失。
+        """
+        inference_started_at = time.perf_counter()
+        try:
+            (
+                inference_status,
+                primary_results,
+                effective_results,
+                failure_reason,
+                inference_ms,
+                frame_result,
+            ) = self._estimate_frame(
+                frame,
+                timestamp_ms,
+            )
+        except Exception as error:  # noqa: BLE001
+            inference_ms = (
+                time.perf_counter() - inference_started_at
+            ) * 1000.0
+            self._frame_errors[frame.output_frame_index] = error
+            return FrameInferenceRecord(
+                frame=frame,
+                inference_status="failed",
+                failure_reason=f"{type(error).__name__}: {error}",
+                active_backend=self._active_backend,
+                inference_ms=inference_ms,
+            )
+        return FrameInferenceRecord(
+            frame=frame,
+            inference_status=inference_status,
+            raw_hands=tuple(primary_results),
+            effective_hands=tuple(effective_results),
+            frame_result=frame_result,
+            failure_reason=failure_reason,
+            active_backend=self._active_backend,
+            inference_ms=inference_ms,
+        )
+
+    def _process_pending(
+        self,
+        pending: list[tuple[PreparedFrame, int]],
+    ) -> list[FrameInferenceRecord]:
+        """对一批缓冲帧执行跨帧批量推理，构造逐帧 FrameInferenceRecord。
+
+        批级异常（运行级/未分类）整批转 failed，不中断后续批次；
+        单帧级失败由 estimator 内部逐帧记录为 failed 状态。
+        """
+        frames = [frame for frame, _ in pending]
+        timestamps_ms = [ts for _, ts in pending]
+        try:
+            results = self._estimator.estimate_batch(frames, timestamps_ms)
+        except Exception as error:  # noqa: BLE001
+            for frame, _ in pending:
+                self._frame_errors[frame.output_frame_index] = error
+            return [
+                FrameInferenceRecord(
+                    frame=frame,
+                    inference_status="failed",
+                    failure_reason=f"{type(error).__name__}: {error}",
+                    active_backend=self._active_backend,
+                    inference_ms=0.0,
+                )
+                for frame, _ in pending
+            ]
+
+        records: list[FrameInferenceRecord] = []
+        for (frame, timestamp_ms), result in zip(pending, results):
+            if not isinstance(result, HandFrameResult):
+                raise TypeError(
+                    "estimator.estimate_batch() 必须返回 HandFrameResult，"
+                    f"实际为 {type(result).__name__}"
+                )
+            (
+                inference_status,
+                primary_results,
+                effective_results,
+                failure_reason,
+                inference_ms,
+                frame_result,
+            ) = self._extract_frame_result(frame, timestamp_ms, result)
+            records.append(
+                FrameInferenceRecord(
+                    frame=frame,
+                    inference_status=inference_status,
+                    raw_hands=tuple(primary_results),
+                    effective_hands=tuple(effective_results),
+                    frame_result=frame_result,
+                    failure_reason=failure_reason,
+                    active_backend=self._active_backend,
+                    inference_ms=inference_ms,
+                )
+            )
+        return records
 
     def _estimate_frame(
         self,
@@ -311,17 +410,6 @@ class HandsPipeline:
                     "estimator.estimate_frame() 必须返回 HandFrameResult，"
                     f"实际为 {type(result).__name__}"
                 )
-            primary = result.primary
-            if primary.status == "not_run":
-                raise RuntimeError(
-                    primary.failure_reason
-                    or "WiLoR run aborted before frame inference"
-                )
-            inference_status: InferenceStatus = primary.status
-            raw_results = list(primary.hands)
-            effective_results = list(result.effective_hands)
-            failure_reason = primary.failure_reason
-            inference_ms = float(primary.inference_ms)
         else:
             raw_results = self._estimator.estimate(
                 frame.frame_rgb,
@@ -351,6 +439,50 @@ class HandsPipeline:
                 ),
                 effective_hands=raw_results,
             )
+
+        return self._extract_frame_result(frame, timestamp_ms, result)
+
+    def _extract_frame_result(
+        self,
+        frame: PreparedFrame,
+        timestamp_ms: int,
+        result: HandFrameResult,
+    ) -> tuple[
+        InferenceStatus,
+        list[RawHandResult],
+        list[RawHandResult],
+        str | None,
+        float,
+        HandFrameResult,
+    ]:
+        """从 HandFrameResult 提取 6 元组并执行公共契约校验。
+
+        单帧路径（_estimate_frame）与批量路径（_process_pending）共用，
+        保证两条路径对模型结果的校验与转换完全一致。
+        """
+        primary = result.primary
+        if primary.status == "not_run":
+            raise RuntimeError(
+                primary.failure_reason
+                or "WiLoR run aborted before frame inference"
+            )
+        # 先做 list 类型检查再 list()，保证 () / None 等非法输出
+        # 被拒（与旧版对原始返回值的校验语义一致）。
+        if not isinstance(primary.hands, list):
+            raise TypeError(
+                "estimator 必须返回 list[RawHandResult]，"
+                f"实际为 {type(primary.hands).__name__}"
+            )
+        if not isinstance(result.effective_hands, list):
+            raise TypeError(
+                "HandFrameResult.effective_hands 必须是 list[RawHandResult]，"
+                f"实际为 {type(result.effective_hands).__name__}"
+            )
+        inference_status: InferenceStatus = primary.status
+        raw_results = list(primary.hands)
+        effective_results = list(result.effective_hands)
+        failure_reason = primary.failure_reason
+        inference_ms = float(primary.inference_ms)
 
         if not isinstance(raw_results, list):
             raise TypeError(
