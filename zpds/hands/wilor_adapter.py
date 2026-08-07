@@ -99,6 +99,41 @@ class WiLoRAdapter:
 
         return detections
 
+    def detect_batch(
+        self,
+        frames_rgb: list[np.ndarray],
+        timestamps_ms: list[int],
+    ) -> list[list[WiLoRDetection]]:
+        """对多帧批量执行检测，返回逐帧 WiLoRDetection 列表。
+
+        与 :meth:`detect` 语义完全一致，仅推理路径为跨帧合并 batch
+        （backend.infer_batch）。检测框由同一 YOLO 批量生成，坐标语义
+        与单帧路径相同。
+
+        Args:
+            frames_rgb: RGB uint8 图像列表。
+            timestamps_ms: 与 frames_rgb 等长的帧时间戳（毫秒）。
+
+        Returns:
+            逐帧 WiLoRDetection 列表；无检测的帧为空列表。
+        """
+        if len(frames_rgb) != len(timestamps_ms):
+            raise ValueError(
+                "frames_rgb 与 timestamps_ms 长度必须一致: "
+                f"{len(frames_rgb)} vs {len(timestamps_ms)}"
+            )
+
+        for frame_rgb, timestamp_ms in zip(frames_rgb, timestamps_ms):
+            _validate_input(frame_rgb, timestamp_ms)
+
+        raws = self._backend.infer_batch(list(frames_rgb))
+
+        per_frame_detections: list[list[WiLoRDetection]] = []
+        for raw, frame_rgb in zip(raws, frames_rgb):
+            h, w = frame_rgb.shape[:2]
+            per_frame_detections.append(_extract_detections(raw, w, h))
+        return per_frame_detections
+
     def close(self) -> None:
         self._backend.close()
 
