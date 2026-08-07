@@ -328,8 +328,10 @@ def _check_stage12(context: dict) -> list[Decision]:
     if audio_streams:
         for stream in audio_streams:
             sid = stream.get("stream_id", "ego_audio")
+            # 无 wav_uri 时跳过可读性/静音检测（清洗阶段尚未转码）
+            wav_path = stream.get("wav_uri") or None
             decisions.extend(check(
-                wav_path=stream.get("wav_uri"),
+                wav_path=wav_path,
                 timestamps_ns=stream.get("timestamps_ns"),
                 duration_s=stream.get("duration_s"),
                 packets=stream.get("packets"),
@@ -344,7 +346,7 @@ def _check_stage12(context: dict) -> list[Decision]:
 
     # 模式 3: flat keys
     return check(
-        wav_path=context.get("audio_wav_path"),
+        wav_path=context.get("audio_wav_path") or None,
         timestamps_ns=context.get("audio_timestamps_ns"),
         duration_s=context.get("audio_duration_s"),
         packets=context.get("audio_packets"),

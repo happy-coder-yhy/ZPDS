@@ -183,3 +183,27 @@ class TestStage12Registration:
         })
         assert report.decisions == []
         assert report.overall_pass is True
+
+    def test_cascade_audio_streams_gap_detected(self):
+        """清洗阶段 ctx（audio_streams 无 WAV）→ 缺口/时长决策。"""
+        from zpds.qc.stage12_audio import _check_stage12
+
+        # 50 个正常包 + 2s 缺口 + 50 个包
+        ts = [1_000_000_000 + i * 20_000_000 for i in range(50)]
+        ts += [1_000_000_000 + 50 * 20_000_000 + 2_000_000_000 + i * 20_000_000
+               for i in range(50)]
+        ctx = {
+            "audio_streams": [{
+                "stream_id": "ego_audio",
+                "timestamps_ns": ts,
+                "duration_s": 4.0,
+                "packets": 100,
+            }],
+            "stage_config": {},
+        }
+        decisions = _check_stage12(ctx)
+        reasons = {d.reason for d in decisions}
+        assert ReasonCode.AUDIO_GAP in reasons
+        assert ReasonCode.AUDIO_DURATION_MISMATCH in reasons
+        # 无 WAV → 不产出 unreadable
+        assert ReasonCode.AUDIO_UNREADABLE not in reasons
