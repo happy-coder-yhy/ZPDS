@@ -21,10 +21,16 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 import yaml
+
+if TYPE_CHECKING:
+    # 仅类型解析用（scene schemas 为纯 dataclass，无重依赖）。
+    # 运行时名字来自各函数体内的局部 import，保持延迟加载。
+    from zpds.scene.schemas import SceneProposal, VLMReviewResult
 
 from zpds.hands.schemas import PreparedFrame
 from zpds.qc import QCCascade
