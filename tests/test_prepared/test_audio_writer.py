@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import struct
 import subprocess
 import sys
@@ -32,6 +33,7 @@ from segment.audio_writer import (  # noqa: E402
     build_audio_sample_map,
     write_audio_stream,
 )
+from segment.validator import validate_audio_streams  # noqa: E402
 from zpds_prepare.readers.dunjia_reader import (  # noqa: E402
     AudioPacket,
     TOPIC_AUDIO,
@@ -300,3 +302,111 @@ class TestDunjiaReaderAudio:
             pytest.skip("旧 mcap 不存在")
         assert has_audio_topic(str(mcap)) is False
         assert read_audio(str(mcap)) == []
+
+
+# ---------------------------------------------------------------------------
+# 5. validator: validate_audio_streams
+# ---------------------------------------------------------------------------
+
+class TestValidateAudioStreams:
+    """校验 validate_audio_streams 对音频流的验证能力。"""
+
+    def _make_segment(self, tmp_path: Path, packets: int = 5) -> Path:
+        """构造一个含音频流的 segment 目录，返回 seg_dir。"""
+        # 用 write_audio_stream 生成真实 WAV + sample_map
+        base = 1_700_000_000_000_000_000
+        pkts = [
+            {"timestamp_ns": base + i * 20_000_000,
+             "data": _fake_opus_packet(),
+             "format": "opus",
+             "log_time_ns": base + i * 20_000_000}
+            for i in range(packets)
+        ]
+        result = write_audio_stream(
+            packets=pkts,
+            output_dir=tmp_path,
+            source_start_ns=base,
+            source_end_ns=base + packets * 20_000_000 + 1,
+        )
+        # 构造 segment dict
+        segment = {
+            "streams": [{
+                "stream_id": result["stream_id"],
+                "modality": "audio",
+                "uri": result["uri"],
+                "format": "wav",
+                "sample_rate": result["sample_rate"],
+                "channels": result["channels"],
+                "packets": result["packets"],
+                "origin": {"sample_map_uri": result["sample_map_uri"]},
+            }]
+        }
+        import json as _json
+        (tmp_path / "segment.json").write_text(_json.dumps(segment), encoding="utf-8")
+        return tmp_path
+    def test_valid_pass(self, tmp_path):
+        seg_dir = self._make_segment(tmp_path)
+        with open(seg_dir / "segment.json", encoding="utf-8") as f:
+            segment = json.load(f)
+        report = validate_audio_streams(seg_dir, segment)
+        assert report["status"] == "pass"
+        assert report["checks"]["audio_streams_valid"] == "pass"
+        assert report["checks"]["audio_ego_audio_file"] == "pass"
+        assert report["checks"]["audio_ego_audio_sample_map"] == "pass"
+        assert report["checks"]["audio_ego_audio_duration"] == "pass"
+        assert report["statistics"]["audio_ego_audio_duration_s"] == pytest.approx(0.1, abs=0.01)
+        assert report["statistics"]["audio_ego_audio_sample_rate"] == 16000
+
+    def test_valid_no_audio_streams_skip(self, tmp_path):
+        segment = {"streams": []}
+        report = validate_audio_streams(tmp_path, segment)
+        assert report["status"] == "skip"
+        assert report["checks"]["audio_streams_valid"] == "skip"
+
+    def test_valid_missing_wav_fails(self, tmp_path):
+        segment = {
+            "streams": [{
+                "stream_id": "ego_audio",
+                "modality": "audio",
+                "uri": "data/ego_audio.wav",  # 文件不存在
+                "format": "wav",
+                "sample_rate": 16000,
+                "channels": 1,
+                "packets": 5,
+                "origin": {"sample_map_uri": "maps/ego_audio_sample_map.parquet"},
+            }]
+        }
+        report = validate_audio_streams(tmp_path, segment)
+        assert report["status"] == "fail"
+        assert report["checks"]["audio_ego_audio_file"] == "fail"
+
+    def test_valid_missing_sample_map_fails(self, tmp_path):
+        seg_dir = self._make_segment(tmp_path)
+        with open(seg_dir / "segment.json", encoding="utf-8") as f:
+            segment = json.load(f)
+        # 删除 sample_map
+        sm = seg_dir / "maps" / "ego_audio_sample_map.parquet"
+        sm.unlink()
+        report = validate_audio_streams(seg_dir, segment)
+        assert report["status"] == "fail"
+        assert report["checks"]["audio_ego_audio_sample_map"] == "fail"
+
+    def test_valid_metadata_mismatch_fails(self, tmp_path):
+        seg_dir = self._make_segment(tmp_path)
+        with open(seg_dir / "segment.json", encoding="utf-8") as f:
+            segment = json.load(f)
+        # 篡改 sample_rate 元数据
+        segment["streams"][0]["sample_rate"] = 99999
+        report = validate_audio_streams(seg_dir, segment)
+        assert report["status"] == "fail"
+        assert report["checks"]["audio_ego_audio_metadata"] == "fail"
+
+    def test_valid_duration_mismatch_fails(self, tmp_path):
+        seg_dir = self._make_segment(tmp_path)
+        with open(seg_dir / "segment.json", encoding="utf-8") as f:
+            segment = json.load(f)
+        # 篡改 packets 数（实际 5 包 = 0.1s，声明 100 包 = 2s）
+        segment["streams"][0]["packets"] = 100
+        report = validate_audio_streams(seg_dir, segment)
+        assert report["status"] == "fail"
+        assert report["checks"]["audio_ego_audio_duration"] == "fail"

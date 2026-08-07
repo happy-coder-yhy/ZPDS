@@ -5,6 +5,7 @@
 import hashlib
 import json
 import time
+import wave
 from functools import lru_cache
 from pathlib import Path
 
@@ -402,6 +403,127 @@ def validate_depth_streams(seg_dir: Path, segment: dict) -> dict:
 
     status = "fail" if errors else "warn" if any_warning else "pass"
     checks["depth_streams_valid"] = status
+    return {
+        "status": status,
+        "checks": checks,
+        "statistics": stats,
+        "errors": errors,
+    }
+
+
+def _probe_wav(path: Path) -> tuple[bool, int, int, float]:
+    """读取 WAV 头，返回 (可读, 采样率, 声道数, 时长秒)。"""
+    try:
+        with wave.open(str(path), "rb") as w:
+            rate = w.getframerate()
+            channels = w.getnchannels()
+            frames = w.getnframes()
+            if rate <= 0:
+                return False, 0, 0, 0.0
+            duration_s = frames / rate
+            return True, rate, channels, duration_s
+    except (wave.Error, EOFError, OSError):
+        return False, 0, 0, 0.0
+
+
+def validate_audio_streams(seg_dir: Path, segment: dict) -> dict:
+    """校验 Prepared Segment 中的音频流。
+
+    检查：
+      - WAV 文件存在且可读（wave 头解析）
+      - sample_map 存在且行数 = 音频包数
+      - WAV 时长 ≈ 包数 × 20ms（Opus 帧长，容差 0.5s）
+      - segment.json 中的音频流元数据与文件一致
+
+    Returns:
+        {"status": "pass"|"fail"|"skip", "checks": {...}, "statistics": {...}, "errors": [...]}
+    """
+    audio_streams = [
+        s for s in segment.get("streams", [])
+        if s.get("modality") == "audio"
+    ]
+    checks: dict[str, str] = {}
+    stats: dict[str, float | int] = {}
+    errors: list[str] = []
+
+    if not audio_streams:
+        return {
+            "status": "skip",
+            "checks": {"audio_streams_valid": "skip"},
+            "statistics": {},
+            "errors": [],
+        }
+
+    for stream in audio_streams:
+        sid = stream["stream_id"]
+        uri = stream.get("uri", "")
+        wav_path = seg_dir / uri if uri else None
+
+        # 1. WAV 存在且可读
+        if not wav_path or not wav_path.exists():
+            errors.append(f"[{sid}] Missing audio file: {wav_path}")
+            checks[f"audio_{sid}_file"] = "fail"
+            continue
+        ok, rate, channels, duration_s = _probe_wav(wav_path)
+        if not ok:
+            errors.append(f"[{sid}] WAV unreadable: {wav_path}")
+            checks[f"audio_{sid}_file"] = "fail"
+            continue
+        checks[f"audio_{sid}_file"] = "pass"
+        stats[f"audio_{sid}_duration_s"] = round(duration_s, 3)
+        stats[f"audio_{sid}_sample_rate"] = rate
+        stats[f"audio_{sid}_channels"] = channels
+
+        # 2. 元数据一致性：sample_rate / channels
+        if stream.get("sample_rate") and stream["sample_rate"] != rate:
+            errors.append(
+                f"[{sid}] segment.json sample_rate={stream['sample_rate']} != WAV {rate}"
+            )
+            checks[f"audio_{sid}_metadata"] = "fail"
+        elif stream.get("channels") and stream["channels"] != channels:
+            errors.append(
+                f"[{sid}] segment.json channels={stream['channels']} != WAV {channels}"
+            )
+            checks[f"audio_{sid}_metadata"] = "fail"
+        else:
+            checks[f"audio_{sid}_metadata"] = "pass"
+
+        # 3. sample_map 存在且行数 = 包数
+        sm_uri = stream.get("origin", {}).get("sample_map_uri", "")
+        packets = stream.get("packets", 0)
+        if not sm_uri:
+            errors.append(f"[{sid}] Missing sample_map_uri")
+            checks[f"audio_{sid}_sample_map"] = "fail"
+        else:
+            sm_path = seg_dir / sm_uri
+            if not sm_path.exists():
+                errors.append(f"[{sid}] Missing sample_map: {sm_path}")
+                checks[f"audio_{sid}_sample_map"] = "fail"
+            else:
+                sm = pd.read_parquet(str(sm_path))
+                stats[f"audio_{sid}_sample_map_rows"] = len(sm)
+                if packets and len(sm) != packets:
+                    errors.append(
+                        f"[{sid}] sample_map rows ({len(sm)}) != packets ({packets})"
+                    )
+                    checks[f"audio_{sid}_sample_map"] = "fail"
+                else:
+                    checks[f"audio_{sid}_sample_map"] = "pass"
+
+        # 4. 时长一致性：WAV 时长 ≈ 包数 × 20ms
+        if packets:
+            expected_s = packets * 0.02  # Opus 20ms/包
+            if abs(duration_s - expected_s) > 0.5:
+                errors.append(
+                    f"[{sid}] WAV duration {duration_s:.2f}s != expected {expected_s:.2f}s "
+                    f"(packets={packets})"
+                )
+                checks[f"audio_{sid}_duration"] = "fail"
+            else:
+                checks[f"audio_{sid}_duration"] = "pass"
+
+    status = "fail" if errors else "pass"
+    checks["audio_streams_valid"] = status
     return {
         "status": status,
         "checks": checks,
@@ -835,6 +957,12 @@ def validate_segment(output_dir: str) -> dict:
     checks.update(depth_validation["checks"])
     stats.update(depth_validation["statistics"])
     errors.extend(depth_validation["errors"])
+
+    # ---- 6b. 音频流：WAV 可读、sample_map、时长一致性 ----
+    audio_validation = validate_audio_streams(seg_dir, segment)
+    checks.update(audio_validation["checks"])
+    stats.update(audio_validation["statistics"])
+    errors.extend(audio_validation["errors"])
 
     # ---- 7. IMU 可读且时间单调（按 segment.json 中每个 IMU 流检查） ----
     imu_streams = [s for s in segment.get("streams", []) if s.get("modality") == "imu"]
