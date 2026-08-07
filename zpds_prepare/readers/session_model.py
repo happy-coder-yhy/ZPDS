@@ -149,6 +149,35 @@ class TimeSeriesStream:
 
 
 @dataclass
+class AudioStream:
+    """单个音频流的数据（foxglove.CompressedAudio → 统一 AudioStream）。
+
+    Attributes:
+        stream_id: 流标识，如 "ego_audio", "robot0_audio"
+        packets: 解码后的音频包列表 [{timestamp_ns, data, format, log_time_ns}, ...]
+        sample_rate_hz: 源采样率（Opus 内部固定 48000）
+        channels: 声道数（1=mono, 2=stereo）
+        format: 压缩格式（如 "opus"）
+    """
+
+    stream_id: str
+    packets: list[dict[str, Any]] = field(default_factory=list)
+    sample_rate_hz: int = 48000
+    channels: int = 1
+    format: str = "opus"
+
+    @property
+    def num_packets(self) -> int:
+        return len(self.packets)
+
+    @property
+    def duration_ns(self) -> int:
+        if len(self.packets) < 2:
+            return 0
+        return self.packets[-1]["timestamp_ns"] - self.packets[0]["timestamp_ns"]
+
+
+@dataclass
 class Session:
     """一次采集 Session 的全部流数据。
 
@@ -168,6 +197,7 @@ class Session:
     video_streams: dict[str, VideoStream] = field(default_factory=dict)
     depth_streams: dict[str, DepthStream] = field(default_factory=dict)
     imu_streams: dict[str, ImuStream] = field(default_factory=dict)
+    audio_streams: dict[str, AudioStream] = field(default_factory=dict)
     annotation_streams: dict[str, AnnotationStream] = field(default_factory=dict)
     time_series_streams: dict[str, TimeSeriesStream] = field(default_factory=dict)
 
