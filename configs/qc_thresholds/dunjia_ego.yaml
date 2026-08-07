@@ -107,3 +107,13 @@ stage11_dedup:
     enabled: false               # Dunjia 无机器人轨迹
     correlation_min: 0.95
     n_bins: 20
+
+stage12_audio:
+  # 音频质量检测 (Stage 12)
+  enabled: true
+  silence_ratio_threshold: 0.90   # 静音占比超此值告警
+  abs_threshold: 100              # 采样绝对值低于此值视为静音
+  gap_factor: 2.5                 # 包间隔超过期望×N 倍告警
+  gap_min_s: 0.2                  # 缺口最小秒数
+  duration_tolerance_s: 0.5       # 时长偏差容差（秒）
+  expected_packet_s: 0.02         # Opus 包长（20ms）

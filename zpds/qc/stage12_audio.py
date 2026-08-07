@@ -279,8 +279,13 @@ def _check_stage12(context: dict) -> list[Decision]:
     decisions: list[Decision] = []
 
     stage_config = context.get("stage_config", {}) or {}
+    if not stage_config.get("enabled", True):
+        return decisions  # 配置禁用
+
     silence_ratio = stage_config.get("silence_ratio_threshold", DEFAULT_SILENCE_RATIO_THRESHOLD)
+    abs_threshold = stage_config.get("abs_threshold", DEFAULT_SILENCE_ABS_THRESHOLD)
     gap_factor = stage_config.get("gap_factor", DEFAULT_GAP_FACTOR)
+    gap_min_s = stage_config.get("gap_min_s", DEFAULT_GAP_MIN_S)
     duration_tol = stage_config.get("duration_tolerance_s", DEFAULT_DURATION_TOLERANCE_S)
 
     # 模式 1: Prepared Segment 目录
@@ -309,8 +314,10 @@ def _check_stage12(context: dict) -> list[Decision]:
                     timestamps_ns=ts,
                     duration_s=stream.get("duration_s"),
                     packets=stream.get("packets"),
+                    silence_abs_threshold=abs_threshold,
                     silence_ratio_threshold=silence_ratio,
                     gap_factor=gap_factor,
+                    gap_min_s=gap_min_s,
                     duration_tolerance_s=duration_tol,
                     stream_id=sid,
                 ))
@@ -326,8 +333,10 @@ def _check_stage12(context: dict) -> list[Decision]:
                 timestamps_ns=stream.get("timestamps_ns"),
                 duration_s=stream.get("duration_s"),
                 packets=stream.get("packets"),
+                silence_abs_threshold=abs_threshold,
                 silence_ratio_threshold=silence_ratio,
                 gap_factor=gap_factor,
+                gap_min_s=gap_min_s,
                 duration_tolerance_s=duration_tol,
                 stream_id=sid,
             ))
@@ -339,8 +348,10 @@ def _check_stage12(context: dict) -> list[Decision]:
         timestamps_ns=context.get("audio_timestamps_ns"),
         duration_s=context.get("audio_duration_s"),
         packets=context.get("audio_packets"),
+        silence_abs_threshold=abs_threshold,
         silence_ratio_threshold=silence_ratio,
         gap_factor=gap_factor,
+        gap_min_s=gap_min_s,
         duration_tolerance_s=duration_tol,
         stream_id=context.get("stream_id", "ego_audio"),
     )
