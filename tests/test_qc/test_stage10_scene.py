@@ -58,7 +58,10 @@ class FakeReviewer:
 
 def _run_pipeline(decision: str = "consistent", confidence: float = 0.9):
     fixture = hard_cut_fixture(fps=10.0)
-    config = SceneConfig.load(DEFAULT_CONFIG)
+    # 默认配置已关闭，显式启用以验证「启用」路径
+    config = dataclasses.replace(
+        SceneConfig.load(DEFAULT_CONFIG), enabled=True
+    )
     run = run_scene_pipeline(
         fixture.frames,
         fps=fixture.fps,

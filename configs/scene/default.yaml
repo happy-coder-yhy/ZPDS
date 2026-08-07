@@ -1,5 +1,7 @@
 scene:
-  enabled: true
+  # 默认关闭场景分割 + VLM 复核（主流程 --with-scene 也要求此处为 true 才会执行）。
+  # 需要启用时改为 true，再以 --with-scene 运行。
+  enabled: false
   output_dir: ../../output/scene
 
   governance:

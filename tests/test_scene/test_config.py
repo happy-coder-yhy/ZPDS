@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
@@ -27,7 +28,7 @@ def _default_document() -> dict:
 def test_default_config_loads_all_required_sections() -> None:
     config = SceneConfig.load(DEFAULT_CONFIG)
 
-    assert config.enabled is True
+    assert config.enabled is False
     assert config.stage_a.smoothing_window_frames == 5
     assert config.stage_a.merge_window_s == 0.5
     assert config.stage_b.model == "facebook/dinov2-small"
@@ -112,7 +113,11 @@ def test_config_rejects_invalid_values(tmp_path: Path, mutate, message: str) -> 
 
 
 def test_router_does_not_load_model_runtime() -> None:
-    router = SceneBackendRouter.from_config(SceneConfig.load(DEFAULT_CONFIG))
+    # 默认配置已关闭，显式启用以验证 router 的 backend 映射
+    config = dataclasses.replace(
+        SceneConfig.load(DEFAULT_CONFIG), enabled=True
+    )
+    router = SceneBackendRouter.from_config(config)
 
     assert router.policy.enabled is True
     assert router.policy.stage_a_backends == (

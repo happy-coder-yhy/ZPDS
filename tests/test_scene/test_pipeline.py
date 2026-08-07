@@ -67,7 +67,10 @@ def _fixture_frames():
 class TestPipeline:
     def test_end_to_end_with_consistent_vlm(self) -> None:
         frames, fps = _fixture_frames()
-        config = SceneConfig.load(DEFAULT_CONFIG)
+        # 默认配置已关闭，显式启用以验证「启用」路径
+        config = dataclasses.replace(
+            SceneConfig.load(DEFAULT_CONFIG), enabled=True
+        )
         run = run_scene_pipeline(
             frames,
             fps=fps,
@@ -90,7 +93,10 @@ class TestPipeline:
 
     def test_low_confidence_vlm_enters_review_queue(self) -> None:
         frames, fps = _fixture_frames()
-        config = SceneConfig.load(DEFAULT_CONFIG)
+        # 默认配置已关闭，显式启用以验证「启用」路径
+        config = dataclasses.replace(
+            SceneConfig.load(DEFAULT_CONFIG), enabled=True
+        )
         run = run_scene_pipeline(
             frames,
             fps=fps,
@@ -129,7 +135,10 @@ class TestWriterValidator:
         self, tmp_path: Path
     ) -> None:
         frames, fps = _fixture_frames()
-        config = SceneConfig.load(DEFAULT_CONFIG)
+        # 默认配置已关闭，显式启用以验证「启用」路径
+        config = dataclasses.replace(
+            SceneConfig.load(DEFAULT_CONFIG), enabled=True
+        )
         run = run_scene_pipeline(
             frames,
             fps=fps,

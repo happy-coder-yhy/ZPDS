@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -52,9 +53,17 @@ def test_read_video_and_stage1_cli_json(tmp_path: Path) -> None:
     assert len(video.frames) == len(fixture.frames)
     assert video.fps == fixture.fps
 
+    # 默认配置已关闭，用 enabled: true 的副本验证 CLI 入口
+    document = yaml.safe_load(
+        Path("configs/scene/default.yaml").read_text(encoding="utf-8")
+    )
+    document["scene"]["enabled"] = True
+    enabled_path = tmp_path / "scene-enabled.yaml"
+    enabled_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
     args = argparse.Namespace(
         input=str(video_path),
-        config="configs/scene/default.yaml",
+        config=str(enabled_path),
         profile=None,
         stage="1",
         start_ns=0,
@@ -76,7 +85,10 @@ def test_read_video_and_stage1_cli_json(tmp_path: Path) -> None:
 
 
 def test_stage2_in_memory_uses_fake_embedding_without_model_download() -> None:
-    config = SceneConfig.load("configs/scene/default.yaml")
+    # 默认配置已关闭，显式启用以验证「启用」路径
+    config = dataclasses.replace(
+        SceneConfig.load("configs/scene/default.yaml"), enabled=True
+    )
     frames = [
         np.full((8, 8, 3), 0 if index < 35 else 255, dtype=np.uint8)
         for index in range(70)
@@ -101,7 +113,10 @@ def test_stage2_in_memory_uses_fake_embedding_without_model_download() -> None:
 
 
 def test_all_stage_produces_final_scenes_with_fake_embedding() -> None:
-    config = SceneConfig.load("configs/scene/default.yaml")
+    # 默认配置已关闭，显式启用以验证「启用」路径
+    config = dataclasses.replace(
+        SceneConfig.load("configs/scene/default.yaml"), enabled=True
+    )
     frames = [
         np.full((16, 16, 3), 0 if index < 35 else 255, dtype=np.uint8)
         for index in range(70)
@@ -130,7 +145,10 @@ def test_all_stage_produces_final_scenes_with_fake_embedding() -> None:
 
 
 def test_all_stage_passes_stage1_candidates_to_dino() -> None:
-    config = SceneConfig.load("configs/scene/default.yaml")
+    # 默认配置已关闭，显式启用以验证「启用」路径
+    config = dataclasses.replace(
+        SceneConfig.load("configs/scene/default.yaml"), enabled=True
+    )
     fixture = hard_cut_fixture()
 
     class RecordingDino(DinoV2SmallEmbedder):
