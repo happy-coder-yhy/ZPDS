@@ -84,6 +84,11 @@ class ReasonCode(str, Enum):
     SCENE_BOUNDARY_LOW_CONFIDENCE = "scene_boundary_low_confidence"
     # Stage 11 — 去重
     NEAR_DUPLICATE = "near_duplicate"
+    # Stage 12 — 音频
+    AUDIO_SILENCE = "audio_silence"
+    AUDIO_GAP = "audio_gap"
+    AUDIO_DURATION_MISMATCH = "audio_duration_mismatch"
+    AUDIO_UNREADABLE = "audio_unreadable"
     # Stage 12 — 交付
     DELIVERY_CHECK_FAIL = "delivery_check_fail"
     # Stage 0 — 隐私门（挂在级联最前，不改 Stage 0~12 编号）
