@@ -233,7 +233,8 @@ def _probe_with_ffprobe(video_path: Path) -> dict:
         "-of", "json",
         str(video_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe 失败: {result.stderr.strip()}")
 
@@ -309,7 +310,8 @@ def read_frame_pts_ns(video_path: Path, fast: bool = False) -> list[int]:
     ]
     # ffprobe 逐帧 PTS 对大视频（30min+ 59.94fps）极慢，设 30s 超时回退推算
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                                encoding="utf-8", errors="replace")
     except (subprocess.TimeoutExpired, FileNotFoundError):
         result = None
 

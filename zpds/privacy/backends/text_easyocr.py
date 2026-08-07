@@ -180,12 +180,19 @@ class EasyOCRTextDetector:
                     for d in detections
                 ):
                     continue
+                # easyocr 的框可能略微超出图像边缘，clamp 后再归一化
+                cx1 = max(0, min(w, int(min(xs))))
+                cy1 = max(0, min(h, int(min(ys))))
+                cx2 = max(0, min(w, int(max(xs))))
+                cy2 = max(0, min(h, int(max(ys))))
+                if cx2 <= cx1 or cy2 <= cy1:
+                    continue
                 detections.append(TextDetection(
                     frame_index=frame_index,
                     timestamp_ns=timestamp_ns,
                     bbox_xyxy=(
-                        float(min(xs)) / w, float(min(ys)) / h,
-                        float(max(xs)) / w, float(max(ys)) / h,
+                        float(cx1) / w, float(cy1) / h,
+                        float(cx2) / w, float(cy2) / h,
                     ),
                     text=text.strip(),
                     confidence=float(conf),

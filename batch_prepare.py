@@ -235,7 +235,43 @@ def _overlay_redactions(
     finally:
         capture.release()
         writer.release()
-    os.replace(tmp_path, video_path)
+    # mp4v 中间产物 → H.264 重编码（体积小、兼容性好），失败回退 mp4v
+    if not _recode_h264(tmp_path, video_path):
+        os.replace(tmp_path, video_path)
+
+
+def _recode_h264(src: Path, dst: Path) -> bool:
+    """把 mp4v 中间产物重编码为 H.264 (libx264, crf 23)。
+
+    OpenCV 的 mp4v 编码效率低（脱敏产物会从 22M 涨到 65M），
+    用 ffmpeg 重编码可显著缩小体积。失败时返回 False（回退 mp4v）。
+    """
+    import shutil
+    import subprocess
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False
+    command = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(src),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        str(dst),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and dst.is_file() and dst.stat().st_size > 0
 
 
 def _redact_segment_videos(
@@ -676,6 +712,34 @@ def generate_segment(
     }
 
 
+def _verify_source_frames(
+    *,
+    primary_video,
+    candidates_doc: dict,
+    dataset_path: str,
+) -> list[str]:
+    """比对源视频实际帧数与 candidates 声明的时长（duration_s × fps）。
+
+    防止 -d 传错数据源（例如默认旧数据 983 帧 vs 新数据 1278 帧），
+    这类错误跑完整轮后 validation 才暴露。容差 ±2 帧。
+    返回错误信息列表，空列表表示一致。
+    """
+    errors: list[str] = []
+    duration_s = float(candidates_doc.get("source_duration_s") or 0.0)
+    fps = getattr(primary_video, "fps", None) or 30.0
+    if duration_s <= 0 or fps <= 0:
+        return errors
+    expected = round(duration_s * fps)
+    actual = int(primary_video.frame_count)
+    if abs(actual - expected) > 2:
+        errors.append(
+            f"源视频实际 {actual} 帧（{actual / fps:.1f}s @{fps:.1f}fps）"
+            f"与候选声明时长 {duration_s:.3f}s（≈{expected} 帧）不一致，"
+            f"疑似 --dataset/-d 传错数据源: {dataset_path}"
+        )
+    return errors
+
+
 def step_header(title: str):
     print(f"\n{'=' * 60}")
     print(f"  {title}")
@@ -693,8 +757,8 @@ def main():
     )
     parser.add_argument(
         "--dataset", "-d",
-        default=DATASET,
-        help="数据集路径 (墨现: 目录; 遁甲: .mcap 文件)",
+        default=None,
+        help="数据集路径 (必填; 墨现: 目录; 遁甲/UMI: .mcap 文件)",
     )
     parser.add_argument(
         "--output", "-o",
@@ -755,6 +819,12 @@ def main():
     else:
         candidates_path = Path(args.candidates)
 
+    # ---- 数据源路径必填（防止静默读默认旧数据，跑完整轮才发现） ----
+    if not args.dataset:
+        print("错误: --dataset/-d 必填（数据源路径）")
+        print("  墨现 guida: 数据目录（含 color/ 与 index.jsonl）")
+        print("  遁甲 dunjia / UMI: .mcap 文件")
+        return 1
     dataset_path = args.dataset
 
     # 默认输出目录按 profile 分子目录
@@ -764,6 +834,13 @@ def main():
         output_root = Path("output") / subdir / "prepared_segments"
     else:
         output_root = Path(args.output)
+
+    # 中文路径 fail-fast：深度 PNG / MP4 由 cv2.imread/imwrite 处理，
+    # 不支持非 ASCII 路径（静默失败），命中立即报错而不是跑一段再挂。
+    if not output_root.as_posix().isascii():
+        print(f"错误: 输出目录必须为纯 ASCII 路径（cv2 不支持中文路径）: {output_root}")
+        print("请改用英文目录，例如: --output output/taodai2/prepared_segments")
+        return 1
 
     # ZPDS dataset 结构：prepared_segments/<prep_revision>/<segment_id>/
     prep_revision = REVISION
@@ -778,10 +855,16 @@ def main():
     # 场景切换后画面布局剧变，KLT 传播必然失效，在这些帧重新完整检测。
     # 注意：scene run 的时间戳是"帧号/fps 重算"的（run_summary 中 start_ns=0），
     # 与 candidates 的原始 MKV 时间戳不同轴 → 边界直接换算为完整视频帧号。
+    # scene 产物位置与 main.py 一致：{output_root}/{prep_revision}/seg_000001/scene
     scene_boundary_frames: list[int] = []
     if args.with_privacy:
-        scene_dir = output_root.parent / "scene"
+        scene_dir = output_root / prep_revision / "seg_000001" / "scene"
         scene_file = scene_dir / "scene_proposals.parquet"
+        # 兼容旧布局（{output_root.parent}/scene），新数据不再产生。
+        legacy_scene_file = output_root.parent / "scene" / "scene_proposals.parquet"
+        if not scene_file.is_file() and legacy_scene_file.is_file():
+            scene_dir = output_root.parent / "scene"
+            scene_file = legacy_scene_file
         if scene_file.is_file():
             try:
                 scene_fps = 30.0
@@ -853,6 +936,14 @@ def main():
         pv = session.primary_video
         index_frames = pv.index_frames
         timestamps_ns = pv.timestamps_ns
+        _source_errors = _verify_source_frames(
+            primary_video=pv, candidates_doc=candidates_doc, dataset_path=dataset_path
+        )
+        if _source_errors:
+            for _err in _source_errors:
+                print(f"错误: {_err}")
+            print("中止处理，请核对 --dataset/-d。")
+            return 1
         print(f"  camera0: {pv.frame_count} 帧, "
               f"时间范围: {timestamps_ns[0]:,} → {timestamps_ns[-1]:,}")
         print(f"  摄像头: {len(session.video_streams)} 个")
@@ -922,6 +1013,14 @@ def main():
         pv = session.primary_video
         index_frames = pv.index_frames
         timestamps_ns = pv.timestamps_ns
+        _source_errors = _verify_source_frames(
+            primary_video=pv, candidates_doc=candidates_doc, dataset_path=dataset_path
+        )
+        if _source_errors:
+            for _err in _source_errors:
+                print(f"错误: {_err}")
+            print("中止处理，请核对 --dataset/-d。")
+            return 1
         print(f"  {pv.stream_id}: {pv.frame_count} 帧, "
               f"时间范围: {timestamps_ns[0]:,} → {timestamps_ns[-1]:,}")
         print(f"  摄像头: {len(session.video_streams)} 个, "
@@ -1009,6 +1108,14 @@ def main():
         pv = session.primary_video
         index_frames = pv.index_frames
         timestamps_ns = pv.timestamps_ns
+        _source_errors = _verify_source_frames(
+            primary_video=pv, candidates_doc=candidates_doc, dataset_path=dataset_path
+        )
+        if _source_errors:
+            for _err in _source_errors:
+                print(f"错误: {_err}")
+            print("中止处理，请核对 --dataset/-d。")
+            return 1
         print(f"  ego_rgb: {pv.frame_count} 帧, {pv.width}×{pv.height}, {pv.fps} fps")
         print(f"  时间范围: {timestamps_ns[0]:,} → {timestamps_ns[-1]:,}")
         print(f"  标注流: {len(session.annotation_streams)} 个")
@@ -1062,6 +1169,14 @@ def main():
         pv = session.primary_video
         index_frames = pv.index_frames
         timestamps = pv.timestamps_ns
+        _source_errors = _verify_source_frames(
+            primary_video=pv, candidates_doc=candidates_doc, dataset_path=dataset_path
+        )
+        if _source_errors:
+            for _err in _source_errors:
+                print(f"错误: {_err}")
+            print("中止处理，请核对 --dataset/-d。")
+            return 1
         print(f"  总帧数: {len(index_frames)}, "
               f"时间范围: {timestamps[0]:,} → {timestamps[-1]:,}")
 

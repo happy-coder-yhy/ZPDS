@@ -42,6 +42,8 @@ def _probe_video(path: Path) -> dict | None:
                 probe_cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=15,
                 check=False,
             )
@@ -339,6 +341,8 @@ def _transcode_with_ffmpeg(
         stderr=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,  # line-buffered
     )
     stderr_tail: list[str] = []

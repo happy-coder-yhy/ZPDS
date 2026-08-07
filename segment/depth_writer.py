@@ -139,6 +139,8 @@ def _decode_video_range(
         command,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=600,
         check=False,
     )
@@ -426,6 +428,18 @@ def write_depth_stream(
                             f"深度源帧不存在: {source_png} "
                             f"(source_frame_index={row.source_frame_index})"
                         )
+                    target_png = final_dir / str(row.output_file)
+                    if (
+                        target_png.is_file()
+                        and target_png.stat().st_size
+                        == source_png.stat().st_size
+                    ):
+                        # 增量复用：目标已有且与源字节大小一致
+                        # （PNG 无损编码确定性输出，同大小≈同内容）。
+                        # 直接拷贝跳过解码+重编码；yield None 标记已处理。
+                        shutil.copy2(source_png, staging_dir / str(row.output_file))
+                        yield row, None
+                        continue
                     image = cv2.imread(
                         str(source_png),
                         cv2.IMREAD_UNCHANGED,
@@ -437,6 +451,8 @@ def write_depth_stream(
             image_rows = read_file_rows()
 
         for row, image in image_rows:
+            if image is None:
+                continue  # 增量复用：PNG 已直接拷贝到 staging，无需解码统计
             if image.ndim != 2:
                 raise ValueError(
                     f"深度帧必须是单通道，实际 shape={image.shape}"

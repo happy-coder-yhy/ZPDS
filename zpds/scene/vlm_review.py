@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import ssl
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
@@ -89,8 +90,14 @@ def _post_json(
     payload: dict[str, object],
     *,
     timeout_s: float,
+    retries: int = 3,
+    backoff_s: float = 1.0,
 ) -> dict[str, object]:
-    """向 OpenAI 兼容端点发送请求并返回 JSON 对象。"""
+    """向 OpenAI 兼容端点发送请求并返回 JSON 对象。
+
+    对瞬时网络错误（5xx / 超时 / 连接失败）退避重试 ``retries`` 次；
+    4xx 与响应解析错误不重试（重试无意义）。
+    """
 
     context = ssl.create_default_context()
     try:
@@ -105,19 +112,34 @@ def _post_json(
         headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=timeout_s,
-            context=context,
-        ) as response:
-            body = response.read()
-    except (urllib.error.HTTPError, urllib.error.URLError) as error:
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=timeout_s,
+                context=context,
+            ) as response:
+                body = response.read()
+            break
+        except urllib.error.HTTPError as error:
+            # 4xx 重试无意义（请求本身被拒），直接抛
+            if error.code < 500:
+                raise VLMUnavailableError(
+                    f"VLM API 请求失败: HTTP {error.code}"
+                ) from error
+            last_error = error
+        except urllib.error.URLError as error:
+            last_error = error
+        except TimeoutError as error:
+            last_error = error
+        if attempt < retries - 1:
+            time.sleep(backoff_s * (attempt + 1))
+    else:
         raise VLMUnavailableError(
-            f"VLM API 请求失败: {type(error).__name__}: {error}"
-        ) from error
-    except TimeoutError as error:
-        raise VLMUnavailableError(f"VLM API 请求超时: {timeout_s}s") from error
+            f"VLM API 请求失败（{retries} 次尝试后放弃）: "
+            f"{type(last_error).__name__}: {last_error}"
+        ) from last_error
     try:
         document = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:

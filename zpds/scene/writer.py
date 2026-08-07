@@ -119,6 +119,7 @@ def write_scene_run(
     skipped: bool = False,
     skip_reason: str | None = None,
     extra: dict[str, Any] | None = None,
+    vlm_unavailable_reason: str | None = None,
 ) -> SceneWriteResult:
     """写出 scene_proposals.parquet、vlm_review.parquet 与 run_summary.json。"""
 
@@ -181,6 +182,7 @@ def write_scene_run(
         "skip_reason": skip_reason,
         "scene_count": len(scenes),
         "vlm_reviewed": len(vlm_results),
+        "vlm_unavailable_reason": vlm_unavailable_reason,
         "review_queue_scene_ids": [
             result.scene_id for result in review_queue
         ],
