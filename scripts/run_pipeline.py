@@ -29,9 +29,13 @@ from zpds.scene.writer import write_scene_run
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="ZPDS 端到端流水线（scene 分割 + VLM 复核 + QC 报告）"
+        description="ZPDS 端到端流水线（scene 分割 + VLM 复核 + QC 报告 + 音频检查）"
     )
     parser.add_argument("--source", required=True, help="输入视频路径")
+    parser.add_argument(
+        "--audio-source",
+        help="可选：遁甲 MCAP 路径，从中提取音频并执行 Stage 12 音频 QC",
+    )
     parser.add_argument(
         "--profile",
         required=True,
@@ -73,6 +77,73 @@ def _write_json_atomic(path: Path, document: dict[str, object]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _prepare_audio(
+    mcap_path: str | Path,
+    output_dir: Path,
+    *,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    ffmpeg_path: str = "ffmpeg",
+) -> dict | None:
+    """从遁甲 MCAP 提取音频并解码为 WAV。
+
+    Returns:
+        audio_streams context（供 Stage 12 使用），无音频时返回 None。
+    """
+    from segment.audio_decoder import decode_opus_to_wav
+    from zpds_prepare.readers.dunjia_reader import (
+        TOPIC_AUDIO,
+        has_audio_topic,
+        read_audio,
+    )
+
+    mcap = Path(mcap_path)
+    if not mcap.is_file():
+        raise FileNotFoundError(f"音频 MCAP 不存在: {mcap}")
+    if not has_audio_topic(str(mcap)):
+        print(f"[audio] MCAP 无音频 topic: {mcap.name}", file=sys.stderr)
+        return None
+
+    print(f"[audio] 从 {mcap.name} 提取音频...", file=sys.stderr)
+    packets = read_audio(str(mcap))
+    if not packets:
+        print("[audio] 音频 topic 存在但无消息", file=sys.stderr)
+        return None
+
+    # 解码 WAV 到输出目录
+    audio_dir = output_dir / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = audio_dir / "ego_audio.wav"
+    decode_opus_to_wav(
+        [p.data for p in packets],
+        output_wav_path=wav_path,
+        sample_rate=sample_rate,
+        channels=channels,
+        ffmpeg_path=ffmpeg_path,
+    )
+
+    # 构造 Stage 12 的 audio_streams context
+    timestamps = [p.timestamp_ns for p in packets]
+    duration_s = (
+        (timestamps[-1] - timestamps[0]) / 1e9 if len(timestamps) > 1 else 0.0
+    )
+    audio_stream = {
+        "stream_id": "ego_audio",
+        "wav_uri": str(wav_path),
+        "timestamps_ns": timestamps,
+        "duration_s": round(duration_s, 3),
+        "packets": len(packets),
+        "source_topic": TOPIC_AUDIO,
+        "source_format": packets[0].format,
+    }
+    print(
+        f"[audio] 完成: {wav_path} packets={len(packets)} "
+        f"duration={duration_s:.2f}s sample_rate={sample_rate}",
+        file=sys.stderr,
+    )
+    return audio_stream
 
 
 def run(args: argparse.Namespace) -> int:
@@ -124,6 +195,11 @@ def run(args: argparse.Namespace) -> int:
         if args.output
         else config.output_dir
     )
+    # ---- 音频提取（可选：遁甲 MCAP）----
+    audio_stream = None
+    audio_source = getattr(args, "audio_source", None)
+    if audio_source:
+        audio_stream = _prepare_audio(audio_source, output_dir)
     written = write_scene_run(
         output_dir,
         input_path=video.path,
@@ -161,13 +237,16 @@ def run(args: argparse.Namespace) -> int:
     cascade = QCCascade.from_profile(profile)
     if args.stages:
         cascade.config.enabled_stages = list(args.stages)
+    cascade_context: dict = {
+        "session_id": written.output_dir.name or profile,
+        "segment_id": "",
+        "scene_pipeline_run": run_result,
+        "scene_config": config,
+    }
+    if audio_stream is not None:
+        cascade_context["audio_streams"] = [audio_stream]
     report = cascade.run(
-        context={
-            "session_id": written.output_dir.name or profile,
-            "segment_id": "",
-            "scene_pipeline_run": run_result,
-            "scene_config": config,
-        }
+        context=cascade_context,
     )
     disposition_counts: dict[str, int] = {}
     for decision in report.decisions:
@@ -208,6 +287,16 @@ def run(args: argparse.Namespace) -> int:
         "review_queue_scene_ids": [
             result.scene_id for result in run_result.review_queue
         ],
+        "audio": (
+            {
+                "source": audio_stream["source_topic"],
+                "packets": audio_stream["packets"],
+                "duration_s": audio_stream["duration_s"],
+                "wav_uri": audio_stream["wav_uri"],
+            }
+            if audio_stream is not None
+            else None
+        ),
         "output_dir": str(written.output_dir),
         "previews": [str(path) for path in previews],
         "cascade_report": str(report_file),

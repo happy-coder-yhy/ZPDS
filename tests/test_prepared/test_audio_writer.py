@@ -410,3 +410,39 @@ class TestValidateAudioStreams:
         report = validate_audio_streams(seg_dir, segment)
         assert report["status"] == "fail"
         assert report["checks"]["audio_ego_audio_duration"] == "fail"
+
+    def test_valid_video_alignment_pass(self, tmp_path):
+        """音频 end_ns 与主视频一致 → 对齐 check pass。"""
+        seg_dir = self._make_segment(tmp_path)
+        with open(seg_dir / "segment.json", encoding="utf-8") as f:
+            segment = json.load(f)
+        # 加主视频流（end_ns 与音频一致）
+        segment["streams"].append({
+            "stream_id": "camera0",
+            "modality": "rgb",
+            "is_primary": "true",
+            "time": {"end_ns": 100_000_000},  # 0.1s = 5 包 × 20ms
+        })
+        # 音频流加 time.end_ns
+        segment["streams"][0]["time"] = {"end_ns": 100_000_000}
+        report = validate_audio_streams(seg_dir, segment)
+        assert report["checks"]["audio_ego_audio_video_alignment"] == "pass"
+        assert report["statistics"]["audio_ego_audio_video_end_diff_s"] == 0.0
+
+    def test_valid_video_alignment_fail(self, tmp_path):
+        """音频 end_ns 与主视频偏差 > 0.5s → 对齐 check fail。"""
+        seg_dir = self._make_segment(tmp_path)
+        with open(seg_dir / "segment.json", encoding="utf-8") as f:
+            segment = json.load(f)
+        segment["streams"].append({
+            "stream_id": "camera0",
+            "modality": "rgb",
+            "is_primary": "true",
+            "time": {"end_ns": 200_000_000},  # 0.2s，音频 0.1s，偏差 0.1s... 需 >0.5s
+        })
+        segment["streams"][0]["time"] = {"end_ns": 100_000_000}
+        # 用更大偏差：视频 3s
+        segment["streams"][1]["time"]["end_ns"] = 3_000_000_000
+        report = validate_audio_streams(seg_dir, segment)
+        assert report["status"] == "fail"
+        assert report["checks"]["audio_ego_audio_video_alignment"] == "fail"

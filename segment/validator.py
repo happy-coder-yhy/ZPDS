@@ -474,6 +474,35 @@ def validate_audio_streams(seg_dir: Path, segment: dict) -> dict:
         stats[f"audio_{sid}_sample_rate"] = rate
         stats[f"audio_{sid}_channels"] = channels
 
+        # 1b. 与主视频流时间对齐（音频 end_ns ≈ 视频 end_ns，±0.5s）
+        audio_end_ns = stream.get("time", {}).get("end_ns")
+        primary_video = next(
+            (s for s in segment.get("streams", [])
+             if s.get("modality") == "rgb" and s.get("is_primary") == "true"),
+            None,
+        )
+        if primary_video is None:
+            primary_video = next(
+                (s for s in segment.get("streams", [])
+                 if s.get("modality") == "rgb"),
+                None,
+            )
+        video_end_ns = (
+            primary_video.get("time", {}).get("end_ns")
+            if primary_video else None
+        )
+        if audio_end_ns is not None and video_end_ns is not None:
+            diff_s = abs(audio_end_ns - video_end_ns) / 1e9
+            stats[f"audio_{sid}_video_end_diff_s"] = round(diff_s, 3)
+            if diff_s > 0.5:
+                errors.append(
+                    f"[{sid}] 音频 end_ns ({audio_end_ns}) 与视频 end_ns "
+                    f"({video_end_ns}) 偏差 {diff_s:.2f}s > 0.5s"
+                )
+                checks[f"audio_{sid}_video_alignment"] = "fail"
+            else:
+                checks[f"audio_{sid}_video_alignment"] = "pass"
+
         # 2. 元数据一致性：sample_rate / channels
         if stream.get("sample_rate") and stream["sample_rate"] != rate:
             errors.append(

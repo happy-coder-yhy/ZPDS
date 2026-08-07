@@ -171,6 +171,7 @@ class QCCascade:
             "stage9_hand": 9,
             "stage10_semantic": 10,
             "stage11_dedup": 11,
+            "stage12_audio": 12,
             "stage12_delivery": 12,
         }
         for key, stage_num in stage_map.items():
