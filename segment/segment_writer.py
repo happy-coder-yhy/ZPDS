@@ -201,6 +201,7 @@ def build_segment_json(
     calibrations: dict | None = None,
     annotation_results: list[dict] | None = None,
     time_series_results: list[dict] | None = None,
+    audio_results: list[dict] | None = None,
 ) -> dict:
     """构建 segment.json 内容。
 
@@ -384,6 +385,38 @@ def build_segment_json(
                 "kind": "deterministic_transform",
                 "source_asset_id": "raw_mcap" if profile != "guida" else "raw_depth_0",
                 "operation": "trim_decode_ffv1",
+            },
+        })
+
+    # 音频流（遁甲 MCAP 有 audio topic 时）
+    for ar in (audio_results or []):
+        if not ar.get("uri"):
+            continue  # 音频写出失败，跳过
+        streams.append({
+            "stream_id": ar["stream_id"],
+            "role": "observation",
+            "modality": "audio",
+            "uri": ar["uri"],
+            "format": ar.get("format", "wav"),
+            "encoding": "pcm_s16le",
+            "source_format": ar.get("source_format", "opus"),
+            "sample_rate": ar.get("sample_rate", 16000),
+            "channels": ar.get("channels", 1),
+            "packets": ar.get("packets", 0),
+            "duration_s": ar.get("duration_s", 0.0),
+            "time": {
+                "clock_id": "segment",
+                "sampling": "packet",
+                "rate_hz": 50.0,  # Opus 20ms 包
+                "start_ns": 0,
+                "end_ns": duration_ns,
+            },
+            "origin": {
+                "kind": "deterministic_transform",
+                "source_asset_id": ar.get("source_asset_id", "raw_mcap_audio"),
+                "source_topic": ar.get("source_topic", "/robot0/sensor/audio"),
+                "operation": ar.get("operation", "decode_opus_to_wav_and_sample_map"),
+                "sample_map_uri": ar["sample_map_uri"],
             },
         })
 

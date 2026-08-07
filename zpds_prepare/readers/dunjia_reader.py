@@ -19,6 +19,7 @@ MCAP 内部使用 foxglove protobuf schema：
 import hashlib
 import os
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ TOPIC_CAMERA0_CALIB = "/robot0/sensor/camera0/camera_info"
 TOPIC_CAMERA1_CALIB = "/robot0/sensor/camera1/camera_info"
 TOPIC_CAMERA2_CALIB = "/robot0/sensor/camera2/camera_info"
 TOPIC_DEPTH_CALIB = "/robot0/sensor/depth/calibration"
+TOPIC_AUDIO = "/robot0/sensor/audio"
 
 # ---- 映射表 ----
 CAMERA_TOPICS = {
@@ -191,6 +193,73 @@ def read_index_timestamps(dataset_path: str, topic: str | None = None) -> list[i
 # ================================================================
 # IMU
 # ================================================================
+
+@dataclass
+class AudioPacket:
+    """一条 foxglove.CompressedAudio 消息的解码结果。
+
+    Attributes:
+        timestamp_ns: 消息内 timestamp（protobuf Timestamp → ns）。
+        data: 压缩音频负载。format="opus" 时为单个 raw Opus 包（无 Ogg 封装）。
+        format: 压缩格式字符串（如 "opus"）。
+        log_time_ns: MCAP log_time（原始记录时刻），与 timestamp_ns 分开保留。
+    """
+
+    timestamp_ns: int
+    data: bytes
+    format: str = "opus"
+    log_time_ns: int = 0
+
+
+def has_audio_topic(mcap_path: str) -> bool:
+    """探测 MCAP 是否包含音频 topic（快速，不遍历全部消息）。"""
+    path = Path(mcap_path)
+    if not path.is_file():
+        return False
+    try:
+        with open(str(path), "rb") as fh:
+            reader = make_reader(fh)
+            for _schema, channel, _msg in reader.iter_messages():
+                if channel.topic == TOPIC_AUDIO:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def read_audio(dataset_path: str) -> list[AudioPacket]:
+    """读取遁甲 MCAP 的 /robot0/sensor/audio 音频消息。
+
+    解析 foxglove.CompressedAudio（protobuf）：
+        message CompressedAudio {
+          google.protobuf.Timestamp timestamp = 1;  // 采集时刻
+          bytes  data   = 2;                         // 压缩音频负载
+          string format = 3;                         // "opus" 等
+        }
+
+    Returns:
+        按时间戳排序的 AudioPacket 列表；MCAP 无音频 topic 时返回空列表。
+    """
+    reader, fh = _open_mcap(dataset_path)
+    try:
+        packets: list[AudioPacket] = []
+        for _schema, channel, msg, decoded in reader.iter_decoded_messages():
+            if channel.topic != TOPIC_AUDIO:
+                continue
+            ts = decoded.timestamp
+            ts_ns = ts.seconds * 1_000_000_000 + ts.nanos
+            fmt = getattr(decoded, "format", None) or "opus"
+            packets.append(AudioPacket(
+                timestamp_ns=ts_ns,
+                data=bytes(decoded.data),
+                format=fmt,
+                log_time_ns=msg.log_time,
+            ))
+        packets.sort(key=lambda p: p.timestamp_ns)
+        return packets
+    finally:
+        fh.close()
+
 
 def read_imu(dataset_path: str) -> pd.DataFrame:
     """解析 foxglove.Imu 消息，返回与 guida_reader 兼容的 DataFrame。
@@ -667,6 +736,7 @@ def read_session(
         raise ValueError("require_depth=True 时不能禁用 include_depth")
 
     from zpds_prepare.readers.session_model import (
+        AudioStream,
         DepthStream,
         ImuStream,
         Session,
@@ -889,6 +959,27 @@ def read_session(
             sample_rate_hz=float(meta["imu_sample_rate"]),
         )
 
+    # ---- 构建 audio_streams（遁甲 MCAP 有 /robot0/sensor/audio 时）----
+    audio_streams: dict[str, AudioStream] = {}
+    if has_audio_topic(dataset_path):
+        audio_pkts = read_audio(dataset_path)
+        if audio_pkts:
+            audio_streams["ego_audio"] = AudioStream(
+                stream_id="ego_audio",
+                packets=[
+                    {
+                        "timestamp_ns": p.timestamp_ns,
+                        "data": p.data,
+                        "format": p.format,
+                        "log_time_ns": p.log_time_ns,
+                    }
+                    for p in audio_pkts
+                ],
+                sample_rate_hz=48000,  # Opus 内部固定 48kHz
+                channels=1,
+                format=audio_pkts[0].format,
+            )
+
     # ---- 构建正式深度流 ----
     depth_streams: dict[str, DepthStream] = {}
     if depth_frames:
@@ -944,6 +1035,7 @@ def read_session(
         video_streams=video_streams,
         depth_streams=depth_streams,
         imu_streams=imu_streams,
+        audio_streams=audio_streams,
     )
 
 

@@ -32,6 +32,7 @@ import pandas as pd
 import yaml
 
 from segment.annotation_normalizer import normalize_hand_objects, write_annotation_parquet
+from segment.audio_writer import write_audio_stream
 from segment.calibration import (
     extract_calibration,
     extract_calibration_from_mcap,
@@ -456,6 +457,26 @@ def generate_segment(
             )
         )
 
+    # ---- ④b 音频流: Opus → WAV 标准化写出（遁甲有音频 topic 时）----
+    audio_results = []
+    for audio_stream in session.audio_streams.values():
+        try:
+            audio_results.append(
+                write_audio_stream(
+                    packets=audio_stream.packets,
+                    output_dir=output_dir,
+                    source_start_ns=source_start_ns,
+                    source_end_ns=source_end_ns,
+                    stream_id=audio_stream.stream_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - 音频失败不阻断整段
+            audio_results.append({
+                "stream_id": audio_stream.stream_id,
+                "uri": None,
+                "error": str(exc),
+            })
+
     # ---- ⑤ 标注: 标准化 + 写出 ----
     annotation_results = []
     for stream_id, ann_s in session.annotation_streams.items():
@@ -611,6 +632,7 @@ def generate_segment(
         calibrations=calibration.get("calibrations", None),
         annotation_results=annotation_results if annotation_results else None,
         time_series_results=time_series_results if time_series_results else None,
+        audio_results=audio_results if audio_results else None,
     )
     write_segment_json(segment, output_dir)
 
@@ -638,6 +660,9 @@ def generate_segment(
         "preview_count": preview_count,
         "imu_samples": sum(ir["rows"] for ir in imu_results),
         "depth_frames": sum(dr["frames"] for dr in depth_results),
+        "audio_packets": sum(
+            ar.get("packets", 0) for ar in audio_results
+        ),
         "time_series_samples": sum(
             result["rows"]
             for result in time_series_results
