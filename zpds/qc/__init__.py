@@ -12,6 +12,7 @@
   - Stage 9: hand (手部适用性守卫)
   - Stage 10: scene (场景分割 + VLM 复核)
   - Stage 11: dedup (D18 跨 Session 近重复)
+  - Stage 12: audio (音频质量: 静音/缺口/时长/可读性)
 """
 
 from zpds.qc.cascade import (
@@ -34,6 +35,7 @@ def _register_builtin_stages():
     from zpds.qc import stage9_hand as _s9  # noqa: F401
     from zpds.qc import stage10_scene as _s10  # noqa: F401
     from zpds.qc import stage11_dedup as _s11  # noqa: F401
+    from zpds.qc import stage12_audio as _s12  # noqa: F401
 
 
 _register_builtin_stages()
