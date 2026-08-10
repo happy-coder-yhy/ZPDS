@@ -21,10 +21,16 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 import yaml
+
+if TYPE_CHECKING:
+    # 仅类型解析用（scene schemas 为纯 dataclass，无重依赖）。
+    # 运行时名字来自各函数体内的局部 import，保持延迟加载。
+    from zpds.scene.schemas import SceneProposal, VLMReviewResult
 
 from zpds.hands.schemas import PreparedFrame
 from zpds.qc import QCCascade
@@ -547,9 +553,10 @@ def main():
         help="跳过 QC 级联（Stage 3/5/6/7/8/9/11）",
     )
     parser.add_argument(
-        "--no-split",
+        "--split",
         action="store_true",
-        help="不切分视频：split 决策降级为 keep_with_flag，产出单一连续 segment",
+        help="允许切分视频（默认不切分）：split 决策按长缺口等降级前逻辑执行，"
+             "可能产出多个候选 segment",
     )
     parser.add_argument(
         "--epic-ho",
@@ -1253,7 +1260,7 @@ def main():
     # ================================================================
     step_header(4, "汇总分析")
 
-    if args.no_split:
+    if not args.split:
         downgrade_split_issues(all_issues)
 
     summary = get_issue_summary(all_issues)
@@ -1285,7 +1292,7 @@ def main():
         session_end_ns=session_end_ns,
         min_duration_ns=int(min_duration_s * 1_000_000_000),
         max_duration_ns=int(max_duration_s * 1_000_000_000),
-        no_split=args.no_split,
+        no_split=not args.split,
     )
 
     print(f"  候选数: {len(candidates)}")

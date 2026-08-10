@@ -106,6 +106,7 @@ def prepare_segment(
     revision: str = "r0001",
     experience_dir: str | Path | None = None,
     experience_version: str | None = None,
+    with_privacy: bool = False,
 ) -> dict:
     """为一个候选 Segment 生成完整 Prepared Segment。
 
@@ -117,6 +118,8 @@ def prepare_segment(
         revision: record_revision。
         experience_dir: 可选的 Experience 输出目录；写入已声明的既有标注。
         experience_version: Experience 版本；默认使用 Experience 目录名。
+        with_privacy: 对转码产物执行隐私脱敏（A2D profile 人脸不适用、
+            文本适用），脱敏版即训练用产物。
 
     Returns:
         segment dict（segment.json 内容）。
@@ -205,6 +208,22 @@ def prepare_segment(
             "undistorted": undistortion.status == "applied",
             "undistortion": undistortion_coverage["streams"][stream_id],
         })
+
+    # ---- 8.1a2: 隐私脱敏（可选） ----
+    # 对转码产物原地脱敏（A2D profile 人脸不适用、文本适用），脱敏版即
+    # 训练用产物。redaction 字段写入 video_results，由 build_segment_json
+    # 透传进 segment.json 的 streams[].redaction 条目。
+    if with_privacy:
+        from zpds.privacy.segment_redaction import redact_segment_videos
+
+        video_meta = [
+            {"output_mp4": str(seg_dir / "data" / f"{vr['stream_id']}.mp4")}
+            for vr in video_results
+        ]
+        redacted_count = redact_segment_videos(
+            video_meta, video_results, seg_dir, "a2d",
+        )
+        print(f"  隐私脱敏: {redacted_count} 个视频流")
 
     # ---- 8.1c: 深度图像序列（拷贝 PNG，不转码） ----
     depth_results = []
@@ -608,6 +627,12 @@ def main():
         default=None,
         help="Experience 版本（默认使用 --experience-dir 的目录名）",
     )
+    parser.add_argument(
+        "--with-privacy",
+        action="store_true",
+        help="对转码后的视频执行隐私脱敏（人脸模糊 + 文本遮挡），"
+             "训练集只出脱敏版",
+    )
     args = parser.parse_args()
 
     source_path = Path(args.source)
@@ -686,6 +711,7 @@ def main():
             revision=args.revision,
             experience_dir=args.experience_dir,
             experience_version=args.experience_version,
+            with_privacy=args.with_privacy,
         )
 
         # 打印 segment 摘要

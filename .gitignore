@@ -30,3 +30,11 @@ AGENTS.md
 .env
 models/
 !zpds/privacy/models/
+处理复盘_制造-鼠标套袋2.md
+无手部观测数据源清洗三人完整分工.md
+无手部观测数据源清洗方案.md
+ZPDS_前端对接接口方案.md
+ZPDS_场景自动分割与VLM复核二人分工.md
+ZPDS_视频脱敏功能实现计划与三人分工.md
+人员A场景自动分割实现说明与后续事项.md
+手部推理优化说明.md
