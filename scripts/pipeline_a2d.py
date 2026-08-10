@@ -53,12 +53,15 @@ def run_pipeline(
     revision: str = "r0001",
     experience_dir: str | None = None,
     experience_version: str | None = None,
-    no_split: bool = False,
+    no_split: bool = True,
     with_privacy: bool = False,
 ) -> int:
     """执行 A2D 完整 Pipeline。
 
     Args:
+        no_split: 不切分视频——split 决策降级为 keep_with_flag，产出
+            单一连续 segment。第一版默认不切分（True）；显式传 False
+            允许按长缺口等 split 决策切分为多个候选。
         with_privacy: 对 Prepared Segment 转码产物执行隐私脱敏
             （A2D profile 人脸不适用、文本适用），脱敏版即训练用产物。
 
@@ -362,9 +365,10 @@ def main():
         help="record_revision（默认: r0001）",
     )
     parser.add_argument(
-        "--no-split",
+        "--split",
         action="store_true",
-        help="不切分视频：split 决策降级为 keep_with_flag，产出单一连续 segment",
+        help="允许切分视频（默认不切分）：split 决策按长缺口等降级前逻辑执行，"
+             "可能产出多个候选 segment",
     )
     parser.add_argument(
         "--experience-dir",
@@ -396,7 +400,7 @@ def main():
         revision=args.revision,
         experience_dir=args.experience_dir,
         experience_version=args.experience_version,
-        no_split=args.no_split,
+        no_split=not args.split,
         with_privacy=args.with_privacy,
     )
 
