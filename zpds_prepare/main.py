@@ -643,6 +643,12 @@ def main():
              "可能产出多个候选 segment",
     )
     parser.add_argument(
+        "--review",
+        default=None,
+        help="平台审核返回的 quality_issues.json 路径（0.2.0）；提供时按审核结果"
+             "（approved/rejected/modified/added）调整 issues 后重新切分",
+    )
+    parser.add_argument(
         "--epic-ho",
         default=None,
         help="[EPIC] hand-object .pkl 标注路径",
@@ -1394,6 +1400,21 @@ def main():
         source_session_id=session_id,
     )
     print(f"  输出: {qi_path.resolve()}")
+
+    # ================================================================
+    # Step 5.5: 应用平台审核结果（--review）后重新切分
+    # ================================================================
+    if args.review:
+        step_header(5.5, "应用平台审核结果 (--review)")
+        from zpds_prepare.writers.review_applier import apply_review
+
+        with open(args.review, "r", encoding="utf-8") as _rf:
+            reviewed_payload = json.load(_rf)
+        all_issues, review_stats = apply_review(all_issues, reviewed_payload)
+        s = review_stats
+        print(f"  审核结果: approved={s.approved} rejected={s.rejected} "
+              f"modified={s.modified} added={s.added} kept={s.kept}")
+        print(f"  调整后 issues: {len(all_issues)} 条（继续生成候选）")
 
     # ================================================================
     # Step 6: 生成候选 Segment
