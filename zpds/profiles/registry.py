@@ -10,13 +10,26 @@ from .epic100 import Epic100Profile
 
 _PROFILES: dict[str, BaseProfile] = {}
 
+_PROFILE_ALIASES = {
+    "guida": "guida_ego",
+    "dunjia": "dunjia_ego",
+    "umi": "jianzhi_umi",
+    "epic": "epic100",
+    "a2d": "a2d_robot",
+}
+
 
 def register(profile: BaseProfile) -> None:
     _PROFILES[profile.name] = profile
 
 
 def get(name: str) -> BaseProfile | None:
-    return _PROFILES.get(name)
+    return _PROFILES.get(resolve_name(name))
+
+
+def resolve_name(name: str) -> str:
+    """Return the canonical profile name used by configs and the registry."""
+    return _PROFILE_ALIASES.get(name, name)
 
 
 def list_all() -> list[str]:

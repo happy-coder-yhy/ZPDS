@@ -161,6 +161,38 @@ def test_write_depth_reuses_complete_existing_output(tmp_path: Path) -> None:
     assert second["zero_ratio"] == first["zero_ratio"]
 
 
+def test_staging_failure_preserves_existing_depth_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    stream = _build_session(raw_dir).depth_streams["ego_depth"]
+    segment_dir = tmp_path / "prepared" / "seg_000001"
+    depth_parent = segment_dir / "data" / "depth"
+    final_dir = depth_parent / "ego_depth"
+    final_dir.mkdir(parents=True)
+    marker = final_dir / "existing.txt"
+    marker.write_text("keep", encoding="utf-8")
+
+    def fail_sample_map_write(*args, **kwargs) -> None:
+        del args, kwargs
+        raise OSError("simulated staging failure")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_sample_map_write)
+
+    with pytest.raises(OSError, match="simulated staging failure"):
+        write_depth_stream(
+            stream,
+            output_dir=str(segment_dir),
+            source_start_ns=1_000_000_000,
+            source_end_ns=1_200_000_000,
+        )
+
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert list(depth_parent.glob(".ego_depth.*")) == []
+
+
 def test_write_depth_rejects_declared_dtype_mismatch(tmp_path: Path) -> None:
     session = _build_session(tmp_path, dtype="uint8")
     stream = session.depth_streams["ego_depth"]

@@ -146,9 +146,13 @@ class QCCascade:
         依次查找 `configs/qc_thresholds/{profile}.yaml`。
         """
         import zpds
+        from zpds.profiles.registry import resolve_name
 
         pkg_root = Path(zpds.__file__).parent.parent
-        config_path = pkg_root / "configs" / "qc_thresholds" / f"{profile}.yaml"
+        profile_name = resolve_name(profile)
+        config_path = (
+            pkg_root / "configs" / "qc_thresholds" / f"{profile_name}.yaml"
+        )
         if not config_path.exists():
             logger.warning("QC threshold config not found: %s, using defaults", config_path)
             return cls()

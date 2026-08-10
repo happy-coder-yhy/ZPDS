@@ -211,6 +211,11 @@ class TestFromProfile:
         cascade = QCCascade.from_profile("nonexistent_profile")
         assert cascade is not None
 
+    def test_guida_alias_loads_canonical_thresholds(self):
+        cascade = QCCascade.from_profile("guida")
+
+        assert cascade._stage_configs[6]["max_gap_s"] == 0.06
+
 
 # ---------------------------------------------------------------------------
 # 端到端：真实视频

@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -238,6 +238,22 @@ def _swap_directory(staging_dir: Path, final_dir: Path) -> None:
             shutil.rmtree(backup_dir)
 
 
+def _create_staging_directory(parent: Path, stream_id: str) -> Path:
+    """Create a sibling staging directory with normal parent-derived permissions.
+
+    ``tempfile.mkdtemp`` uses owner-only permissions, and those permissions
+    survive a directory rename into the delivered depth directory.
+    """
+    for _ in range(10):
+        candidate = parent / f".{stream_id}.{uuid.uuid4().hex}"
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        return candidate
+    raise FileExistsError(f"unable to allocate staging directory in {parent}")
+
+
 def _build_depth_result(
     stream: DepthStream,
     sample_map: pd.DataFrame,
@@ -382,9 +398,7 @@ def write_depth_stream(
     if cached_result is not None:
         return cached_result
 
-    staging_dir = Path(
-        tempfile.mkdtemp(prefix=f".{stream.stream_id}.", dir=str(depth_parent))
-    )
+    staging_dir = _create_staging_directory(depth_parent, stream.stream_id)
 
     decoded_dirs: dict[int, Path] = {}
     dtypes: set[str] = set()
