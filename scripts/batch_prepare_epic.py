@@ -56,11 +56,35 @@ def _write_record_json(record: dict) -> Path:
 
 # ---- 辅助: 单视频质量检测 ----
 
+# EPIC 无对应数据模态的阶段：深度(5)/IMU(6)/机器人(7)/标定(8)/音频(12)
+# 不剔除时这些 checker 会对空输入产出噪声决策（disposition None，不进 issues
+# 但污染 cascade_report）。
+_EPIC_DISABLED_STAGES = {5, 6, 7, 8, 12}
+
+
+def _configure_epic_cascade(cascade, skip_pixel_qc: bool):
+    """按 epic 场景调整级联启用阶段。
+
+    - Stage 0（隐私）恒剔除：EPIC 不跑脱敏，无 manifest（否则假 quarantine）
+    - Stage 3（像素级）默认剔除：逐帧解码慢，与 skip_pixel_qc 语义对齐；
+      skip_pixel_qc=False 时保留（过曝/模糊检测）
+    - 无数据模态阶段（深度/IMU/机器人/标定/音频）恒剔除
+    """
+    removed = {0, *_EPIC_DISABLED_STAGES}
+    if skip_pixel_qc:
+        removed.add(3)
+    cascade.config.enabled_stages = [
+        s for s in cascade.config.enabled_stages if s not in removed
+    ]
+    return cascade
+
+
 def _run_quality_detection(
     record: dict,
     output_dir: Path,
     skip_pixel_qc: bool = True,
     no_split: bool = True,
+    video_paths: list[str] | None = None,
 ) -> dict:
     """对单条记录运行技术质量检测，返回 results dict。
 
@@ -163,6 +187,37 @@ def _run_quality_detection(
             split_gap_ns=video_split_gap_ns,
             stream_id=stream_id,
         ))
+
+    # ---- QCCascade（stage11 去重为主；像素级 stage3 由 skip_pixel_qc 控制）----
+    from zpds.qc.cascade import QCCascade
+    from zpds_prepare.main import _decisions_to_issues
+
+    _stream = next(iter(session.video_streams.values()), None)
+    cascade_ctx = {
+        "session_id": session.session_id,
+        "session": session,
+        "cfg": cfg,
+        "profile": "epic",
+        "video_path": str(video_path),
+        "fps": float(_stream.fps) if _stream else 0.0,
+        "start_ns": int(_stream.timestamps_ns[0]) if _stream and _stream.timestamps_ns else 0,
+        "evidence_dir": str(output_dir / "evidence"),
+        "stream_id": next(iter(session.video_streams), "ego_rgb"),
+        # Stage 11 去重：本批次其他记录的路径
+        "video_paths": [str(p) for p in (video_paths or [])],
+        "file_paths": [str(p) for p in (video_paths or [])],
+        # Stage 7 机器人信号：epic 无时序流，空 dict 触发适用性守卫
+        "time_series_streams": session.time_series_streams,
+        # Stage 8 标定：epic 无标定数据
+        "calibration": session.meta.get("calibration"),
+        "video_streams_for_calib": session.video_streams,
+    }
+    cascade = _configure_epic_cascade(QCCascade.from_profile("epic"), skip_pixel_qc)
+    cascade_report = cascade.run(cascade_ctx)
+    for d in cascade_report.decisions:
+        all_issues.extend(_decisions_to_issues([d], cascade_ctx["stream_id"]))
+    print(f"  QC 级联: {len(cascade_report.decisions)} decisions, "
+          f"overall_pass={cascade_report.overall_pass}")
 
     # 写出 quality_issues.json
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -420,6 +475,13 @@ def main():
         print("没有符合条件的记录，退出。")
         return 0
 
+    # 批次级路径集合（Stage 11 跨 session 去重输入）
+    batch_video_paths = [
+        str(Path(r["video_uri"]).resolve())
+        for r in records
+        if r.get("video_uri")
+    ]
+
     # ---- 逐条处理 ----
     total_start = time.time()
     batch_results: list[dict] = []
@@ -451,7 +513,8 @@ def main():
             if not args.skip_quality:
                 print(f"  ② 质量检测 → {output_dir}")
                 qd_result = _run_quality_detection(
-                    rec, output_dir, no_split=not args.split
+                    rec, output_dir, no_split=not args.split,
+                    video_paths=batch_video_paths,
                 )
                 result["stages"]["quality_detection"] = qd_result
                 session = qd_result.pop("session", None)
