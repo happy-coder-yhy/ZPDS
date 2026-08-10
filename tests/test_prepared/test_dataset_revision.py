@@ -8,6 +8,7 @@ from pathlib import Path
 from segment.segment_writer import (
     build_dataset_json,
     build_revision_json,
+    build_segment_json,
     package_version,
     write_dataset_json,
     write_revision_json,
@@ -22,7 +23,8 @@ class TestBuildDatasetJson:
             prep_revision="r0001",
             source_types=["ego"],
         )
-        assert document["zrds_version"] == "0.1.0"
+        assert document["zpds_version"] == "0.1.0"
+        assert "zrds_version" not in document
         assert document["dataset_id"] == "moxian"
         assert document["dataset_version"] == "0.1.0"
         assert document["default_prep_revision"] == "r0001"
@@ -54,6 +56,7 @@ class TestBuildRevisionJson:
             changes=["删除无效区间"],
         )
         assert document["prep_revision"] == "r0001"
+        assert document["zpds_version"] == "0.1.0"
         assert document["parent_revision"] is None
         assert document["pipeline"]["name"] == "zpds.batch_prepare"
         assert document["pipeline"]["config_hash"] == "sha256:abc"
@@ -62,6 +65,7 @@ class TestBuildRevisionJson:
         assert conventions["time_unit"] == "ns"
         # 长度单位以 prepared/conventions.py 为权威来源，不静默假设。
         assert conventions["length_unit"] == LENGTH_UNIT
+        assert conventions["length_unit"] == "m"
         assert conventions["length_unit_source"] == "zpds/prepared/conventions.py"
 
     def test_pipeline_version_derived_from_package(self) -> None:
@@ -98,6 +102,20 @@ class TestBuildRevisionJson:
             config_hash="sha256:abc",
         )
         assert "run_stats" not in document
+
+
+class TestBuildSegmentJson:
+    def test_standard_version_and_revision_field_names(self, tmp_path: Path) -> None:
+        document = build_segment_json(
+            dataset_path=str(tmp_path),
+            span={"source_start_ns": 0, "source_end_ns": 1},
+            prep_revision="r0002",
+        )
+
+        assert document["zpds_version"] == "0.1.0"
+        assert document["prep_revision"] == "r0002"
+        assert "zrds_version" not in document
+        assert "record_revision" not in document
 
 
 class TestWriteRoundTrip:

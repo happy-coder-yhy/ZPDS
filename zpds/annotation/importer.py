@@ -40,7 +40,11 @@ def import_segment_annotations(
 
     segment_id = _require_identifier(segment.get("segment_id"), "segment_id")
     source_session = _source_session_id(segment)
-    prep_revision = str(segment.get("record_revision") or "r0001")
+    prep_revision = str(
+        segment.get("prep_revision")
+        or segment.get("record_revision")
+        or "r0001"
+    )
     version = experience_version or root.name
     if not version.strip():
         raise ValueError("experience_version 不能为空")

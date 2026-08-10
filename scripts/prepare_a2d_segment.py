@@ -103,7 +103,7 @@ def prepare_segment(
     session,
     output_base: Path,
     segment_index: int,
-    revision: str = "r0001",
+    prep_revision: str = "r0001",
     experience_dir: str | Path | None = None,
     experience_version: str | None = None,
     with_privacy: bool = False,
@@ -115,7 +115,7 @@ def prepare_segment(
         session: 已读取的 Session 对象。
         output_base: Prepared Segment 根目录。
         segment_index: 从 1 开始的序号。
-        revision: record_revision。
+        prep_revision: Prepared Revision 标识。
         experience_dir: 可选的 Experience 输出目录；写入已声明的既有标注。
         experience_version: Experience 版本；默认使用 Experience 目录名。
         with_privacy: 对转码产物执行隐私脱敏（A2D profile 人脸不适用、
@@ -358,7 +358,7 @@ def prepare_segment(
         video_results=video_results,
         imu_results=[],
         calibration_id=calib["calibration_id"],
-        revision=revision,
+        prep_revision=prep_revision,
         segment_id=seg_id,
         session_id=session.session_id,
         quality_issues=quality_issues,
@@ -613,9 +613,10 @@ def main():
         help="目标 CFR 帧率 (默认: 30.0)",
     )
     parser.add_argument(
-        "--revision", "-r",
+        "--prep-revision", "--revision", "-r",
+        dest="prep_revision",
         default="r0001",
-        help="record_revision (默认: r0001)",
+        help="prep_revision (默认: r0001)",
     )
     parser.add_argument(
         "--experience-dir",
@@ -708,7 +709,7 @@ def main():
             session=session,
             output_base=output_base,
             segment_index=i,
-            revision=args.revision,
+            prep_revision=args.prep_revision,
             experience_dir=args.experience_dir,
             experience_version=args.experience_version,
             with_privacy=args.with_privacy,

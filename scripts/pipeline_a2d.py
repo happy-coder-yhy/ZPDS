@@ -50,7 +50,7 @@ def run_pipeline(
     skip_alignment: bool = False,
     skip_mcap: bool = True,   # MCAP 解析较重，默认跳过
     target_fps: float = 30.0,
-    revision: str = "r0001",
+    prep_revision: str = "r0001",
     experience_dir: str | None = None,
     experience_version: str | None = None,
     no_split: bool = True,
@@ -239,7 +239,7 @@ def run_pipeline(
             session=session,
             output_base=output_base_path,
             segment_index=i,
-            revision=revision,
+            prep_revision=prep_revision,
             experience_dir=experience_dir,
             experience_version=experience_version,
             with_privacy=with_privacy,
@@ -360,9 +360,10 @@ def main():
         help="目标 CFR 帧率（默认: 30.0）",
     )
     parser.add_argument(
-        "--revision", "-r",
+        "--prep-revision", "--revision", "-r",
+        dest="prep_revision",
         default="r0001",
-        help="record_revision（默认: r0001）",
+        help="prep_revision（默认: r0001）",
     )
     parser.add_argument(
         "--split",
@@ -397,7 +398,7 @@ def main():
         skip_alignment=args.skip_alignment,
         skip_mcap=not args.mcap,
         target_fps=args.target_fps,
-        revision=args.revision,
+        prep_revision=args.prep_revision,
         experience_dir=args.experience_dir,
         experience_version=args.experience_version,
         no_split=not args.split,

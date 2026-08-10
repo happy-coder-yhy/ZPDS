@@ -12,7 +12,7 @@ def _write_segment(directory: Path, segment_id: str) -> None:
     (directory / "segment.json").write_text(
         json.dumps(
             {
-                "record_revision": "r0001",
+                "prep_revision": "r0001",
                 "segment_id": segment_id,
                 "timeline": {"start_ns": 0, "end_ns": 1_000_000_000},
                 "streams": [

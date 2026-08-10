@@ -221,7 +221,11 @@ def run(
     segment = _read_segment_json(segment_dir)
     prep_revision = (
         args.prep_revision
-        or str(segment.get("record_revision") or "r0001")
+        or str(
+            segment.get("prep_revision")
+            or segment.get("record_revision")
+            or "r0001"
+        )
     )
     experience_dir_value = getattr(args, "experience_dir", None)
     experience_version = getattr(args, "experience_version", None)

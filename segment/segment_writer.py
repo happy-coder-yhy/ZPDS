@@ -95,14 +95,14 @@ def build_dataset_json(
     description: str | None = None,
     source_types: list[str] | None = None,
     dataset_version: str | None = None,
-    zrds_version: str = "0.1.0",
+    zpds_version: str = "0.1.0",
     default_experience_version: str | None = None,
 ) -> dict:
     """构建 dataset.json（ZPDS 数据标准最小字段）。"""
     if dataset_version is None:
         dataset_version = package_version()
     document: dict[str, object] = {
-        "zrds_version": zrds_version,
+        "zpds_version": zpds_version,
         "dataset_id": dataset_id,
         "dataset_version": dataset_version,
         "name": name or dataset_id,
@@ -129,16 +129,16 @@ def build_revision_json(
 ) -> dict:
     """构建 prepared_segments/<prep_revision>/revision.json。
 
-    长度单位以 ``zpds.prepared.conventions.LENGTH_UNIT`` 为权威来源；
-    ZPDS 数据标准示例写为 m，当前实现为 mm，冲突在
-    ``length_unit_source`` 与 ``changes`` 中显式记录，不静默假设。
+    Prepared 层长度单位以 ``zpds.prepared.conventions.LENGTH_UNIT`` 为
+    权威来源，并统一为米（m）。源资产采用其他单位时，由具体 Stream
+    或标定来源字段显式记录，不通过修改标签伪装成已完成数值换算。
     """
     from zpds.prepared.conventions import LENGTH_UNIT
 
     if pipeline_version is None:
         pipeline_version = package_version()
     document: dict[str, object] = {
-        "zrds_version": "0.1.0",
+        "zpds_version": "0.1.0",
         "prep_revision": prep_revision,
         "parent_revision": parent_revision,
         "created_at": _utc_now_iso(),
@@ -192,7 +192,7 @@ def build_segment_json(
     video_results: list[dict] | None = None,
     imu_results: list[dict] | None = None,
     calibration_id: str = "calib_guida_001",
-    revision: str = "r0001",
+    prep_revision: str = "r0001",
     segment_id: str = "seg_000001",
     session_id: str = "guida_session_001",
     quality_issues: list[dict] | None = None,
@@ -535,8 +535,8 @@ def build_segment_json(
         })
 
     segment = {
-        "zrds_version": "0.1.0",
-        "record_revision": revision,
+        "zpds_version": "0.1.0",
+        "prep_revision": prep_revision,
         "segment_id": segment_id,
         "source_type": "ego",
 

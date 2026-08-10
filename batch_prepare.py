@@ -198,7 +198,7 @@ def generate_segment(
     calibration: dict,
     cfg: dict,
     session_id: str = "guida_session_001",
-    revision: str = "r0001",
+    prep_revision: str = "r0001",
     quality_issues: list[dict] | None = None,
     profile: str = "guida",
     source_assets: list[dict] | None = None,
@@ -474,7 +474,7 @@ def generate_segment(
         video_results=video_results,
         imu_results=imu_results,
         calibration_id=calibration["calibration_id"],
-        revision=revision,
+        prep_revision=prep_revision,
         segment_id=segment_id,
         session_id=session_id,
         quality_issues=quality_issues,
@@ -1069,7 +1069,7 @@ def main():
                 calibration=calibration,
                 cfg=cfg,
                 session_id=source_session_id,
-                revision=REVISION,
+                prep_revision=REVISION,
                 quality_issues=span_issues if span_issues else None,
                 profile=profile,
                 source_assets=source_assets,
@@ -1181,10 +1181,7 @@ def main():
         changes.append("磁编码器/VIO 保留原始值与双时钟")
     if cfg.get("preview", {}).get("enabled", True):
         changes.append("生成 <stream_id>_preview.mp4 压缩预览（保留原视频）")
-    changes.append(
-        "长度单位按 zpds/prepared/conventions.py（mm）；"
-        "ZPDS 数据标准示例为 m，冲突待解决"
-    )
+    changes.append("Prepared 层长度单位统一为 m")
     revision_doc = build_revision_json(
         prep_revision=prep_revision,
         pipeline_name=f"zpds.{Path(__file__).stem}",

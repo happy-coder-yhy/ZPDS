@@ -293,7 +293,7 @@ def _run_segment_generation(
                 calibration=calibration,
                 cfg=cfg,
                 session_id=source_session_id,
-                revision="r0001",
+                prep_revision="r0001",
                 quality_issues=cand.get("issues_in_span"),
                 profile="epic",
                 source_assets=source_assets,

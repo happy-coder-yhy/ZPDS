@@ -145,7 +145,8 @@ def run_segment(args: argparse.Namespace) -> dict:
     hands_path = write_hands_parquet(
         observations,
         str(pose_path),
-        prep_revision=segment.get("record_revision", ""),
+        prep_revision=segment.get("prep_revision")
+        or segment.get("record_revision", ""),
         model_meta=model_meta,
         run_meta=run_meta,
     )

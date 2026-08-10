@@ -24,7 +24,7 @@ def _write_segment(segment_dir: Path, streams: list[dict]) -> None:
         json.dumps(
             {
                 "segment_id": "seg_000001",
-                "record_revision": "r0001",
+                "prep_revision": "r0001",
                 "source_session": {"session_id": "a2d_8032"},
                 "streams": streams,
             }

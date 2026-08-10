@@ -5,7 +5,7 @@ TIME_UNIT = "ns"
 TIME_EPOCH = "device_monotonic"
 
 # 长度
-LENGTH_UNIT = "mm"
+LENGTH_UNIT = "m"
 
 # 角度
 ANGLE_UNIT = "rad"

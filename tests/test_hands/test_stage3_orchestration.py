@@ -165,7 +165,7 @@ def test_wilor_cli_orchestration_writes_full_frame_manifest(
     monkeypatch.setattr(
         run_hands,
         "_read_segment_json",
-        lambda _path: {"record_revision": "r0001"},
+        lambda _path: {"prep_revision": "r0001"},
     )
     monkeypatch.setattr(
         run_hands,
@@ -229,7 +229,7 @@ def test_max_frames_is_recorded_as_incomplete_smoke_run(
     monkeypatch.setattr(
         run_hands,
         "_read_segment_json",
-        lambda _path: {"record_revision": "r0001"},
+        lambda _path: {"prep_revision": "r0001"},
     )
     monkeypatch.setattr(
         run_hands,
@@ -275,7 +275,7 @@ def test_wilor_runtime_contract_failure_closes_estimator(
     monkeypatch.setattr(
         run_hands,
         "_read_segment_json",
-        lambda _path: {"record_revision": "r0001"},
+        lambda _path: {"prep_revision": "r0001"},
     )
     monkeypatch.setattr(
         run_hands,
