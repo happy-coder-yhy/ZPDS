@@ -54,8 +54,13 @@ def run_pipeline(
     experience_dir: str | None = None,
     experience_version: str | None = None,
     no_split: bool = False,
+    with_privacy: bool = False,
 ) -> int:
     """执行 A2D 完整 Pipeline。
+
+    Args:
+        with_privacy: 对 Prepared Segment 转码产物执行隐私脱敏
+            （A2D profile 人脸不适用、文本适用），脱敏版即训练用产物。
 
     Returns:
         0 成功，1 失败。
@@ -234,6 +239,7 @@ def run_pipeline(
             revision=revision,
             experience_dir=experience_dir,
             experience_version=experience_version,
+            with_privacy=with_privacy,
         )
         all_segments.append(seg)
 
@@ -370,6 +376,12 @@ def main():
         default=None,
         help="Experience 版本（默认使用 --experience-dir 的目录名）",
     )
+    parser.add_argument(
+        "--with-privacy",
+        action="store_true",
+        help="对转码后的视频执行隐私脱敏（人脸模糊 + 文本遮挡），"
+             "训练集只出脱敏版",
+    )
     args = parser.parse_args()
 
     return run_pipeline(
@@ -385,6 +397,7 @@ def main():
         experience_dir=args.experience_dir,
         experience_version=args.experience_version,
         no_split=args.no_split,
+        with_privacy=args.with_privacy,
     )
 
 
