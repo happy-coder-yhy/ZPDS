@@ -1,0 +1,31 @@
+# ZPDS 全功能依赖（版本与主环境 e:\ZSPD\ZPDS\.venv 验证一致）
+# numpy 锁 <2（mediapipe/chumpy 兼容红线，勿升）
+numpy<2
+opencv-python>=4.8
+pandas>=2.0
+pyarrow>=14.0
+pyyaml>=6.0
+
+# mcap（遁甲/UMI 数据读取）
+mcap>=1.0
+mcap-protobuf-support>=0.5
+mcap-ros2-support>=0.5
+foxglove-schemas-protobuf>=0.1
+
+# hdf5（A2D 真机数据读取）
+h5py>=3.9
+
+# hands（手部检测，MediaPipe 后端；锁定版本与 requirements-hands.txt 一致）
+mediapipe==0.10.35
+
+# scene（场景分割）+ privacy（脱敏，ultralytics 锁定主环境版本）
+torch>=2.1
+torchvision>=0.16
+transformers>=4.40
+ultralytics==8.4.115
+easyocr>=1.7
+requests>=2.28
+
+# dev（测试）
+pytest>=7.0
+pytest-cov>=4.0

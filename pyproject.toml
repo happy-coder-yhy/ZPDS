@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "zpds"
 version = "0.1.0"
 description = "具身智能数据标准化管线 — ZPDS"
-readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
