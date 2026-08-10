@@ -254,6 +254,78 @@ def _run_hand_analysis(
     }
 
 
+def _run_privacy_analysis(
+    *,
+    video_path: str | Path,
+    profile: str,
+    output_dir: Path,
+    session_id: str,
+) -> dict:
+    """运行隐私脱敏分析（人脸模糊 + PII 文本遮挡），返回 Stage 0 消费的 manifest dict。
+
+    只做检测与统计（稀疏检测 + KLT 传播），不写脱敏视频——脱敏产物仍由
+    scripts/run_privacy_redaction.py 单独产出；这里仅提供 Stage 0 QC 输入。
+    """
+    from zpds.privacy.backend_router import PrivacyBackendPolicy
+    from zpds.privacy.config import PrivacyConfig
+    from zpds.privacy.pipeline import PrivacyPipeline
+
+    profile_name = {
+        "guida": "guida_ego",
+        "dunjia": "dunjia_ego",
+        "umi": "jianzhi_umi",
+        "epic": "epic100",
+        "a2d": "a2d_robot",
+    }.get(profile, profile)
+
+    config_path = Path("configs/privacy/default.yaml").expanduser().resolve()
+    try:
+        pcfg = PrivacyConfig.load(config_path)
+    except FileNotFoundError:
+        print(f"  [warn] 隐私配置不存在 ({config_path})，使用默认值")
+        pcfg = PrivacyConfig.defaults()
+
+    policy = PrivacyBackendPolicy.from_profile(profile_name)
+    pipeline = PrivacyPipeline(
+        Path(video_path),
+        config=pcfg,
+        policy=policy,
+        profile=profile_name,
+        session_id=session_id,
+        face_interval=pcfg.face_interval_frames,
+        text_interval=pcfg.text_interval_frames,
+    )
+    records = pipeline.run_to_list()
+    manifest = pipeline.build_manifest()
+    stats = pipeline.stats
+    print(f"  隐私脱敏分析: {stats.frames_processed} 帧, {stats.elapsed_seconds:.1f}s "
+          f"({stats.average_fps:.1f} fps)")
+    print(f"    人脸: {stats.frames_with_faces} 帧 / {stats.total_face_regions} 区域; "
+          f"文本: {stats.frames_with_text} 帧 / {stats.total_text_regions} 区域; "
+          f"PII: {stats.total_pii_masked} 区域; LLM: {'可用' if stats.llm_available else '不可用'}")
+
+    # Stage 0 期望的 manifest dict（与 scripts/run_privacy_redaction.py 对齐）
+    manifest_dict = {
+        "session_id": manifest.session_id,
+        "source_uri": manifest.source_uri,
+        "profile": manifest.profile,
+        "producer": manifest.producer,
+        "version": manifest.version,
+        "config_hash": manifest.config_hash,
+        "llm_available": manifest.llm_available,
+        "stats": {
+            "total_frames": manifest.total_frames,
+            "frames_with_faces": manifest.frames_with_faces,
+            "frames_with_text": manifest.frames_with_text,
+            "total_face_regions": manifest.total_face_regions,
+            "total_text_regions": manifest.total_text_regions,
+            "total_pii_masked": manifest.total_pii_masked,
+            "pii_categories_found": list(manifest.pii_categories_found),
+        },
+    }
+    return manifest_dict
+
+
 def _read_video_frames(
     video_path: str | Path,
 ) -> tuple[list[np.ndarray], float]:
@@ -540,7 +612,19 @@ def main():
     parser.add_argument(
         "--with-hands",
         action="store_true",
-        help="在主流程内运行手部检测与手部清洗，并把 hand_cleaning_report_path 传入 Stage 9",
+        help="在主流程内运行手部检测与手部清洗，并把 hand_cleaning_report_path 传入 Stage 9"
+             "（guida 默认开启；其他 profile 需显式指定）",
+    )
+    parser.add_argument(
+        "--skip-hands",
+        action="store_true",
+        help="跳过手部检测与手部清洗（仅在 guida 默认开启时用于反向关闭）",
+    )
+    parser.add_argument(
+        "--with-privacy",
+        action="store_true",
+        help="在主流程内运行隐私脱敏分析（人脸/文本），把 PrivacyRunManifest 传入 Stage 0；"
+             "不指定时 Stage 0 不参与级联",
     )
     parser.add_argument(
         "--with-scene",
@@ -769,13 +853,16 @@ def main():
     print(f"  Session ID:  {session_id}")
 
     # ================================================================
-    # Step 1.5: 手部检测/清洗（Stage 9）与场景分割/VLM 复核（Stage 10）
+    # Step 1.5: 手部检测/清洗（Stage 9）、隐私脱敏（Stage 0）、场景分割（Stage 10）
     # ================================================================
     hand_report_path: str | None = None
+    privacy_manifest: dict | None = None
     scene_pipeline_run = None
     scene_config = None
 
-    if args.with_hands and pv.video_path:
+    # guida（墨现）默认运行手部清洗；--skip-hands 反向关闭
+    run_hands = (args.with_hands or profile == "guida") and not args.skip_hands
+    if run_hands and pv.video_path:
         step_header(15, "手部检测与手部清洗（Stage 9 输入）")
         from zpds.profiles.registry import get as _get_profile
 
@@ -839,6 +926,25 @@ def main():
                     RuntimeError,
                 ) as exc:
                     print(f"  手部分析跳过: {exc}")
+
+    if args.with_privacy and pv.video_path:
+        step_header(17, "隐私脱敏分析（Stage 0 输入）")
+        try:
+            privacy_manifest = _run_privacy_analysis(
+                video_path=pv.video_path,
+                profile=profile,
+                output_dir=output_dir,
+                session_id=session_id,
+            )
+        except (
+            FileNotFoundError,
+            TypeError,
+            ValueError,
+            OSError,
+            ImportError,
+            RuntimeError,
+        ) as exc:
+            print(f"  隐私脱敏分析跳过: {exc}")
 
     if args.with_scene and pv.video_path:
         step_header(16, "场景分割 + VLM 复核（Stage 10 输入）")
@@ -980,8 +1086,10 @@ def main():
                 # Stage 8 标定：标定数据 + 视频流（用于分辨率一致性校验）
                 "calibration": session.meta.get("calibration"),
                 "video_streams_for_calib": session.video_streams,
-                # Stage 9 手部清洗报告路径（--with-hands 时传入）
+                # Stage 9 手部清洗报告路径（guida 默认 / --with-hands 时传入）
                 "hand_cleaning_report_path": hand_report_path,
+                # Stage 0 隐私脱敏 manifest（--with-privacy 时传入；缺失时 Stage 0 被剔除）
+                "privacy_manifest": privacy_manifest,
                 # Stage 10 场景分割 + VLM 复核结果（--with-scene 时传入）
                 "scene_pipeline_run": scene_pipeline_run,
                 "scene_config": scene_config,
@@ -1023,6 +1131,12 @@ def main():
             ctx.update(imu_context)
             try:
                 cascade = QCCascade.from_profile(profile)
+                if privacy_manifest is None:
+                    # 主流程未跑隐私脱敏 → 剔除 Stage 0，避免 manifest 缺失的假 quarantine
+                    # （stage0_privacy 对 None manifest 返回 PRIVACY_COVERAGE_LOW + quarantine）
+                    cascade.config.enabled_stages = [
+                        s for s in cascade.config.enabled_stages if s != 0
+                    ]
                 report = cascade.run(ctx)
                 cascade_decisions.extend(report.decisions)
                 if not report.overall_pass:
