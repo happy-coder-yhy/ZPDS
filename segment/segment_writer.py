@@ -204,6 +204,7 @@ def build_segment_json(
     annotation_results: list[dict] | None = None,
     time_series_results: list[dict] | None = None,
     audio_results: list[dict] | None = None,
+    hands_results: dict | None = None,
 ) -> dict:
     """构建 segment.json 内容。
 
@@ -309,6 +310,23 @@ def build_segment_json(
             entry["is_primary"] = (
                 "true" if stream_id == primary_stream_id else "false"
             )
+        if hands_results and entry["stream_id"] == hands_results.get("video_stream_id"):
+            # Hands 辅助产物（main.py 整段 → 按候选区间裁切的 segment 级产物），
+            # 挂在 hands_2d.parquet 声明的 video_stream_id 对应的视频流 entry 下
+            entry["hands"] = {
+                "uri": hands_results["uri"],
+                "schema": hands_results.get("schema", "zpds.hands.v1"),
+                "frames_uri": hands_results.get("frames_uri"),
+                "report_uri": hands_results.get("report_uri"),
+                "original_report_uri": hands_results.get("original_report_uri"),
+                "rows": hands_results.get("rows", 0),
+                "frames": hands_results.get("frames", 0),
+                "excluded_frames": hands_results.get("excluded_frames", 0),
+                "kept_frames": hands_results.get("kept_frames", 0),
+                "overall_disposition": hands_results.get("overall_disposition"),
+                "cropped": hands_results.get("cropped", True),
+                "crop": hands_results.get("crop"),
+            }
         if vr.get("preview_uri"):
             entry["preview_uri"] = vr["preview_uri"]
         if vr.get("redacted"):

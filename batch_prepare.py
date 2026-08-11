@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -186,6 +187,168 @@ def _build_guida_source_assets(dataset_path: str, session) -> list[dict]:
     return assets
 
 
+def _crop_hands_artifacts(
+    source_dir: Path,
+    target_dir: Path,
+    *,
+    start_ns: int,
+    end_ns: int,
+    start_frame: int,
+    end_frame: int,
+    source_fps: float,
+) -> dict | None:
+    """把 main.py 的整段 Hands 产物裁切为 segment 级产物（引用式接入）。
+
+    main.py 在 ``{output}/prepared_segments/r0001/seg_000001/hands`` 产出整段
+    Hands 数据；这里按候选区间 [start_ns, end_ns) 裁切后写入 ``{seg_dir}/hands/``。
+    时间轴说明：
+
+    - ``hands_2d.parquet``：timestamp_ns 是真实 MKV 时间戳，与 candidates 同轴，
+      直接按 [start_ns, end_ns) 过滤（同帧多手行都保留）。
+    - ``hand_cleaning_frames.parquet``：timestamp_ns 是帧号/fps 重算的
+      （cleaning.py 定义），不能按时间戳过滤，只能按 source_frame_index（源解码
+      帧号）裁切；裁切后 timestamp_ns 重算为相对 segment 轴（与输出视频对齐）。
+    - ``hand_cleaning_report.json``：重建 segment-level 统计；原始整段报告保留
+      为 ``hand_cleaning_report.original.json``。
+
+    返回 segment.json 登记信息；源目录或产物缺失时返回 None。
+    """
+    required_files = [
+        "hands_2d.parquet",
+        "hand_cleaning_frames.parquet",
+        "hand_cleaning_report.json",
+    ]
+    if not source_dir.is_dir() or any(
+        not (source_dir / name).is_file() for name in required_files
+    ):
+        return None
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- hands_2d.parquet：按真实 MKV 时间戳过滤（与 candidates 同轴）----
+    hands = pd.read_parquet(source_dir / "hands_2d.parquet")
+    hands = hands[
+        (hands["timestamp_ns"] >= start_ns) & (hands["timestamp_ns"] < end_ns)
+    ]
+    hands.to_parquet(target_dir / "hands_2d.parquet", index=False)
+
+    # ---- hand_cleaning_frames.parquet：按源解码帧号裁切，时间戳重算为相对轴 ----
+    frames = pd.read_parquet(source_dir / "hand_cleaning_frames.parquet")
+    frames = frames[
+        (frames["source_frame_index"] >= start_frame)
+        & (frames["source_frame_index"] < end_frame)
+    ].copy()
+    frames["timestamp_ns"] = (
+        (frames["source_frame_index"] - start_frame)
+        / source_fps
+        * 1_000_000_000
+    ).astype("int64")
+    frames.to_parquet(target_dir / "hand_cleaning_frames.parquet", index=False)
+
+    # ---- hand_cleaning_report.json：重建 segment-level，原始报告保留 ----
+    report = json.loads(
+        (source_dir / "hand_cleaning_report.json").read_text(encoding="utf-8")
+    )
+    frame_count = len(frames)
+    excluded = (
+        int(frames["is_excluded"].sum()) if "is_excluded" in frames.columns else 0
+    )
+    kept = frame_count - excluded
+
+    def _crop_spans(spans: list[dict]) -> list[dict]:
+        cropped: list[dict] = []
+        for span in spans:
+            lo = max(int(span["start_frame"]), start_frame)
+            hi = min(int(span["end_frame"]), end_frame)
+            if lo < hi:
+                cropped.append({
+                    **span,
+                    "start_frame": lo - start_frame,
+                    "end_frame": hi - start_frame,
+                    "start_timestamp_ns": int(
+                        (lo - start_frame) / source_fps * 1_000_000_000
+                    ),
+                    "end_timestamp_ns": int(
+                        (hi - start_frame) / source_fps * 1_000_000_000
+                    ),
+                    "duration_s": round((hi - lo) / source_fps, 6),
+                })
+        return cropped
+
+    cropped_report = dict(report)
+    cropped_report["source"] = {
+        **report.get("source", {}),
+        "advertised_frame_count": frame_count,
+        "decoded_frame_count": frame_count,
+        "duration_s": round(frame_count / source_fps, 6),
+        "fps": source_fps,
+    }
+    cropped_report["summary"] = {
+        **report.get("summary", {}),
+        "input_frames": frame_count,
+        "excluded_frames": excluded,
+        "kept_frames": kept,
+        "input_duration_s": round(frame_count / source_fps, 6),
+        "kept_duration_s": round(kept / source_fps, 6),
+        "overall_disposition": (
+            "reject" if not kept else "split" if excluded else "keep"
+        ),
+    }
+    cropped_report["excluded_spans"] = _crop_spans(report.get("excluded_spans", []))
+    cropped_report["kept_spans"] = _crop_spans(report.get("kept_spans", []))
+    if "artifacts" in cropped_report:
+        cropped_report["artifacts"] = {
+            **cropped_report["artifacts"],
+            "frame_metrics_uri": "hand_cleaning_frames.parquet",
+        }
+    provenance = cropped_report.get("provenance", {})
+    provenance["hands_parquet_uri"] = "hands_2d.parquet"
+    provenance["hands_parquet_sha256"] = sha256_hex(
+        str(target_dir / "hands_2d.parquet")
+    )
+    cropped_report["provenance"] = provenance
+    cropped_report["segmentization"] = {
+        "applied": True,
+        "crop": {
+            "start_ns": start_ns,
+            "end_ns": end_ns,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+        },
+        "source_report_uri": "hand_cleaning_report.original.json",
+    }
+    (target_dir / "hand_cleaning_report.json").write_text(
+        json.dumps(cropped_report, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    shutil.copy2(
+        source_dir / "hand_cleaning_report.json",
+        target_dir / "hand_cleaning_report.original.json",
+    )
+
+    return {
+        "uri": "hands/hands_2d.parquet",
+        "schema": "zpds.hands.v1",
+        "video_stream_id": (
+            str(hands["video_stream_id"].iloc[0]) if len(hands) else ""
+        ),
+        "rows": len(hands),
+        "frames_uri": "hands/hand_cleaning_frames.parquet",
+        "frames": frame_count,
+        "report_uri": "hands/hand_cleaning_report.json",
+        "original_report_uri": "hands/hand_cleaning_report.original.json",
+        "excluded_frames": excluded,
+        "kept_frames": kept,
+        "overall_disposition": cropped_report["summary"]["overall_disposition"],
+        "cropped": True,
+        "crop": {
+            "start_ns": start_ns,
+            "end_ns": end_ns,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+        },
+    }
 
 
 def generate_segment(
@@ -207,6 +370,7 @@ def generate_segment(
     experience_version: str | None = None,
     privacy_enabled: bool = False,
     privacy_reset_frames: set[int] | None = None,
+    hands_source: dict | None = None,
 ) -> dict:
     """为单个候选区间生成完整 Prepared Segment。
 
@@ -466,6 +630,28 @@ def generate_segment(
             vr["preview_uri"] = f"data/{stream_id}_preview.mp4"
             preview_count += 1
 
+    # ---- ⑥.7 Hands 辅助产物：main 整段产物 → segment 级裁切 ----
+    hands_results = None
+    if hands_source is not None:
+        hands_results = _crop_hands_artifacts(
+            source_dir=hands_source["source_dir"],
+            target_dir=Path(output_dir) / "hands",
+            start_ns=hands_source["start_ns"],
+            end_ns=hands_source["end_ns"],
+            start_frame=hands_source["start_frame"],
+            end_frame=hands_source["end_frame"],
+            source_fps=hands_source["source_fps"],
+        )
+        if hands_results:
+            print(
+                f"  Hands: {hands_results['rows']} 手行 / "
+                f"{hands_results['frames']} 帧, "
+                f"excluded={hands_results['excluded_frames']} "
+                f"({hands_results['overall_disposition']})"
+            )
+        else:
+            print("  Hands: 源产物不完整，跳过")
+
     # ---- ⑦ 标定与 segment.json ----
     write_calibration(calibration, output_dir)
     segment = build_segment_json(
@@ -486,6 +672,7 @@ def generate_segment(
         annotation_results=annotation_results if annotation_results else None,
         time_series_results=time_series_results if time_series_results else None,
         audio_results=audio_results if audio_results else None,
+        hands_results=hands_results,
     )
     write_segment_json(segment, output_dir)
 
@@ -723,6 +910,19 @@ def main():
     if not candidates:
         print("没有候选 Segment，退出。")
         return 0
+
+    # ---- Hands 辅助产物（main.py 产出，引用式接入）----
+    # main.py 写入 {--output}/prepared_segments/r0001/seg_000001/hands/，与 batch
+    # 输出（prepared_segments/...）不同根；candidates 位于 main 的 --output 目录，
+    # 由此反推 main 产物位置。产物缺失时跳过（行为同 scene 先例）。
+    hands_source_dir: Path | None = (
+        candidates_path.parent / "prepared_segments" / REVISION / "seg_000001" / "hands"
+    )
+    if hands_source_dir.is_dir():
+        print(f"Hands 源产物: {hands_source_dir}")
+    else:
+        hands_source_dir = None
+        print("Hands 源产物: 未找到（跳过；需 main.py --with-hands 先产出）")
 
     print(f"Profile:      {profile}")
     print(f"数据源:       {dataset_path}")
@@ -1014,6 +1214,12 @@ def main():
 
         source_assets = _build_guida_source_assets(dataset_path, session)
 
+    # 主视频首帧绝对时间戳：candidates / Hands 时间轴都是原始 MKV 时间轴，
+    # 换算为完整视频帧号时以首帧为基准（scene 段沿用其内部逻辑）。
+    pv_first_ts = 0
+    if pv is not None and getattr(pv, "index_frames", None):
+        pv_first_ts = int(pv.index_frames[0]["timestamp_ns"])
+
     # ---- 逐个生成 Prepared Segment ----
     step_header(f"生成 {len(candidates)} 个 Prepared Segment")
 
@@ -1058,6 +1264,27 @@ def main():
                 if 0 <= rel <= duration_s * target_fps + 1:
                     reset_frames.add(rel)
 
+        # Hands 裁切帧号：hands 帧轴是源解码帧（0-based），用源 fps 换算
+        #（scene 用 target_fps 是因为 scene 产物按 run_summary fps 定义，
+        #  两者轴各自独立；guida 源 30fps 时与 target_fps 相等）
+        hands_crop_spec = None
+        if hands_source_dir is not None:
+            hands_fps = float(getattr(pv, "fps", 0) or cfg["output"]["target_fps"])
+            hands_crop_spec = {
+                "source_dir": hands_source_dir,
+                "start_ns": source_start,
+                "end_ns": source_end,
+                "start_frame": (
+                    round((source_start - pv_first_ts) / 1_000_000_000 * hands_fps)
+                    if pv_first_ts else 0
+                ),
+                "end_frame": (
+                    round((source_end - pv_first_ts) / 1_000_000_000 * hands_fps)
+                    if pv_first_ts else 0
+                ),
+                "source_fps": hands_fps,
+            }
+
         try:
             result = generate_segment(
                 dataset_path=dataset_path,
@@ -1077,6 +1304,7 @@ def main():
                 experience_version=args.experience_version,
                 privacy_enabled=args.with_privacy,
                 privacy_reset_frames=reset_frames if reset_frames else None,
+                hands_source=hands_crop_spec,
             )
             elapsed = time.time() - t0
             result["elapsed_s"] = round(elapsed, 1)
