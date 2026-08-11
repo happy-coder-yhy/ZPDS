@@ -338,7 +338,7 @@ class HandsPipeline:
         批级异常（运行级/未分类）整批转 failed，不中断后续批次；
         单帧级失败由 estimator 内部逐帧记录为 failed 状态。
         """
-        frames = [frame for frame, _ in pending]
+        frames = [frame.frame_rgb for frame, _ in pending]
         timestamps_ms = [ts for _, ts in pending]
         try:
             results = self._estimator.estimate_batch(frames, timestamps_ms)

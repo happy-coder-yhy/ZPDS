@@ -319,7 +319,7 @@ def _run_privacy_analysis(
             "frames_with_text": manifest.frames_with_text,
             "total_face_regions": manifest.total_face_regions,
             "total_text_regions": manifest.total_text_regions,
-            "total_pii_masked": manifest.total_pii_masked,
+            "total_pii_masked": stats.total_pii_masked,
             "pii_categories_found": list(manifest.pii_categories_found),
         },
     }

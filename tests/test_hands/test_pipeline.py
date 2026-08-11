@@ -607,3 +607,92 @@ def test_pipeline_requires_model_identity(model_name: str, model_version: str) -
             model_name=model_name,
             model_version=model_version,
         )
+
+
+# ════════════════════════════════════════════════════════════════════
+# 批量推理路径（回归：estimate_batch 链路曾传 PreparedFrame 而非
+# frame_rgb，真实 WiLoR 输入校验抛 TypeError 导致整批失败）
+# ════════════════════════════════════════════════════════════════════
+
+
+class FakeBatchEstimator(FakeStructuredEstimator):
+    """带批量接口的 estimator：与真实 WiLoR 相同，校验入参为 ndarray。"""
+
+    supports_batch = True
+
+    def estimate_batch(
+        self,
+        frames_rgb: list[np.ndarray],
+        timestamps_ms: list[int],
+    ) -> list[HandFrameResult]:
+        # 回归锚点：pipeline 曾把 PreparedFrame 对象传进来
+        for f in frames_rgb:
+            if not isinstance(f, np.ndarray):
+                raise TypeError(
+                    f"frame_rgb 必须是 np.ndarray, 实际 {type(f).__name__}"
+                )
+        self.timestamps_ms.extend(timestamps_ms)
+        return [
+            self._responses[i % len(self._responses)]
+            for i in range(len(timestamps_ms))
+        ]
+
+
+def _batch_pipeline(
+    responses: list[HandFrameResult],
+    frame_count: int,
+) -> HandsPipeline:
+    frames = [_frame(i, i * 33_333_000) for i in range(frame_count)]
+    return HandsPipeline(
+        reader=FakeReader(frames),
+        estimator=FakeBatchEstimator(responses),
+        model_name="wilor",
+        model_version="test",
+        active_backend="wilor",
+    )
+
+
+def test_batch_path_passes_ndarray_and_flushes_tail() -> None:
+    """不足一批的尾帧也能 flush（回归：残帧永远不处理会挂死）。"""
+    responses = [_structured_result("no_hand")] * 5
+    pipeline = _batch_pipeline(responses, frame_count=5)
+    obs = list(pipeline)
+    est = pipeline._estimator
+    assert len(est.timestamps_ms) == 5  # 全部帧都送达 estimator
+    assert len(obs) == 0  # no_hand 帧不产出观测
+
+
+def test_batch_path_flushes_full_batches() -> None:
+    """满批 + 残批都处理（16 帧一批），detected 帧产出观测。"""
+    n = 16 + 5
+    responses = [_structured_result("no_hand"), _structured_result("detected", hands=[
+        RawHandResult(
+            handedness="right", handedness_score=0.9,
+            keypoints=HandKeypoints(
+                normalized=[(0.0, 0.0, 0.0)] * HAND_KEYPOINT_COUNT,
+                pixel=[(0.0, 0.0)] * HAND_KEYPOINT_COUNT,
+            ),
+            bbox=HandBBox(x1=0.0, y1=0.0, x2=4.0, y2=5.0),
+        )
+    ])]
+    pipeline = _batch_pipeline(responses, frame_count=n)
+    obs = list(pipeline)
+    # 响应循环 [no_hand, detected] → 奇数帧 detected（i=1,3,...,19）→ 10 条观测
+    assert len(obs) == 10
+    assert len(pipeline._estimator.timestamps_ms) == n  # noqa: SLF001
+
+
+def test_batch_path_skipped_invalid_input_matches_frames() -> None:
+    """批量路径中无效帧也返回与输入等长的结果（不越界、不错位）。"""
+    responses = [_structured_result("no_hand")] * 3
+    est = FakeBatchEstimator(responses)
+    frames = [
+        _frame(0, 0),
+        _frame(1, 33_333_000),
+        _frame(2, 66_666_000),
+    ]
+    pipe = HandsPipeline(FakeReader(frames), est, model_name="wilor",
+                         model_version="test", active_backend="wilor")
+    obs = list(pipe)
+    assert len(obs) == 0
+    assert len(est.timestamps_ms) == 3

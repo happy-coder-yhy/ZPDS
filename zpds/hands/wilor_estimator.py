@@ -301,7 +301,9 @@ class WiLoRHandEstimator:
         if n == 0:
             return []
 
-        results: list[HandFrameResult] = []
+        # 预分配与输入等长的槽位，按原始帧索引赋值（append 会造成槽位错位，
+        # 全有效帧时 results 为空、后续 results[i] 越界）
+        results: list[HandFrameResult | None] = [None] * n
         valid: list[int] = []  # 通过输入校验、需要真正推理的帧索引
 
         # ---- 1. 逐帧输入校验（与 estimate_frame 同语义） ----
@@ -309,7 +311,7 @@ class WiLoRHandEstimator:
             self._stats.total_frames += 1
 
             if self._run_aborted:
-                results.append(self._aborted_result(timestamps_ms[i]))
+                results[i] = self._aborted_result(timestamps_ms[i])
                 continue
 
             try:
@@ -321,10 +323,10 @@ class WiLoRHandEstimator:
                     )
             except (TypeError, ValueError) as exc:
                 self._stats.skipped_invalid_input += 1
-                results.append(self._invalid_input_result(
+                results[i] = self._invalid_input_result(
                     timestamp_ms=timestamps_ms[i],
                     reason=str(exc),
-                ))
+                )
                 continue
 
             self._last_timestamp_ms = timestamps_ms[i]
@@ -375,10 +377,13 @@ class WiLoRHandEstimator:
             results[i] = self._apply_fallback_policy(
                 frame_rgb=frames_rgb[i],
                 timestamp_ms=timestamps_ms[i],
-                primary=results[i].primary,
+                primary=results[i],
             )
 
-        return results
+        # 校验 + 推理 + 回退三个分支覆盖全部帧，槽位必填满
+        if any(r is None for r in results):
+            raise RuntimeError("estimate_batch 存在未填写的帧槽位（内部错误）")
+        return results  # type: ignore[return-value]
 
     @property
     def supports_batch(self) -> bool:
