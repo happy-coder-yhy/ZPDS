@@ -1266,13 +1266,12 @@ def main():
 
         source_assets = _build_guida_source_assets(dataset_path, session)
 
-<<<<<<< HEAD
     # 主视频首帧绝对时间戳：candidates / Hands 时间轴都是原始 MKV 时间轴，
     # 换算为完整视频帧号时以首帧为基准（scene 段沿用其内部逻辑）。
     pv_first_ts = 0
     if pv is not None and getattr(pv, "index_frames", None):
         pv_first_ts = int(pv.index_frames[0]["timestamp_ns"])
-=======
+
     if reviewed_report is not None:
         expected_session_id = reviewed_report["dataset"]["source_session_id"]
         if session.session_id != expected_session_id:
@@ -1281,7 +1280,6 @@ def main():
                 f"actual={session.session_id!r}, expected={expected_session_id!r}"
             )
             return 1
->>>>>>> 98c064b (功能：新增统一质检报告与审核后清洗闭环)
 
     # ---- 逐个生成 Prepared Segment ----
     step_header(f"生成 {len(candidates)} 个 Prepared Segment")
