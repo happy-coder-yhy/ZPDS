@@ -121,7 +121,6 @@ def test_backend_override_updates_nested_mediapipe_config_hash(
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("ego_bbox_every_frame", False, "ego_bbox_every_frame"),
         ("write_frame_status", False, "write_frame_status"),
     ],
 )
@@ -136,6 +135,22 @@ def test_wilor_production_guards(
 
     with pytest.raises(ValueError, match=message):
         HandsPipelineConfig.load(_write_config(tmp_path, document))
+
+
+def test_wilor_sampling_config_accepted(tmp_path: Path) -> None:
+    """ego_bbox_every_frame=False + bbox_fps 抽帧配置合法加载。
+
+    抽帧语义：False 时 estimator 按 bbox_fps 时间窗推理，中间帧复用
+    上一推理帧结果（WiLoREstimatorConfig 承接），不再拒绝配置。
+    """
+    document = _parallel_config()
+    document["hands"]["wilor"]["ego_bbox_every_frame"] = False
+    document["hands"]["wilor"]["bbox_fps"] = 10.0
+
+    config = HandsPipelineConfig.load(_write_config(tmp_path, document))
+
+    assert config.wilor.ego_bbox_every_frame is False
+    assert config.wilor.bbox_fps == 10.0
 
 
 def test_frame_record_enforces_status_semantics() -> None:

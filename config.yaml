@@ -75,8 +75,11 @@ hands:
   # WiLoR 由独立环境加载；模型仓库 revision、权重名称和哈希已冻结。
   wilor:
     enabled: true
-    ego_bbox_every_frame: true
-    bbox_fps: 30.0
+    # 抽帧：false 时每 bbox_fps 时间窗推理一次，中间帧复用上一推理帧结果
+    #（耗时大头是 ViT+MANO ~113ms/帧，抽帧按窗口省掉中间帧的 MANO 推理；
+    #  YOLO 仅 1-3ms/帧，省它没有意义）。30fps 源 bbox_fps=10 → 每 3 帧推理 1 次。
+    ego_bbox_every_frame: false
+    bbox_fps: 10.0
     write_frame_status: true
     upstream_repository: https://github.com/rolpotamias/WiLoR.git
     upstream_commit: fcb911312a38fa8badd30d9656a167485d61b8f9

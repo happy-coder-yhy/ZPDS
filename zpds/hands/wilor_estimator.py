@@ -80,6 +80,18 @@ class WiLoREstimatorConfig:
     )
     model_name: str = "wilor"
     model_version: str = ""
+    # ---- 抽帧 ----
+    # ego_bbox_every_frame=True（默认）：每帧 WiLoR 推理（历史行为）。
+    # False 时按 bbox_fps 时间窗抽帧：相邻推理帧时间差 ≥ 1000/bbox_fps ms，
+    # 中间帧复用上一推理帧结果（primary.propagated=True，inference_ms=0）。
+    # 首帧（无可用结果）强制推理，与帧率无关。
+    ego_bbox_every_frame: bool = True
+    bbox_fps: float = 30.0
+
+    @property
+    def bbox_interval_ms(self) -> float:
+        """相邻推理帧的最小时间窗（毫秒）。"""
+        return 1000.0 / max(self.bbox_fps, 1e-6)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -107,6 +119,7 @@ class WiLoRFrameStats:
     fallback_used: int = 0
 
     total_inference_ms: float = 0.0
+    propagated_frames: int = 0
 
     @property
     def avg_inference_ms(self) -> float:
@@ -175,6 +188,10 @@ class WiLoRHandEstimator:
         self._run_errors: list[dict] = []
         self._inference_times: list[float] = []
 
+        # 抽帧状态：最近一次真实推理的结果与其时间戳（传播帧不更新）
+        self._last_wilor_result: ModelAttemptResult | None = None
+        self._last_wilor_ms: int = -1
+
         # 对照模式累计（与回退独立）
         self._comparison_runs: list[ModelAttemptResult] = []
 
@@ -238,8 +255,13 @@ class WiLoRHandEstimator:
 
         self._last_timestamp_ms = timestamp_ms
 
-        # ---- WiLoR 主模型 ----
-        primary = self._run_wilor(frame_rgb, timestamp_ms)
+        # ---- WiLoR 主模型（抽帧：时间窗外复用上一推理帧结果） ----
+        if self._should_infer(timestamp_ms):
+            primary = self._run_wilor(frame_rgb, timestamp_ms)
+            self._last_wilor_result = primary
+            self._last_wilor_ms = timestamp_ms
+        else:
+            primary = self._propagated_result(timestamp_ms)
 
         # ---- 运行级终止检查 ----
         self.should_abort()
@@ -332,39 +354,64 @@ class WiLoRHandEstimator:
             self._last_timestamp_ms = timestamps_ms[i]
             valid.append(i)
 
-        # ---- 2. 单次批量推理（有效帧） ----
+        # ---- 2. 批量推理（有效帧中按抽帧时间窗筛推理帧，其余传播） ----
         if valid:
-            t_start = time.perf_counter()
-            try:
-                per_frame_dets = self._adapter.detect_batch(
-                    [frames_rgb[i] for i in valid],
-                    [timestamps_ms[i] for i in valid],
-                )
-            except Exception as exc:
-                level = self.classify_error(exc)
-                if level == "run_level":
-                    self._run_aborted = True
-                    self._abort_reason = f"{type(exc).__name__}: {exc}"
-                    self._run_errors.append({
-                        "failure_type": type(exc).__name__,
-                        "failure_reason": str(exc),
-                        "level": "run_level",
-                    })
-                    raise  # 运行级异常直接抛出
-                # 单帧级：整批记失败，不中断后续帧
-                elapsed_ms = (time.perf_counter() - t_start) * 1000.0
-                for i in valid:
-                    results[i] = self._record_frame_failure(
-                        elapsed_ms / len(valid),
-                        f"{type(exc).__name__}: {exc}",
+            # 批量无法在 detect_batch 中途更新状态，按顺序虚拟推进时间窗：
+            # 命中窗口的帧记为推理帧并推进 virtual_last_ms，传播帧不推进，
+            # 与逐帧路径语义一致（batch 首个有效帧无结果时强制推理，
+            # 之后的帧只按时间窗判定——真实状态要到 detect_batch 后才更新）。
+            infer_idx: list[int] = []
+            force_first = self._last_wilor_result is None
+            virtual_last_ms = self._last_wilor_ms
+            for i in valid:
+                if (
+                    self._config.ego_bbox_every_frame
+                    or (force_first and not infer_idx)
+                    or (timestamps_ms[i] - virtual_last_ms)
+                    >= self._config.bbox_interval_ms
+                ):
+                    infer_idx.append(i)
+                    virtual_last_ms = timestamps_ms[i]
+            if infer_idx:
+                t_start = time.perf_counter()
+                try:
+                    per_frame_dets = self._adapter.detect_batch(
+                        [frames_rgb[i] for i in infer_idx],
+                        [timestamps_ms[i] for i in infer_idx],
                     )
-            else:
-                elapsed_ms = (time.perf_counter() - t_start) * 1000.0
-                per_frame_ms = elapsed_ms / len(valid)
-                for i, dets in zip(valid, per_frame_dets):
-                    results[i] = self._result_from_detections(
-                        frames_rgb[i], dets, timestamps_ms[i], per_frame_ms,
-                    )
+                except Exception as exc:
+                    level = self.classify_error(exc)
+                    if level == "run_level":
+                        self._run_aborted = True
+                        self._abort_reason = f"{type(exc).__name__}: {exc}"
+                        self._run_errors.append({
+                            "failure_type": type(exc).__name__,
+                            "failure_reason": str(exc),
+                            "level": "run_level",
+                        })
+                        raise  # 运行级异常直接抛出
+                    # 单帧级：整批记失败，不中断后续帧
+                    elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+                    for i in infer_idx:
+                        results[i] = self._record_frame_failure(
+                            elapsed_ms / len(infer_idx),
+                            f"{type(exc).__name__}: {exc}",
+                        )
+                else:
+                    elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+                    per_frame_ms = elapsed_ms / len(infer_idx)
+                    for i, dets in zip(infer_idx, per_frame_dets):
+                        results[i] = self._result_from_detections(
+                            frames_rgb[i], dets, timestamps_ms[i], per_frame_ms,
+                        )
+                        # results[i] 在此处暂存 ModelAttemptResult，
+                        # 第 3 步才包装成 HandFrameResult
+                        self._last_wilor_result = results[i]
+                        self._last_wilor_ms = timestamps_ms[i]
+            # 传播帧：复用最近一次推理结果（与 estimate_frame 一致）
+            for i in valid:
+                if i not in infer_idx:
+                    results[i] = self._propagated_result(timestamps_ms[i])
 
         # ---- 3. 运行级检查 + 对照/回退（仅有效帧，与 estimate_frame 对齐） ----
         for i in valid:
@@ -396,6 +443,58 @@ class WiLoRHandEstimator:
         return callable(getattr(self._adapter, "detect_batch", None))
 
     # ---- 内部 ----
+
+    def _should_infer(self, timestamp_ms: int) -> bool:
+        """按抽帧时间窗判断本帧是否需要真实推理。
+
+        每帧模式（ego_bbox_every_frame=True）恒真；抽帧模式下
+        首帧（尚无可用结果）强制推理，其余按 ``bbox_fps`` 换算的
+        时间窗（1000/bbox_fps ms）判定——时间窗天然兼容 CFR/VFR。
+        """
+        if self._config.ego_bbox_every_frame:
+            return True
+        if self._last_wilor_result is None:
+            return True
+        return (
+            timestamp_ms - self._last_wilor_ms
+            >= self._config.bbox_interval_ms
+        )
+
+    def _propagated_result(self, timestamp_ms: int) -> ModelAttemptResult:
+        """复用最近一次推理结果构造传播帧（不跑模型）。
+
+        状态与统计与推理帧一致（detected / no_hand / failed 照常计数，
+        保持 total = detected + no_hand + failed + skipped 恒等式），
+        仅 ``propagated=True`` 且 ``inference_ms=0``；inference 计时
+        统计（total_inference_ms / avg）只累计真实推理帧。
+        """
+        self._stats.propagated_frames += 1
+        last = self._last_wilor_result
+        assert last is not None, "传播帧必须存在最近一次推理结果"
+
+        if last.status == "detected":
+            self._stats.detected += 1
+        elif last.status == "no_hand":
+            self._stats.no_hand += 1
+        elif last.status == "failed":
+            self._stats.failed += 1
+        else:  # not_run / skipped_invalid_input 不会出现在传播链中
+            raise RuntimeError(
+                f"不能传播 status={last.status} 的推理结果（内部错误）"
+            )
+
+        return ModelAttemptResult(
+            model_name=last.model_name,
+            backend_name=last.backend_name,
+            status=last.status,
+            hands=list(last.hands),
+            inference_ms=0.0,
+            failure_reason=last.failure_reason,
+            model_version=last.model_version,
+            checkpoint_sha256=last.checkpoint_sha256,
+            device=last.device,
+            propagated=True,
+        )
 
     def _run_wilor(
         self,
@@ -764,12 +863,15 @@ class WiLoRHandEstimator:
 
         return WiLoRRunReport(
             requested_model="wilor",
-            ego_bbox_every_frame=True,
+            ego_bbox_every_frame=self._config.ego_bbox_every_frame,
             model=self._model_info,
             coverage={
                 "decoded_frames": self._stats.total_frames,
                 "sample_map_rows": self._stats.total_frames,
-                "wilor_requests": self._stats.total_frames,
+                "wilor_requests": (
+                    self._stats.total_frames - self._stats.propagated_frames
+                ),
+                "propagated_frames": self._stats.propagated_frames,
                 "detected_frames": self._stats.detected,
                 "no_hand_frames": self._stats.no_hand,
                 "failed_frames": self._stats.failed,

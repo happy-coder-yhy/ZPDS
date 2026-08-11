@@ -14,6 +14,7 @@ __pycache__/
 clean_report.txt
 prepared_segments/
 output/
+logs/
 batch_summary.json
 zpds_prepare/__pycache__/
 Prepared_Segment_详解.md

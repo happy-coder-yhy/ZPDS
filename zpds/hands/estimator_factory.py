@@ -257,6 +257,10 @@ def _create_wilor_estimator(config: HandsPipelineConfig) -> EstimatorRuntime:
             ),
             model_name="wilor",
             model_version=wilor.model_version,
+            # 抽帧：ego_bbox_every_frame=False 时按 bbox_fps 时间窗推理，
+            # 中间帧复用上一推理帧结果（WiLoRHandEstimator 内部实现）
+            ego_bbox_every_frame=wilor.ego_bbox_every_frame,
+            bbox_fps=wilor.bbox_fps,
         ),
     )
     return EstimatorRuntime(

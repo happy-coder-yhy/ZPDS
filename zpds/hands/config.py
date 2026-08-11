@@ -209,13 +209,9 @@ class HandsPipelineConfig:
             raise ValueError(
                 "ego_bbox_backend=wilor 时 hands.wilor.enabled 必须为 true"
             )
-        if (
-            backend_policy.ego_bbox_backend == "wilor"
-            and not wilor.ego_bbox_every_frame
-        ):
-            raise ValueError(
-                "ego WiLoR 配置必须启用 ego_bbox_every_frame"
-            )
+        # ego_bbox_every_frame=False 时按 bbox_fps 抽帧（estimator 时间窗），
+        # 由 WiLoREstimatorConfig.ego_bbox_every_frame / bbox_fps 承接；
+        # bbox_fps<=0 已在上方 validate() 拦截。
         if (
             backend_policy.ego_bbox_backend == "wilor"
             and not wilor.write_frame_status

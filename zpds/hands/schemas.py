@@ -478,6 +478,7 @@ class ModelAttemptResult:
     model_version: str
     checkpoint_sha256: str | None
     device: str
+    propagated: bool = False
 
     def __post_init__(self) -> None:
         # not_run / skipped_invalid_input 不涉及实际模型运行，
