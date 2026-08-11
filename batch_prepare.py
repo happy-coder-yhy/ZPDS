@@ -760,6 +760,11 @@ def main():
         help="segment_candidates.json 路径 (默认: output/moxian/ 或 output/dunjia/)",
     )
     parser.add_argument(
+        "--reviewed-report",
+        default=None,
+        help="平台审核完成后返回的统一 quality_report.json；提供后将忽略默认候选文件",
+    )
+    parser.add_argument(
         "--dataset", "-d",
         default=None,
         help="数据集路径 (必填; 墨现: 目录; 遁甲/UMI: .mcap 文件)",
@@ -807,6 +812,8 @@ def main():
         help="Experience 版本（默认使用 --experience-dir 的目录名）",
     )
     args = parser.parse_args()
+    if args.reviewed_report and args.candidates:
+        parser.error("--reviewed-report 与 --candidates 不能同时使用")
 
     # 项目根绝对路径（batch_prepare 可能从任意 cwd 启动）
     _load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -815,8 +822,11 @@ def main():
     # ---- 加载配置和候选方案 ----
     cfg = load_config(args.config)
 
-    # 默认 candidates 路径按 profile 分子目录
-    if args.candidates is None:
+    # 默认 candidates 路径按 profile 分子目录；正式审核流程直接使用平台
+    # 返回的同一份统一报告。
+    if args.reviewed_report:
+        candidates_path = Path(args.reviewed_report)
+    elif args.candidates is None:
         profile_subdirs = {"guida": "moxian", "dunjia": "dunjia", "umi": "umi", "epic": "epic"}
         subdir = profile_subdirs.get(profile, profile)
         candidates_path = Path("output") / subdir / "segment_candidates.json"
@@ -851,8 +861,8 @@ def main():
     revision_root = output_root / prep_revision
 
     if not candidates_path.exists():
-        print(f"错误: 候选文件不存在: {candidates_path}")
-        print(f"请先运行: python -m zpds_prepare.main \"{dataset_path}\" --profile {profile}")
+        print(f"错误: 审核报告或候选文件不存在: {candidates_path}")
+        print(f"请先运行质检并完成平台审核: {dataset_path} ({profile})")
         return 1
 
     # ---- 隐私脱敏：场景边界（scene_proposals.parquet）作为强制检测帧 ----
@@ -893,8 +903,50 @@ def main():
             print("[warn] 未找到场景产物 (scene_proposals.parquet)，"
                   "脱敏使用纯间隔采样")
 
-    with open(candidates_path, "r", encoding="utf-8") as f:
-        candidates_doc = json.load(f)
+    reviewed_report = None
+    if args.reviewed_report:
+        from zpds_prepare.review import (
+            ReviewValidationError,
+            build_reviewed_candidates_document,
+            load_reviewed_report,
+            validate_reviewed_report,
+        )
+
+        try:
+            reviewed_report = load_reviewed_report(candidates_path)
+            source_for_validation = dataset_path
+            if profile == "epic" and dataset_path.endswith(".json"):
+                record = json.loads(Path(dataset_path).read_text(encoding="utf-8"))
+                source_for_validation = record.get("video_uri") or dataset_path
+            validate_reviewed_report(
+                reviewed_report,
+                profile=profile,
+                dataset_path=source_for_validation,
+            )
+            segment_cfg = cfg.get("segment", {})
+            candidates_doc = build_reviewed_candidates_document(
+                reviewed_report,
+                min_duration_ns=int(
+                    float(segment_cfg.get("min_duration_s", 1.0)) * 1_000_000_000
+                ),
+                max_duration_ns=int(
+                    float(segment_cfg.get("max_duration_s", 120.0)) * 1_000_000_000
+                ),
+            )
+        except (ReviewValidationError, OSError, ValueError) as exc:
+            print(f"错误: 审核报告不可执行:\n{exc}")
+            return 1
+
+        output_root.mkdir(parents=True, exist_ok=True)
+        approved_candidates_path = output_root / "approved_segment_candidates.json"
+        approved_candidates_path.write_text(
+            json.dumps(candidates_doc, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"审核后候选方案: {approved_candidates_path}")
+    else:
+        with open(candidates_path, "r", encoding="utf-8") as f:
+            candidates_doc = json.load(f)
 
     candidates = candidates_doc.get("segments", [])
     default_session_ids = {
@@ -1214,11 +1266,22 @@ def main():
 
         source_assets = _build_guida_source_assets(dataset_path, session)
 
+<<<<<<< HEAD
     # 主视频首帧绝对时间戳：candidates / Hands 时间轴都是原始 MKV 时间轴，
     # 换算为完整视频帧号时以首帧为基准（scene 段沿用其内部逻辑）。
     pv_first_ts = 0
     if pv is not None and getattr(pv, "index_frames", None):
         pv_first_ts = int(pv.index_frames[0]["timestamp_ns"])
+=======
+    if reviewed_report is not None:
+        expected_session_id = reviewed_report["dataset"]["source_session_id"]
+        if session.session_id != expected_session_id:
+            print(
+                "错误: 重新读取源数据后的 Session ID 与审核报告不一致: "
+                f"actual={session.session_id!r}, expected={expected_session_id!r}"
+            )
+            return 1
+>>>>>>> 98c064b (功能：新增统一质检报告与审核后清洗闭环)
 
     # ---- 逐个生成 Prepared Segment ----
     step_header(f"生成 {len(candidates)} 个 Prepared Segment")

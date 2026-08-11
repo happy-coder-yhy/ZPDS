@@ -589,7 +589,7 @@ def main():
     )
     parser.add_argument(
         "source",
-        help="segment_candidates.json 路径，或 output 目录（如 output/a2d/8032/）",
+        help="审核后的 quality_report.json、segment_candidates.json，或 output 目录",
     )
     parser.add_argument(
         "--candidate", "-c",
@@ -651,8 +651,45 @@ def main():
         print(f"错误: 文件不存在: {candidates_path}", file=sys.stderr)
         return 1
 
+    # ---- 解析 Episode 路径 ----
+    episode_root = None
+    if args.episode:
+        episode_root = Path(args.episode)
+    else:
+        episode_root = _find_episode_root(candidates_path)
+
+    if episode_root is None:
+        print("错误: 无法推断 Episode 根路径，请用 --episode 指定", file=sys.stderr)
+        return 1
+
     with open(candidates_path, "r", encoding="utf-8") as f:
         candidates_doc = json.load(f)
+
+    from zpds_prepare.quality_report_contract import (
+        SUPPORTED_REVIEW_SCHEMA_VERSIONS,
+    )
+
+    if candidates_doc.get("schema_version") in SUPPORTED_REVIEW_SCHEMA_VERSIONS:
+        from zpds_prepare.review import (
+            ReviewValidationError,
+            build_reviewed_candidates_document,
+            validate_reviewed_report,
+        )
+
+        try:
+            validate_reviewed_report(
+                candidates_doc,
+                profile="a2d",
+                dataset_path=episode_root,
+            )
+            candidates_doc = build_reviewed_candidates_document(
+                candidates_doc,
+                min_duration_ns=1_000_000_000,
+                max_duration_ns=300_000_000_000,
+            )
+        except ReviewValidationError as exc:
+            print(f"错误: 审核报告不可执行:\n{exc}", file=sys.stderr)
+            return 1
 
     all_candidates = candidates_doc.get("segments", [])
     if not all_candidates:
@@ -668,17 +705,6 @@ def main():
         if not all_candidates:
             print(f"错误: 找不到 candidate: {args.candidate}", file=sys.stderr)
             return 1
-
-    # ---- 解析 Episode 路径 ----
-    episode_root = None
-    if args.episode:
-        episode_root = Path(args.episode)
-    else:
-        episode_root = _find_episode_root(candidates_path)
-
-    if episode_root is None:
-        print("错误: 无法推断 Episode 根路径，请用 --episode 指定", file=sys.stderr)
-        return 1
 
     # ---- 输出目录 ----
     if args.output_dir:

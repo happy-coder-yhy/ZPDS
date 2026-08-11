@@ -14,6 +14,7 @@ ZPDS Prepare — 主入口。
 """
 
 import argparse
+import copy
 import json
 import logging
 import os
@@ -48,10 +49,17 @@ from zpds_prepare.detectors.frame_count import detect_frame_count_mismatch
 from zpds_prepare.detectors.imu_gap import detect_imu_gaps
 from zpds_prepare.detectors.timestamp_gap import detect_timestamp_gaps
 from zpds_prepare.writers.candidate_writer import write_segment_candidates
+from zpds_prepare.writers.quality_report_writer import write_quality_report
 from zpds_prepare.writers.quality_writer import write_quality_issues
 
 
-def _decisions_to_issues(decisions: list, stream_id: str) -> list:
+def _decisions_to_issues(
+    decisions: list,
+    stream_id: str,
+    *,
+    scope_start_ns: int,
+    scope_end_ns: int,
+) -> list:
     """将级联 Decision 转换为 QualityIssue，供 segment_planner 消费。
 
     只有 disposition 为 trim / split / keep_with_flag / quarantine 的决策才会被转换；
@@ -62,10 +70,27 @@ def _decisions_to_issues(decisions: list, stream_id: str) -> list:
         disp = d.disposition.value if d.disposition else None
         if disp not in ("trim", "split", "keep_with_flag", "quarantine"):
             continue
-        start_ns = d.timestamp_ns or d.detail.get("start_ns", 0)
-        end_ns = d.end_timestamp_ns or d.detail.get("end_ns", start_ns)
-        if end_ns <= start_ns:
-            end_ns = start_ns + 1  # 确保有效区间
+        detail = d.detail or {}
+        raw_start_ns = (
+            d.timestamp_ns
+            if d.timestamp_ns is not None
+            else detail.get("start_ns")
+        )
+        raw_end_ns = (
+            d.end_timestamp_ns
+            if d.end_timestamp_ns is not None
+            else detail.get("end_ns")
+        )
+        # 没有时间戳的决策描述整个数据流。使用 [0, 1] 占位会使问题落在
+        # 绝对时间轴之外，导致前端无法定位，审核后的清洗也无法正确处理。
+        if raw_start_ns is None and raw_end_ns is None:
+            start_ns = int(scope_start_ns)
+            end_ns = int(scope_end_ns)
+        else:
+            start_ns = int(scope_start_ns if raw_start_ns is None else raw_start_ns)
+            end_ns = int(start_ns if raw_end_ns is None else raw_end_ns)
+            if end_ns < start_ns:
+                start_ns, end_ns = end_ns, start_ns
         issues.append(QualityIssue(
             issue_type=d.reason.value,
             stream_id=stream_id,
@@ -77,7 +102,7 @@ def _decisions_to_issues(decisions: list, stream_id: str) -> list:
                 "stage": d.stage,
                 "message": d.message,
                 "source": "qc_cascade",
-                **{k: v for k, v in (d.detail or {}).items()
+                **{k: v for k, v in detail.items()
                    if k not in ("start_ns", "end_ns")},
             },
         ))
@@ -1153,7 +1178,12 @@ def main():
                 robot_observation_checked_flag = True
                 # 转换为 QualityIssue 供 segment_planner 消费
                 cascade_issues.extend(
-                    _decisions_to_issues(report.decisions, stream_id)
+                    _decisions_to_issues(
+                        report.decisions,
+                        stream_id,
+                        scope_start_ns=int(vs.timestamps_ns[0]),
+                        scope_end_ns=int(vs.timestamps_ns[-1]),
+                    )
                 )
                 print(f"  [{stream_id}] Stage 级联完成: "
                       f"{len(report.decisions)} decisions, "
@@ -1380,9 +1410,8 @@ def main():
     # ================================================================
     step_header(4, "汇总分析")
 
-    if not args.split:
-        downgrade_split_issues(all_issues)
-
+    # 审核报告必须保留检测器的原始建议，不能因为本地旧流程默认不切分而
+    # 在写报告前把 split 静默降级为 keep。
     summary = get_issue_summary(all_issues)
     print(f"  总异常数: {summary['total']}")
     if summary["total"] > 0:
@@ -1421,8 +1450,23 @@ def main():
     # ================================================================
     step_header(6, "生成候选 Segment")
 
-    candidates = plan_segments(
+    # 平台看到的建议候选始终按检测器原始动作计算。
+    review_candidates = plan_segments(
         issues=all_issues,
+        session_start_ns=session_start_ns,
+        session_end_ns=session_end_ns,
+        min_duration_ns=int(min_duration_s * 1_000_000_000),
+        max_duration_ns=int(max_duration_s * 1_000_000_000),
+        no_split=False,
+    )
+
+    # 保持旧 segment_candidates.json 行为兼容：未指定 --split 时只对内部
+    # 副本降级，不污染提供给审核平台的质量问题和建议动作。
+    legacy_issues = copy.deepcopy(all_issues)
+    if not args.split:
+        downgrade_split_issues(legacy_issues)
+    candidates = plan_segments(
+        issues=legacy_issues,
         session_start_ns=session_start_ns,
         session_end_ns=session_end_ns,
         min_duration_ns=int(min_duration_s * 1_000_000_000),
@@ -1452,6 +1496,23 @@ def main():
         source_end_ns=session_end_ns,
     )
     print(f"  输出: {sc_path.resolve()}")
+
+    # ================================================================
+    # Step 8: 写出平台唯一审核 JSON
+    # ================================================================
+    step_header(8, "写出统一 quality_report.json")
+    report_path = write_quality_report(
+        output_path=output_dir / "quality_report.json",
+        issues=all_issues,
+        candidates=review_candidates,
+        session=session,
+        dataset_path=dataset_path,
+        profile=profile,
+        cascade_executed=not args.skip_cascade,
+        scene_executed=args.with_scene,
+        config_version=str(args.config),
+    )
+    print(f"  平台审核唯一 JSON: {report_path.resolve()}")
 
     # ================================================================
     # 完成
