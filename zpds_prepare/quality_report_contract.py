@@ -1,4 +1,4 @@
-"""ZPDS pre-clean quality report v1.9 contract constants.
+"""ZPDS pre-clean quality report contract constants.
 
 The values live in code for validation, but are deliberately not embedded in
 each report JSON.  Human-readable Chinese descriptions live in the companion
@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from typing import Final
 
-SCHEMA_VERSION: Final = "zpds.preclean_quality_report.v1.9"
+SCHEMA_VERSION: Final = "zpds.preclean_quality_report.v1.10"
 LEGACY_SCHEMA_VERSIONS: Final = {
     "zpds.preclean_quality_report.v1.6",
     "zpds.preclean_quality_report.v1.7",
     "zpds.preclean_quality_report.v1.8",
+    "zpds.preclean_quality_report.v1.9",
 }
 SUPPORTED_REVIEW_SCHEMA_VERSIONS: Final = {SCHEMA_VERSION, *LEGACY_SCHEMA_VERSIONS}
 ISSUE_SCHEMA_VERSION: Final = "0.2.0"
@@ -73,8 +74,9 @@ ALLOWED_ACTIONS: Final = {
     "reject",
     "manual_review",
 }
+MANUAL_REVIEW_ISSUE_TYPE: Final = "manual_review_required"
 LEGACY_RANGE_ACTIONS: Final = {"trim", "exclude_range"}
-LEGACY_KEEP_ACTIONS: Final = {"keep_with_flag"}
+LEGACY_SPLIT_ACTIONS: Final = {"keep_with_flag"}
 
 
 def normalize_action(action: str) -> str:
@@ -82,8 +84,8 @@ def normalize_action(action: str) -> str:
 
     if action in LEGACY_RANGE_ACTIONS:
         return "split"
-    if action in LEGACY_KEEP_ACTIONS:
-        return "keep"
+    if action in LEGACY_SPLIT_ACTIONS:
+        return "split"
     return action
 ALLOWED_SEVERITIES: Final = {"warning", "error", "critical"}
 ALLOWED_CHECK_STATUSES: Final = {

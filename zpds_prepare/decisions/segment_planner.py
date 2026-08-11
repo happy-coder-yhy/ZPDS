@@ -56,7 +56,7 @@ def plan_segments(
         min_duration_ns: 最短有效 Segment（默认 1s）
         max_duration_ns: 最长有效 Segment（默认 120s）
         no_split: True 时由调用方将 split/旧范围动作降级为
-                  keep_with_flag，产出单一连续 segment。
+                  keep，产出单一连续 segment。
 
     Returns:
         CandidateSegment 列表，按时间排序；no_split=True 时最多返回一个。
@@ -75,7 +75,12 @@ def plan_segments(
                 head_trims.append(issue)
             else:
                 tail_trims.append(issue)
-        elif issue.decision in {"split", "exclude_range", "quarantine"}:
+        elif issue.decision in {
+            "split",
+            "exclude_range",
+            "quarantine",
+            "keep_with_flag",
+        }:
             splits.append(issue)
 
     # ---- 2. 计算有效范围 ----
@@ -148,10 +153,10 @@ def plan_segments(
             # 不出错，但标记
             truncated = True
 
-        # 收集落在这个区间内的 keep_with_flag issues
+        # 收集落在这个区间内的保留类 Issues。
         span_issues = []
         for iss in issues:
-            if iss.decision in {"keep", "keep_with_flag"}:
+            if iss.decision == "keep":
                 if iss.start_ns >= start_ns and iss.end_ns <= end_ns:
                     span_issues.append(iss.to_dict())
             elif iss.decision in {"split", "exclude_range"}:
@@ -185,7 +190,7 @@ def downgrade_split_issues(issues: list[QualityIssue]) -> int:
     """
     count = 0
     for iss in issues:
-        if iss.decision in {"split", "exclude_range"}:
+        if iss.decision in {"split", "exclude_range", "keep_with_flag"}:
             iss.decision = "keep"
             count += 1
     if count:

@@ -32,6 +32,7 @@ from zpds_prepare.quality_report_contract import (
     ALLOWED_STREAM_STATUSES,
     CHECK_IDS,
     ISSUE_SCHEMA_VERSION,
+    MANUAL_REVIEW_ISSUE_TYPE,
     PROFILE_SOURCE_TYPE,
     SCHEMA_VERSION,
     SYNCHRONIZATION_RULE,
@@ -201,6 +202,23 @@ def _stream_inventory(
     asset_by_path: dict[Path, str],
 ) -> list[dict[str, Any]]:
     streams: list[dict[str, Any]] = []
+    from zpds.profiles.registry import get as get_profile
+
+    profile_config = get_profile(profile)
+    configured_primary_ids = (
+        set(profile_config.primary_stream_ids)
+        if profile_config is not None
+        else set()
+    )
+    if (
+        not configured_primary_ids
+        and profile_config is not None
+        and profile_config.primary_stream_id in session.video_streams
+    ):
+        configured_primary_ids.add(profile_config.primary_stream_id)
+    primary_stream_ids = configured_primary_ids.intersection(session.video_streams)
+    if not primary_stream_ids:
+        primary_stream_ids = {session.primary_video.stream_id}
 
     def add(
         stream_id: str,
@@ -221,6 +239,7 @@ def _stream_inventory(
             "modality": normalized_modality,
             "asset_id": row_asset_id or asset_id,
             "source_locator": source_locator,
+            "is_primary": stream_id in primary_stream_ids,
             "required": True,
             "status": "available" if count > 0 else "missing",
             "start_ns": int(values[0]) if values else None,
@@ -378,6 +397,14 @@ def _issue_and_evidence(
             "critical": "critical",
         }.get(str(issue.severity).lower(), str(issue.severity).lower())
         external_action = normalize_action(issue.decision)
+        external_issue_type = (
+            MANUAL_REVIEW_ISSUE_TYPE
+            if external_action == "manual_review"
+            else issue.issue_type
+        )
+        details = dict(issue.details)
+        if external_action == "manual_review":
+            details["original_issue_type"] = issue.issue_type
         issue_start_ns = int(issue.start_ns)
         issue_end_ns = int(issue.end_ns)
         if issue_end_ns < issue_start_ns:
@@ -395,21 +422,21 @@ def _issue_and_evidence(
         )
         issue_rows.append({
             "issue_id": issue_id,
-            "issue_type": issue.issue_type,
+            "issue_type": external_issue_type,
             "stream_id": issue.stream_id,
             "start_ns": issue_start_ns,
             "end_ns": issue_end_ns,
             "duration_ns": issue_end_ns - issue_start_ns,
             "severity": severity,
             "decision": external_action,
-            "details": issue.details,
+            "details": details,
             "evidence_refs": [evidence_id],
             "proposed_action": {
                 "action": external_action,
                 "affected_streams": affected_streams,
                 "start_ns": issue_start_ns,
                 "end_ns": issue_end_ns,
-                "reason": issue.details.get("message", issue.issue_type),
+                "reason": details.get("message", issue.issue_type),
             },
             "review": {
                 "status": "pending",
@@ -545,6 +572,13 @@ def validate_generated_report(document: dict[str, Any]) -> None:
             errors.append(f"{stream.get('stream_id')} modality 非法")
         if stream.get("status") not in ALLOWED_STREAM_STATUSES:
             errors.append(f"{stream.get('stream_id')} status 非法")
+        if not isinstance(stream.get("is_primary"), bool):
+            errors.append(f"{stream.get('stream_id')} is_primary 必须为 boolean")
+    primary_streams = [row for row in inventory if row.get("is_primary") is True]
+    if not primary_streams or any(
+        row.get("modality") != "rgb" for row in primary_streams
+    ):
+        errors.append("stream_inventory 至少标记一个主摄流，且主摄必须为 RGB")
 
     issues = document.get("issues") or []
     issue_ids = {row.get("issue_id") for row in issues}
@@ -563,6 +597,13 @@ def validate_generated_report(document: dict[str, Any]) -> None:
             errors.append(f"{issue_id} severity 非法")
         if issue.get("decision") not in ALLOWED_ACTIONS:
             errors.append(f"{issue_id} decision 非法")
+        if issue.get("decision") == "manual_review":
+            if issue.get("issue_type") != MANUAL_REVIEW_ISSUE_TYPE:
+                errors.append(f"{issue_id} 人工审核问题类型不统一")
+            if not (issue.get("details") or {}).get("original_issue_type"):
+                errors.append(f"{issue_id} 缺少 original_issue_type")
+        elif issue.get("issue_type") == MANUAL_REVIEW_ISSUE_TYPE:
+            errors.append(f"{issue_id} 非人工审核动作不能使用统一人工审核类型")
         proposed = issue.get("proposed_action") or {}
         if proposed.get("action") not in ALLOWED_ACTIONS:
             errors.append(f"{issue_id} proposed_action.action 非法")
@@ -651,7 +692,7 @@ def validate_generated_report(document: dict[str, Any]) -> None:
         errors.append("summary.proposed_segment_count 与 Segments 不一致")
 
     if errors:
-        raise ValueError("quality_report v1.9 校验失败:\n- " + "\n- ".join(errors))
+        raise ValueError(f"quality_report {SCHEMA_VERSION} 校验失败:\n- " + "\n- ".join(errors))
 
 
 def write_quality_report(

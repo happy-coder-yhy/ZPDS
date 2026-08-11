@@ -216,7 +216,7 @@ def _reviewed_issues(document: dict[str, Any]) -> list[QualityIssue]:
         # 隔离区和普通排除区都从本次正式清洗结果中扣除。
         planning_action = "split" if action == "quarantine" else action
         reviewed.append(QualityIssue(
-            issue_type=str(row["issue_type"]),
+            issue_type=str(details.get("original_issue_type", row["issue_type"])),
             stream_id=str(row["stream_id"]),
             start_ns=int(row["start_ns"]),
             end_ns=int(row["end_ns"]),

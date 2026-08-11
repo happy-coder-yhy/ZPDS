@@ -14,6 +14,6 @@ class JianzhiUmiProfile(BaseProfile):
                 "human_hand": "not_applicable",
                 "end_effector": "applicable",
             },
-            # 双端 UMI 以 robot0 端相机为主视角
-            primary_stream_id="robot0_camera0",
+            # 双端 UMI 两路相机没有天然主副关系，均作为主摄。
+            primary_stream_ids=("robot0_camera0", "robot1_camera0"),
         )

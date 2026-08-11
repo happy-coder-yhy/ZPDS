@@ -121,7 +121,7 @@ def _approve(document: dict) -> dict:
 def test_writer_matches_unified_top_level_contract(tmp_path: Path) -> None:
     document, _ = _write(tmp_path)
     assert document["schema_version"] == SCHEMA_VERSION
-    assert SCHEMA_VERSION == "zpds.preclean_quality_report.v1.9"
+    assert SCHEMA_VERSION == "zpds.preclean_quality_report.v1.10"
     assert set(document) == TOP_LEVEL_KEYS
     assert "enum_definitions" not in document
     assert document["dataset"]["units"]["length"] == "m"
@@ -141,6 +141,8 @@ def test_writer_matches_unified_top_level_contract(tmp_path: Path) -> None:
         "sha256",
     }
     assert document["stream_inventory"][0]["source_locator"]
+    assert document["stream_inventory"][0]["is_primary"] is True
+    assert sum(row["is_primary"] for row in document["stream_inventory"]) == 1
     evidence = document["evidence_index"][0]
     assert evidence["type"] == "timestamp_range"
     assert evidence["locator_method"] == "range_overlap"
@@ -159,6 +161,66 @@ def test_validator_rejects_issue_outside_stream_timeline(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="时间范围超出对应 Stream"):
         validate_generated_report(document)
+
+
+def test_umi_marks_both_equal_cameras_primary_independent_of_stream_order(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "umi_sample.mcap"
+    source.write_bytes(b"stable source bytes")
+    timestamps = [1_000_000_000, 2_000_000_000]
+
+    def video(stream_id: str) -> VideoStream:
+        return VideoStream(
+            stream_id=stream_id,
+            timestamps_ns=timestamps,
+            index_frames=[
+                {"seq": index, "timestamp_ns": value}
+                for index, value in enumerate(timestamps)
+            ],
+            video_path=str(source),
+            fps=1.0,
+            width=640,
+            height=480,
+            frame_count=2,
+        )
+
+    session = Session(
+        session_id="umi_sample",
+        source_path=str(source),
+        meta={},
+        video_streams={
+            "robot1_camera0": video("robot1_camera0"),
+            "robot0_camera0": video("robot0_camera0"),
+        },
+    )
+    report_path = write_quality_report(
+        tmp_path / "umi_quality_report.json",
+        issues=[],
+        candidates=plan_segments(
+            [],
+            session_start_ns=session.session_start_ns,
+            session_end_ns=session.session_end_ns,
+            min_duration_ns=1,
+            max_duration_ns=10_000_000_000,
+        ),
+        session=session,
+        dataset_path=str(source),
+        profile="umi",
+        cascade_executed=True,
+        scene_executed=False,
+    )
+
+    document = json.loads(report_path.read_text(encoding="utf-8"))
+    primary_by_stream = {
+        row["stream_id"]: row["is_primary"]
+        for row in document["stream_inventory"]
+    }
+    assert primary_by_stream == {
+        "robot1_camera0": True,
+        "robot0_camera0": True,
+    }
+    validate_generated_report(document)
 
 
 def test_point_evidence_uses_timestamp_locator(tmp_path: Path) -> None:
@@ -192,12 +254,44 @@ def test_point_evidence_uses_timestamp_locator(tmp_path: Path) -> None:
     )
     evidence = json.loads(report_path.read_text("utf-8"))["evidence_index"][0]
     document = json.loads(report_path.read_text("utf-8"))
-    assert document["issues"][0]["decision"] == "keep"
+    assert document["issues"][0]["decision"] == "split"
     assert evidence["type"] == "timestamp_point"
     assert evidence["locator_method"] == "nearest_timestamp"
     assert evidence["timestamp_ns"] == 2_000_000_000
     assert evidence["tolerance_ns"] == 1_000_000_000
     assert "start_ns" not in evidence and "end_ns" not in evidence
+
+
+def test_manual_review_action_uses_unified_issue_type(tmp_path: Path) -> None:
+    source = tmp_path / "manual_review.mcap"
+    source.write_bytes(b"stable source bytes")
+    session = _session(source)
+    issue = _issue()
+    issue.issue_type = "timestamp_gap"
+    issue.decision = "manual_review"
+
+    report_path = write_quality_report(
+        tmp_path / "manual_review_report.json",
+        issues=[issue],
+        candidates=plan_segments(
+            [issue],
+            session_start_ns=session.session_start_ns,
+            session_end_ns=session.session_end_ns,
+            min_duration_ns=1,
+            max_duration_ns=10_000_000_000,
+        ),
+        session=session,
+        dataset_path=str(source),
+        profile="dunjia",
+        cascade_executed=True,
+        scene_executed=False,
+    )
+
+    document = json.loads(report_path.read_text(encoding="utf-8"))
+    report_issue = document["issues"][0]
+    assert report_issue["issue_type"] == "manual_review_required"
+    assert report_issue["details"]["original_issue_type"] == "timestamp_gap"
+    validate_generated_report(document)
 
 
 @pytest.mark.parametrize(
@@ -304,7 +398,7 @@ def test_modified_action_is_applied(tmp_path: Path) -> None:
     assert candidates["segments"][0]["issues_in_span"][0]["decision"] == "keep"
 
 
-def test_v19_rejects_keep_with_flag(tmp_path: Path) -> None:
+def test_current_schema_rejects_keep_with_flag(tmp_path: Path) -> None:
     document, source = _write(tmp_path)
     approved = _approve(document)
     review = approved["issues"][0]["review"]
@@ -349,7 +443,7 @@ def test_v17_exclude_range_is_accepted_as_split(tmp_path: Path) -> None:
     assert candidates["candidate_count"] == 2
 
 
-def test_v18_keep_with_flag_is_accepted_as_keep(tmp_path: Path) -> None:
+def test_v18_keep_with_flag_is_accepted_as_split(tmp_path: Path) -> None:
     document, source = _write(tmp_path)
     legacy = copy.deepcopy(document)
     legacy["schema_version"] = "zpds.preclean_quality_report.v1.8"
@@ -363,8 +457,7 @@ def test_v18_keep_with_flag_is_accepted_as_keep(tmp_path: Path) -> None:
         min_duration_ns=1,
         max_duration_ns=10_000_000_000,
     )
-    assert candidates["candidate_count"] == 1
-    assert candidates["segments"][0]["issues_in_span"][0]["decision"] == "keep"
+    assert candidates["candidate_count"] == 2
 
 
 def test_immutable_detection_content_cannot_be_modified(tmp_path: Path) -> None:
