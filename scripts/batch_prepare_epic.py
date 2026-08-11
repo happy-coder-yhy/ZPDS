@@ -92,7 +92,7 @@ def _run_quality_detection(
     跳过黑屏检测和坏帧检测（两个都是逐帧解码，30min 视频需 20+ 分钟）。
     保留帧数一致性和时间戳缺口检测（纯数学运算，秒级完成）。
 
-    no_split: 不切分视频——split 决策降级为 keep_with_flag，产出
+    no_split: 不切分视频——split 决策降级为 keep，产出
         单一连续 segment。第一版默认不切分（True）。
     """
     from zpds_prepare.main import load_config
@@ -227,7 +227,7 @@ def _run_quality_detection(
         source_session_id=session.session_id,
     )
 
-    # 默认不切分：split 决策降级为 keep_with_flag，产出单一连续 segment
+    # 默认不切分：split 决策降级为 keep，产出单一连续 segment
     if no_split:
         downgrade_split_issues(all_issues)
 

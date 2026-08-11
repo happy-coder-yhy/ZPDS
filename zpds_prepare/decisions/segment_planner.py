@@ -44,9 +44,9 @@ def plan_segments(
     """根据 Issues 生成候选 Segment。
 
     算法：
-    1. 收集首尾 trim 区间，确定有效数据范围
-    2. 收集所有 split 点（长缺口），作为切分边界
-    3. 在有效范围内按 split 点切割
+    1. 收集需排除的时间范围
+    2. 合并首尾或中间的排除范围
+    3. 从统一主时间轴中扣除这些范围
     4. 过滤掉过短 / 过长的段
 
     Args:
@@ -55,13 +55,13 @@ def plan_segments(
         session_end_ns: 原始 Session 结束时间 (设备时钟)
         min_duration_ns: 最短有效 Segment（默认 1s）
         max_duration_ns: 最长有效 Segment（默认 120s）
-        no_split: True 时忽略所有 split 决策，产出单一连续 segment。
-                  split 问题仍记录在 issues_in_span 中，但不触发切分。
+        no_split: True 时由调用方将 split/旧范围动作降级为
+                  keep_with_flag，产出单一连续 segment。
 
     Returns:
         CandidateSegment 列表，按时间排序；no_split=True 时最多返回一个。
     """
-    # ---- 1. 分离 trim 和 split ----
+    # ---- 1. 分离旧 trim 和范围排除动作 ----
     # 注：no_split 降级已在调用方通过 downgrade_split_issues() 完成
     head_trims: list[QualityIssue] = []
     tail_trims: list[QualityIssue] = []
@@ -75,7 +75,7 @@ def plan_segments(
                 head_trims.append(issue)
             else:
                 tail_trims.append(issue)
-        elif issue.decision == "split":
+        elif issue.decision in {"split", "exclude_range", "quarantine"}:
             splits.append(issue)
 
     # ---- 2. 计算有效范围 ----
@@ -121,7 +121,7 @@ def plan_segments(
         reason = "valid_span_after_long_gap" if valid_spans else "full_session"
         valid_spans.append((current, valid_end, reason))
 
-    if not valid_spans and valid_start < valid_end:
+    if not valid_spans and valid_start < valid_end and not split_boundaries:
         valid_spans.append((valid_start, valid_end, "full_session"))
 
     if (head_trims or tail_trims) and len(valid_spans) == 1:
@@ -151,11 +151,11 @@ def plan_segments(
         # 收集落在这个区间内的 keep_with_flag issues
         span_issues = []
         for iss in issues:
-            if iss.decision == "keep_with_flag":
+            if iss.decision in {"keep", "keep_with_flag"}:
                 if iss.start_ns >= start_ns and iss.end_ns <= end_ns:
                     span_issues.append(iss.to_dict())
-            elif iss.decision == "split":
-                # split 缺口落在区间内 — 记录但不触发切分（已在上面处理）
+            elif iss.decision in {"split", "exclude_range"}:
+                # 排除范围已在上面处理，不再写入有效 Segment。
                 pass
 
         reason_full = reason
@@ -175,7 +175,7 @@ def plan_segments(
 
 
 def downgrade_split_issues(issues: list[QualityIssue]) -> int:
-    """将所有 split 决策降级为 keep_with_flag。
+    """将范围排除决策降级为 keep。
 
     供 ``no_split`` 模式使用：调用方在 ``get_issue_summary()`` 和
     ``plan_segments()`` 之前调用此函数，确保汇总和分段都反映降级后的状态。
@@ -185,14 +185,14 @@ def downgrade_split_issues(issues: list[QualityIssue]) -> int:
     """
     count = 0
     for iss in issues:
-        if iss.decision == "split":
-            iss.decision = "keep_with_flag"
+        if iss.decision in {"split", "exclude_range"}:
+            iss.decision = "keep"
             count += 1
     if count:
         import logging
         _log = logging.getLogger(__name__)
         _log.info(
-            "no_split 模式：%d 个 split 决策降级为 keep_with_flag", count,
+            "no_split 模式：%d 个范围排除决策降级为 keep", count,
         )
     return count
 
