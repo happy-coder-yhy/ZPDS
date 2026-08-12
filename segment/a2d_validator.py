@@ -68,6 +68,11 @@ def validate_segment(segment_dir: Path) -> dict:
 
     return {
         "status": status,
+        # 封装完整性状态（与 QC 的 quality_status / processing_status 分层，
+        # 不再混叫 PASS/FAIL）：pass_with_warning → warn
+        "package_validation_status": (
+            "warn" if status == "pass_with_warning" else status
+        ),
         "checks": checks,
         "statistics": stats,
     }

@@ -1183,6 +1183,8 @@ def validate_segment(output_dir: str) -> dict:
 
     return {
         "status": status,
+        # 封装完整性状态（与 QC 的 quality_status / processing_status 分层）
+        "package_validation_status": status,
         "checks": checks,
         "statistics": stats,
         "errors": errors,
