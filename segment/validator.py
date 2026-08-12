@@ -561,6 +561,93 @@ def validate_audio_streams(seg_dir: Path, segment: dict) -> dict:
     }
 
 
+def validate_hands_artifacts(seg_dir: Path, segment: dict) -> dict:
+    """验证 Hands 辅助产物（segment.json 中 stream.hands 块）。
+
+    hands 块存在时验证：产物文件齐全可读、行数与声明一致、
+    时间戳位于 segment-relative 轴 [0, end_ns] 且单调不减、timebase 契约。
+    无 hands 块时返回 skip（不强制——hands 未接入的旧产物仍可通过）。
+    """
+    errors: list[str] = []
+    checks: dict[str, str] = {}
+    stats: dict[str, int] = {}
+
+    hands_streams = [
+        stream for stream in segment.get("streams", []) if stream.get("hands")
+    ]
+    if not hands_streams:
+        return {
+            "status": "skip",
+            "checks": {"hands_artifacts_valid": "skip"},
+            "statistics": {},
+            "errors": [],
+        }
+
+    end_ns = int(segment.get("timeline", {}).get("end_ns", 0))
+    for stream in hands_streams:
+        sid = stream["stream_id"]
+        hands = stream["hands"]
+
+        # 1. 引用的产物文件存在
+        for key in ("uri", "frames_uri", "report_uri"):
+            uri = hands.get(key)
+            if not uri:
+                errors.append(f"[{sid}] hands.{key} 缺失")
+                continue
+            if not (seg_dir / uri).is_file():
+                errors.append(f"[{sid}] hands 产物缺失: {uri}")
+
+        # 2. hands_2d.parquet：行数与声明一致、时间戳契约
+        uri = hands.get("uri")
+        if uri and (seg_dir / uri).is_file():
+            df = pd.read_parquet(str(seg_dir / uri))
+            stats[f"hands_rows_{sid}"] = len(df)
+            if "timestamp_ns" in df.columns:
+                ts = df["timestamp_ns"].values
+                stats[f"hands_first_ts_ns_{sid}"] = int(ts[0]) if len(ts) else 0
+                if len(ts) == 0:
+                    errors.append(f"[{sid}] hands_2d 无行（空产物）")
+                else:
+                    if ts[0] < 0:
+                        errors.append(f"[{sid}] hands timestamp_ns 为负（应为 segment-relative）")
+                    if not bool(np.all(np.diff(ts) >= 0)):
+                        errors.append(f"[{sid}] hands timestamp_ns 非单调")
+                    if end_ns and ts[-1] >= end_ns:
+                        errors.append(
+                            f"[{sid}] hands timestamp_ns 超出 segment 时长 "
+                            f"({int(ts[-1])} >= {end_ns})"
+                        )
+            declared_rows = hands.get("rows")
+            if declared_rows is not None and declared_rows != len(df):
+                errors.append(
+                    f"[{sid}] hands rows 声明 {declared_rows} != 实际 {len(df)}"
+                )
+
+        # 3. hand_cleaning_frames.parquet：行数与声明一致
+        frames_uri = hands.get("frames_uri")
+        if frames_uri and (seg_dir / frames_uri).is_file():
+            fdf = pd.read_parquet(str(seg_dir / frames_uri))
+            stats[f"hands_frames_{sid}"] = len(fdf)
+            declared_frames = hands.get("frames")
+            if declared_frames is not None and declared_frames != len(fdf):
+                errors.append(
+                    f"[{sid}] hands frames 声明 {declared_frames} != 实际 {len(fdf)}"
+                )
+
+        # 4. timebase 契约：segment-relative 轴
+        if hands.get("timebase") != "segment_clock":
+            errors.append(f"[{sid}] hands timebase 应为 segment_clock")
+
+    status = "fail" if errors else "pass"
+    checks["hands_artifacts_valid"] = status
+    return {
+        "status": status,
+        "checks": checks,
+        "statistics": stats,
+        "errors": errors,
+    }
+
+
 def _read_source_magnetic_encoders(
     segment: dict,
     topics: set[str],
@@ -992,6 +1079,12 @@ def validate_segment(output_dir: str) -> dict:
     checks.update(audio_validation["checks"])
     stats.update(audio_validation["statistics"])
     errors.extend(audio_validation["errors"])
+
+    # ---- 6c. Hands 辅助产物：文件齐全、行数一致、时间戳契约 ----
+    hands_validation = validate_hands_artifacts(seg_dir, segment)
+    checks.update(hands_validation["checks"])
+    stats.update(hands_validation["statistics"])
+    errors.extend(hands_validation["errors"])
 
     # ---- 7. IMU 可读且时间单调（按 segment.json 中每个 IMU 流检查） ----
     imu_streams = [s for s in segment.get("streams", []) if s.get("modality") == "imu"]

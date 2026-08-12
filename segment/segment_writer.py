@@ -325,6 +325,8 @@ def build_segment_json(
                 "kept_frames": hands_results.get("kept_frames", 0),
                 "overall_disposition": hands_results.get("overall_disposition"),
                 "cropped": hands_results.get("cropped", True),
+                "timebase": hands_results.get("timebase", "segment_clock"),
+                "source_span": hands_results.get("source_span"),
                 "crop": hands_results.get("crop"),
             }
         if vr.get("preview_uri"):

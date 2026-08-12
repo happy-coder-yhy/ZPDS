@@ -226,10 +226,13 @@ def _crop_hands_artifacts(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- hands_2d.parquet：按真实 MKV 时间戳过滤（与 candidates 同轴）----
+    # 过滤后 rebase 到 segment-relative 轴（segment.json timeline.start_ns=0），
+    # 与 hand_cleaning_frames 的时间戳约定一致；消费者无需再换算。
     hands = pd.read_parquet(source_dir / "hands_2d.parquet")
     hands = hands[
         (hands["timestamp_ns"] >= start_ns) & (hands["timestamp_ns"] < end_ns)
     ]
+    hands["timestamp_ns"] = (hands["timestamp_ns"] - start_ns).astype("int64")
     hands.to_parquet(target_dir / "hands_2d.parquet", index=False)
 
     # ---- hand_cleaning_frames.parquet：按源解码帧号裁切，时间戳重算为相对轴 ----
@@ -342,6 +345,8 @@ def _crop_hands_artifacts(
         "kept_frames": kept,
         "overall_disposition": cropped_report["summary"]["overall_disposition"],
         "cropped": True,
+        "timebase": "segment_clock",
+        "source_span": {"start_ns": start_ns, "end_ns": end_ns},
         "crop": {
             "start_ns": start_ns,
             "end_ns": end_ns,
@@ -855,6 +860,10 @@ def main():
         print(f"请先运行: python -m zpds_prepare.main \"{dataset_path}\" --profile {profile}")
         return 1
 
+    with open(candidates_path, "r", encoding="utf-8") as f:
+        candidates_doc = json.load(f)
+    analysis_artifacts: dict = candidates_doc.get("analysis_artifacts", {}) or {}
+
     # ---- 隐私脱敏：场景边界（scene_proposals.parquet）作为强制检测帧 ----
     # 场景切换后画面布局剧变，KLT 传播必然失效，在这些帧重新完整检测。
     # 注意：scene run 的时间戳是"帧号/fps 重算"的（run_summary 中 start_ns=0），
@@ -862,39 +871,49 @@ def main():
     # scene 产物位置与 main.py 一致：{output_root}/{prep_revision}/seg_000001/scene
     scene_boundary_frames: list[int] = []
     if args.with_privacy:
-        scene_dir = output_root / prep_revision / "seg_000001" / "scene"
-        scene_file = scene_dir / "scene_proposals.parquet"
-        # 兼容旧布局（{output_root.parent}/scene），新数据不再产生。
-        legacy_scene_file = output_root.parent / "scene" / "scene_proposals.parquet"
-        if not scene_file.is_file() and legacy_scene_file.is_file():
-            scene_dir = output_root.parent / "scene"
-            scene_file = legacy_scene_file
-        if scene_file.is_file():
-            try:
-                scene_fps = 30.0
-                summary_file = scene_dir / "run_summary.json"
-                if summary_file.is_file():
-                    scene_fps = float(
-                        json.loads(
-                            summary_file.read_text(encoding="utf-8")
-                        ).get("fps", 30.0)
-                    )
-                scene_df = pd.read_parquet(str(scene_file))
-                if not scene_df.empty and "start_ns" in scene_df.columns:
-                    scene_boundary_frames = sorted(
-                        int(round(v / 1_000_000_000 * scene_fps))
-                        for v in scene_df["start_ns"].tolist()
-                    )
-                    print(f"场景边界: {len(scene_boundary_frames)} 个帧号"
-                          f"（脱敏强制检测帧，来自 {scene_file.name}）")
-            except Exception as exc:  # noqa: BLE001 - 边界读取失败不阻断脱敏
-                print(f"[warn] 读取场景边界失败，脱敏退化为纯间隔采样: {exc}")
-        else:
-            print("[warn] 未找到场景产物 (scene_proposals.parquet)，"
-                  "脱敏使用纯间隔采样")
-
-    with open(candidates_path, "r", encoding="utf-8") as f:
-        candidates_doc = json.load(f)
+        # 优先 candidates JSON 顶层 analysis_artifacts.scene（main.py 新布局
+        # {--output}/analysis/scene/，uri 相对 candidates 所在目录）；
+        # 无声明时回退旧布局
+        # （{output_root}/{prep_revision}/seg_000001/scene 与 {output_root.parent}/scene）。
+        scene_art = analysis_artifacts.get("scene", {}) or {}
+        scene_dir: Path | None = None
+        if scene_art.get("uri"):
+            candidate_scene_dir = (candidates_path.parent / scene_art["uri"]).parent
+            if (candidate_scene_dir / "scene_proposals.parquet").is_file():
+                scene_dir = candidate_scene_dir
+        if scene_dir is None:
+            legacy_dir = output_root / prep_revision / "seg_000001" / "scene"
+            if (legacy_dir / "scene_proposals.parquet").is_file():
+                scene_dir = legacy_dir
+            else:
+                legacy_dir2 = output_root.parent / "scene"
+                if (legacy_dir2 / "scene_proposals.parquet").is_file():
+                    scene_dir = legacy_dir2
+        if scene_dir is not None:
+            scene_file = scene_dir / "scene_proposals.parquet"
+            if scene_file.is_file():
+                try:
+                    scene_fps = 30.0
+                    summary_file = scene_dir / "run_summary.json"
+                    if summary_file.is_file():
+                        scene_fps = float(
+                            json.loads(
+                                summary_file.read_text(encoding="utf-8")
+                            ).get("fps", 30.0)
+                        )
+                    scene_df = pd.read_parquet(str(scene_file))
+                    if not scene_df.empty and "start_ns" in scene_df.columns:
+                        scene_boundary_frames = sorted(
+                            int(round(v / 1_000_000_000 * scene_fps))
+                            for v in scene_df["start_ns"].tolist()
+                        )
+                        print(f"场景边界: {len(scene_boundary_frames)} 个帧号"
+                              f"（脱敏强制检测帧，来自 {scene_file.name}）")
+                except Exception as exc:  # noqa: BLE001 - 边界读取失败不阻断脱敏
+                    print(f"[warn] 读取场景边界失败，脱敏退化为纯间隔采样: {exc}")
+            else:
+                print("[warn] 未找到场景产物 (scene_proposals.parquet)，"
+                      "脱敏使用纯间隔采样")
 
     candidates = candidates_doc.get("segments", [])
     default_session_ids = {
@@ -911,14 +930,26 @@ def main():
         print("没有候选 Segment，退出。")
         return 0
 
-    # ---- Hands 辅助产物（main.py 产出，引用式接入）----
-    # main.py 写入 {--output}/prepared_segments/r0001/seg_000001/hands/，与 batch
-    # 输出（prepared_segments/...）不同根；candidates 位于 main 的 --output 目录，
-    # 由此反推 main 产物位置。产物缺失时跳过（行为同 scene 先例）。
-    hands_source_dir: Path | None = (
-        candidates_path.parent / "prepared_segments" / REVISION / "seg_000001" / "hands"
-    )
-    if hands_source_dir.is_dir():
+    # ---- Hands 辅助产物（main.py source-level staging，引用式接入）----
+    # main.py 写入 {--output}/analysis/hands/ 并在 segment_candidates.json 顶层
+    # analysis_artifacts.hands 声明 uri（相对 candidates 所在目录）；
+    # 无 manifest 的旧 candidates 回退到旧布局
+    # （{candidates.parent}/prepared_segments/r0001/seg_000001/hands）。
+    hands_source_dir: Path | None = None
+    hands_art = analysis_artifacts.get("hands", {}) or {}
+    if hands_art.get("uri"):
+        hands_source_dir = (candidates_path.parent / hands_art["uri"]).parent
+    else:
+        legacy_hands_dir = (
+            candidates_path.parent
+            / "prepared_segments"
+            / REVISION
+            / "seg_000001"
+            / "hands"
+        )
+        if legacy_hands_dir.is_dir():
+            hands_source_dir = legacy_hands_dir
+    if hands_source_dir is not None and hands_source_dir.is_dir():
         print(f"Hands 源产物: {hands_source_dir}")
     else:
         hands_source_dir = None

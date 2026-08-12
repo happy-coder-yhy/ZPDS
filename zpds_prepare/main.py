@@ -228,8 +228,9 @@ def _run_hand_analysis(
         model_version=runtime.model_version,
         active_backend=runtime.active_backend,
     )
-    # 手部产物放入 Prepared Segment 目录下（对齐 batch 首个 segment 命名）。
-    hand_dir = _hands_output_dir(output_dir)
+    # 手部产物放入 source-level staging 目录（analysis/hands/），
+    # batch_prepare 按候选区间裁切后落入各 segment。
+    hand_dir = _analysis_output_dir(output_dir, "hands")
     hand_dir.mkdir(parents=True, exist_ok=True)
     hands_parquet = hand_dir / "hands_2d.parquet"
     write_hand_observations(
@@ -251,6 +252,8 @@ def _run_hand_analysis(
     return {
         "hands_parquet": str(hands_parquet),
         "hand_cleaning_report_path": str(result.report_path),
+        "video_stream_id": stream_id,
+        "model": runtime.active_backend,
     }
 
 
@@ -323,6 +326,17 @@ def _run_privacy_analysis(
             "pii_categories_found": list(manifest.pii_categories_found),
         },
     }
+
+    # 落盘 source-level manifest（analysis/privacy/manifest.json），
+    # 供跨服务器消费/审计（与 hands/scene 同层的 staging 目录）。
+    privacy_dir = _analysis_output_dir(output_dir, "privacy")
+    privacy_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = privacy_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest_dict, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"  → 隐私 manifest: {manifest_path}")
     return manifest_dict
 
 
@@ -348,22 +362,15 @@ def _read_video_frames(
     return frames, fps
 
 
-def _first_segment_dir(output_dir: Path) -> Path:
-    """batch 首个 segment 目录：prepared_segments/r0001/seg_000001。
+def _analysis_output_dir(output_dir: Path, kind: str) -> Path:
+    """辅助分析产物 staging 目录（source-level，与 segment_candidates.json 同根）。
 
-    hands/scene 等辅助产物统一放这里，与 batch_prepare 的输出结构对齐。
+    hands / scene / privacy 的分析产物统一放这里，不再假装 batch 的
+    prepared_segments/r0001/seg_000001 目录；batch_prepare 通过
+    segment_candidates.json 的 analysis_artifacts 声明按 [start_ns, end_ns)
+    裁切消费，任何 source-level → segment-level 的转换只发生在 batch 端。
     """
-    return (
-        output_dir
-        / "prepared_segments"
-        / "r0001"
-        / "seg_000001"
-    )
-
-
-def _hands_output_dir(output_dir: Path) -> Path:
-    """手部产物目录：对齐 batch 首个 segment（prepared_segments/r0001/seg_000001/hands）。"""
-    return _first_segment_dir(output_dir) / "hands"
+    return output_dir / "analysis" / kind
 
 
 def _split_csv(value: object) -> tuple[str, ...]:
@@ -423,7 +430,7 @@ def _try_reuse_scene_run(
     """
     from zpds.scene.pipeline import ScenePipelineRun
 
-    scene_dir = _first_segment_dir(Path(output_dir)) / "scene"
+    scene_dir = _analysis_output_dir(Path(output_dir), "scene")
     summary_file = scene_dir / "run_summary.json"
     proposals_file = scene_dir / "scene_proposals.parquet"
     if not (summary_file.is_file() and proposals_file.is_file()):
@@ -475,9 +482,9 @@ def _run_scene_analysis(
 ) -> dict[str, object]:
     """运行场景分割 + VLM 复核，返回 ScenePipelineRun 与 SceneConfig。
 
-    运行结果落盘到 ``{output_dir}/prepared_segments/r0001/seg_000001/scene/``
-    （scene_proposals.parquet、vlm_review.parquet、run_summary.json），
-    与 hands 目录同层。
+    运行结果落盘到 ``{output_dir}/analysis/scene/``（source-level staging：
+    scene_proposals.parquet、vlm_review.parquet、run_summary.json），
+    与 hands / privacy 目录同层；batch 端按候选区间消费。
     """
     from zpds.scene.config import SceneConfig
     from zpds.scene.pipeline import run_scene_pipeline
@@ -551,7 +558,7 @@ def _run_scene_analysis(
             vlm_reviewer=None,
         )
     if run is not None and not run.skipped:
-        scene_dir = _first_segment_dir(Path(output_dir)) / "scene"
+        scene_dir = _analysis_output_dir(Path(output_dir), "scene")
         scene_dir.mkdir(parents=True, exist_ok=True)
         written = write_scene_run(
             scene_dir,
@@ -868,6 +875,7 @@ def main():
 
     # guida（墨现）默认运行手部清洗；--skip-hands 反向关闭
     run_hands = (args.with_hands or profile == "guida") and not args.skip_hands
+    hand_result: dict | None = None
     if run_hands and pv.video_path:
         step_header(15, "手部检测与手部清洗（Stage 9 输入）")
         from zpds.profiles.registry import get as _get_profile
@@ -887,7 +895,7 @@ def main():
         if not _hand_applicable:
             print("  手部分析跳过: human_hand=not_applicable")
         else:
-            hand_dir = _hands_output_dir(output_dir)
+            hand_dir = _analysis_output_dir(output_dir, "hands")
             report_file = hand_dir / "hand_cleaning_report.json"
             hands_parquet_file = hand_dir / "hands_2d.parquet"
             reused = False
@@ -1444,12 +1452,48 @@ def main():
     # ================================================================
     step_header(7, "写出 segment_candidates.json")
 
+    # source-level 辅助产物声明（analysis/hands|scene|privacy/），
+    # batch_prepare 据此按每个候选 [start_ns, end_ns) 裁切消费；
+    # 不写路径进每个 candidate——产物是 session 级，candidate 是切分级。
+    analysis_artifacts: dict[str, Any] = {}
+    if hand_report_path:
+        analysis_artifacts["hands"] = {
+            "schema_version": "zpds.hands.v1",
+            "timebase": "source_clock",
+            "uri": "analysis/hands/hands_2d.parquet",
+            "frames_uri": "analysis/hands/hand_cleaning_frames.parquet",
+            "report_uri": "analysis/hands/hand_cleaning_report.json",
+            "video_stream_id": (
+                hand_result.get("video_stream_id") if hand_result else None
+            ),
+            "model": hand_result.get("model") if hand_result else None,
+            "source_fps": float(pv.fps),
+        }
+    if scene_pipeline_run is not None and not scene_pipeline_run.skipped:
+        analysis_artifacts["scene"] = {
+            "schema_version": "zpds.scene.v1",
+            "timebase": "source_clock",
+            "uri": "analysis/scene/scene_proposals.parquet",
+            "summary_uri": "analysis/scene/run_summary.json",
+            "vlm_uri": "analysis/scene/vlm_review.parquet",
+            "config_hash": scene_pipeline_run.config_hash,
+            "fps": scene_pipeline_run.fps,
+            "frame_count": scene_pipeline_run.frame_count,
+        }
+    if privacy_manifest:
+        analysis_artifacts["privacy"] = {
+            "schema_version": "zpds.privacy.manifest.v1",
+            "uri": "analysis/privacy/manifest.json",
+            "config_hash": privacy_manifest.get("config_hash"),
+        }
+
     sc_path = write_segment_candidates(
         output_path=output_dir / "segment_candidates.json",
         candidates=candidates,
         source_session_id=session_id,
         source_start_ns=session_start_ns,
         source_end_ns=session_end_ns,
+        analysis_artifacts=analysis_artifacts,
     )
     print(f"  输出: {sc_path.resolve()}")
 

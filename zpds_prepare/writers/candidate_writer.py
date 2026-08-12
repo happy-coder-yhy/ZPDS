@@ -14,6 +14,7 @@ def write_segment_candidates(
     source_session_id: str,
     source_start_ns: int,
     source_end_ns: int,
+    analysis_artifacts: dict | None = None,
 ) -> Path:
     """将候选 Segment 列表写入 JSON 文件。
 
@@ -23,6 +24,8 @@ def write_segment_candidates(
         source_session_id: 来源 Session ID
         source_start_ns: 原始 Session 起始时间
         source_end_ns: 原始 Session 结束时间
+        analysis_artifacts: source-level 辅助产物声明（hands/scene/privacy，
+            相对本文件所在目录的 uri），batch_prepare 据此按候选区间裁切消费。
 
     Returns:
         实际写入的文件路径
@@ -30,7 +33,7 @@ def write_segment_candidates(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     payload = {
-        "schema_version": "0.1.0",
+        "schema_version": "0.2.0",
         "source_session_id": source_session_id,
         "source_start_ns": source_start_ns,
         "source_end_ns": source_end_ns,
@@ -41,6 +44,7 @@ def write_segment_candidates(
         "total_effective_duration_s": round(
             sum(c.duration_ns for c in candidates) / 1_000_000_000, 3
         ),
+        "analysis_artifacts": analysis_artifacts or {},
         "segments": [c.to_dict() for c in candidates],
     }
 
