@@ -64,12 +64,17 @@ def get_yolo() -> Any:
 
 
 def get_ocr_reader():
-    """懒加载 EasyOCR reader(首次调用会下载中英文模型)。"""
+    """懒加载 EasyOCR reader。
+
+    ``download_enabled=False``：模型缺失时直接报错而非联网下载——
+    部署期由 ``scripts/download_models.py`` 预下载（验收：任务运行期
+    无 Downloading 输出）。
+    """
     global _ocr_reader
     if _ocr_reader is None:
         import easyocr
 
-        _ocr_reader = easyocr.Reader(config.OCR_LANGS)
+        _ocr_reader = easyocr.Reader(config.OCR_LANGS, download_enabled=False)
     return _ocr_reader
 
 
