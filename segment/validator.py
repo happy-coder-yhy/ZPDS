@@ -1068,6 +1068,51 @@ def validate_segment(output_dir: str) -> dict:
                 stats[f"max_mapping_error_ns_{vs['stream_id']}"] = int(sm["time_error_ns"].abs().max())
     checks["sample_map_monotonic"] = "pass" if all_sm_mono and video_streams else "skip"
 
+    # ---- 5b. sample_map 源帧全量可追溯（最近邻映射不丢帧） ----
+    # 输出帧数由 CFR 时长网格决定，可能 ≠ 源帧数（如 1277 源帧 → 1278 输出帧），
+    # 合法判定：source_frame_index 无 NaN/无中间缺口。首尾边缘缺失允许
+    #（网格范围可能略短于源时长）；中间缺口意味着源帧被跳过 = 丢帧。
+    all_traceable = True
+    for vs in video_streams:
+        sm_uri = vs.get("origin", {}).get("sample_map_uri", "")
+        if not sm_uri:
+            continue
+        sm_path = seg_dir / sm_uri
+        if not sm_path.exists():
+            continue
+        sm = pd.read_parquet(str(sm_path))
+        if "source_frame_index" not in sm.columns:
+            continue
+        sfi = sm["source_frame_index"].values
+        if np.isnan(sfi).any():
+            all_traceable = False
+            errors.append(f"[{vs['stream_id']}] Sample map has NaN source_frame_index")
+            continue
+        sfi = sfi.astype(np.int64)
+        lo, hi = int(sfi.min()), int(sfi.max())
+        missing = sorted(set(range(lo, hi + 1)) - set(sfi))
+        # 连续缺失段；贴 lo（前缀）或贴 hi（后缀）的段合法，其余为中间缺口
+        segs: list[list[int]] = []
+        for m in missing:
+            if segs and m == segs[-1][-1] + 1:
+                segs[-1].append(m)
+            else:
+                segs.append([m])
+        illegal = [s for s in segs if s[0] != lo and s[-1] != hi]
+        if illegal:
+            all_traceable = False
+            spans = ", ".join(
+                f"{s[0]}..{s[-1]}({len(s)}帧)" for s in illegal[:3]
+            )
+            errors.append(
+                f"[{vs['stream_id']}] Sample map 源帧中间缺口（疑似丢帧）: {spans}"
+            )
+        stats[f"source_frames_covered_{vs['stream_id']}"] = hi - lo + 1 - len(missing)
+    if not video_streams:
+        checks["sample_map_traceability"] = "skip"
+    else:
+        checks["sample_map_traceability"] = "pass" if all_traceable else "fail"
+
     # ---- 6. 深度流完整性、dtype、单位和来源 ----
     depth_validation = validate_depth_streams(seg_dir, segment)
     checks.update(depth_validation["checks"])
