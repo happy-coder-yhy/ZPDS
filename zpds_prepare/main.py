@@ -48,7 +48,11 @@ from zpds_prepare.detectors.frame_count import detect_frame_count_mismatch
 from zpds_prepare.detectors.imu_gap import detect_imu_gaps
 from zpds_prepare.detectors.timestamp_gap import detect_timestamp_gaps
 from zpds_prepare.writers.candidate_writer import write_segment_candidates
-from zpds_prepare.writers.quality_writer import write_quality_issues
+from zpds_prepare.writers.quality_writer import (
+    derive_processing_status,
+    derive_quality_status,
+    write_quality_issues,
+)
 
 
 def _decisions_to_issues(decisions: list, stream_id: str) -> list:
@@ -180,6 +184,66 @@ class _RawVideoFrameSource:
             capture.release()
 
 
+def _hands_cache_ok(
+    report_file: Path,
+    hands_parquet_file: Path,
+    video_path: str | Path,
+    timestamps_ns: list[int] | tuple[int, ...],
+) -> tuple[bool, list[str]]:
+    """Hands 缓存复用判定：帧数 + 源视频内容 + 模型指纹全一致才复用。
+
+    指纹来源（复用判定本身不触发模型推理）：
+    - hand_cleaning_report.json: source.advertised_frame_count / provenance.source_video_sha256
+    - hands_2d.parquet 列: config_sha256 / checkpoint_sha256（每行同值，取首行）
+    期望指纹与 _run_hand_analysis 同源（HandsPipelineConfig.load，只读配置与权重
+    文件元信息，不加载模型权重）。
+
+    Returns:
+        (是否复用, 不匹配原因列表)
+    """
+    import pandas as pd
+
+    from zpds.hands.config import HandsPipelineConfig
+    from zpds.utils.hash import sha256_hex
+
+    reasons: list[str] = []
+    try:
+        rep = json.loads(report_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, [f"报告不可读: {exc}"]
+    src = rep.get("source", {})
+    if int(src.get("advertised_frame_count", -1)) != len(timestamps_ns):
+        reasons.append(
+            f"帧数 {src.get('advertised_frame_count')} vs 当前 {len(timestamps_ns)}"
+        )
+    prov = rep.get("provenance", {})
+    try:
+        if sha256_hex(str(video_path)) != prov.get("source_video_sha256", ""):
+            reasons.append("源视频内容指纹不匹配")
+    except OSError as exc:
+        reasons.append(f"源视频指纹计算失败: {exc}")
+    try:
+        meta = pd.read_parquet(
+            hands_parquet_file, columns=["config_sha256", "checkpoint_sha256"]
+        )
+        if meta.empty:
+            reasons.append("hands_2d.parquet 为空")
+        else:
+            runtime_config = HandsPipelineConfig.load(
+                str(Path(CONFIG_PATH).expanduser().resolve()),
+            )
+            row = meta.iloc[0]
+            if str(row["config_sha256"]) != str(runtime_config.config_sha256):
+                reasons.append("config_sha256 不匹配")
+            if str(row["checkpoint_sha256"]) != str(
+                runtime_config.checkpoint_sha256
+            ):
+                reasons.append("checkpoint_sha256 不匹配")
+    except Exception as exc:  # noqa: BLE001 - 指纹读取失败一律不复用
+        reasons.append(f"hands_2d.parquet 读取失败: {exc}")
+    return (not reasons), reasons
+
+
 def _run_hand_analysis(
     *,
     video_path: str | Path,
@@ -237,6 +301,7 @@ def _run_hand_analysis(
         pipeline,
         hands_parquet,
         prep_revision="r0001",
+        checkpoint_sha256=runtime_config.checkpoint_sha256,
         config_sha256=runtime_config.config_sha256,
         run_meta={"source": "zpds_prepare.main", "profile": "hand_integration"},
     )
@@ -305,7 +370,8 @@ def _run_privacy_analysis(
           f"({stats.average_fps:.1f} fps)")
     print(f"    人脸: {stats.frames_with_faces} 帧 / {stats.total_face_regions} 区域; "
           f"文本: {stats.frames_with_text} 帧 / {stats.total_text_regions} 区域; "
-          f"PII: {stats.total_pii_masked} 区域; LLM: {'可用' if stats.llm_available else '不可用'}")
+          f"PII: {stats.total_pii_masked} 区域; LLM 状态: {stats.llm_status}"
+          f"（调用 {stats.llm_attempts} 次 / 成功 {stats.llm_successes} 次）")
 
     # Stage 0 期望的 manifest dict（与 scripts/run_privacy_redaction.py 对齐）
     manifest_dict = {
@@ -316,6 +382,9 @@ def _run_privacy_analysis(
         "version": manifest.version,
         "config_hash": manifest.config_hash,
         "llm_available": manifest.llm_available,
+        "llm_status": manifest.llm_status,
+        "llm_attempts": manifest.llm_attempts,
+        "llm_successes": manifest.llm_successes,
         "stats": {
             "total_frames": manifest.total_frames,
             "frames_with_faces": manifest.frames_with_faces,
@@ -628,6 +697,13 @@ def main():
         help="跳过手部检测与手部清洗（仅在 guida 默认开启时用于反向关闭）",
     )
     parser.add_argument(
+        "--hands-fail-mode",
+        choices=["strict", "degraded"],
+        default="strict",
+        help="手部分析失败时的处理（默认 strict）：strict=报错中断（human_hand=applicable "
+             "Profile 要求 Hands 产物完整，禁止静默跳过）；degraded=降级跳过并继续",
+    )
+    parser.add_argument(
         "--with-privacy",
         action="store_true",
         help="在主流程内运行隐私脱敏分析（人脸/文本），把 PrivacyRunManifest 传入 Stage 0；"
@@ -872,6 +948,9 @@ def main():
     privacy_manifest: dict | None = None
     scene_pipeline_run = None
     scene_config = None
+    # 处理状态（processing_status 输入）：记录各分析环节结果，
+    # 随 quality_issues.json 落盘供平台区分「数据质量」与「处理过程」。
+    processing_steps: dict[str, dict] = {}
 
     # guida（墨现）默认运行手部清洗；--skip-hands 反向关闭
     run_hands = (args.with_hands or profile == "guida") and not args.skip_hands
@@ -894,31 +973,33 @@ def main():
         )
         if not _hand_applicable:
             print("  手部分析跳过: human_hand=not_applicable")
+            processing_steps["hands"] = {
+                "status": "skipped",
+                "detail": "human_hand=not_applicable",
+            }
         else:
             hand_dir = _analysis_output_dir(output_dir, "hands")
             report_file = hand_dir / "hand_cleaning_report.json"
             hands_parquet_file = hand_dir / "hands_2d.parquet"
             reused = False
             if report_file.is_file() and hands_parquet_file.is_file():
-                try:
-                    _rep = json.loads(report_file.read_text(encoding="utf-8"))
-                    _src = _rep.get("source", {})
-                    if int(_src.get("advertised_frame_count", -1)) == len(
-                        pv.timestamps_ns
-                    ):
-                        hand_report_path = str(report_file)
-                        print(f"  手部产物已存在，复用（帧数一致）: {hand_dir}")
-                        print(f"  手部报告:    {hand_report_path}")
-                        print(f"  hands 2D:    {hands_parquet_file}")
-                        reused = True
-                    else:
-                        print(
-                            "  手部产物帧数不匹配，重新推理: "
-                            f"报告 {_src.get('advertised_frame_count')} "
-                            f"vs 当前 {len(pv.timestamps_ns)}"
-                        )
-                except (ValueError, KeyError, OSError) as exc:
-                    print(f"  手部产物校验失败，重新推理: {exc}")
+                reused, reasons = _hands_cache_ok(
+                    report_file, hands_parquet_file, pv.video_path, pv.timestamps_ns
+                )
+                if reused:
+                    hand_report_path = str(report_file)
+                    processing_steps["hands"] = {
+                        "status": "complete",
+                        "detail": "复用既有产物（指纹一致）",
+                    }
+                    print(f"  手部产物已存在，复用（指纹一致）: {hand_dir}")
+                    print(f"  手部报告:    {hand_report_path}")
+                    print(f"  hands 2D:    {hands_parquet_file}")
+                else:
+                    print(
+                        "  手部产物指纹不匹配，重新推理: "
+                        + ("; ".join(reasons) if reasons else "未知原因")
+                    )
             if not reused:
                 try:
                     hand_result = _run_hand_analysis(
@@ -929,6 +1010,10 @@ def main():
                         stream_id=next(iter(session.video_streams), "ego_rgb"),
                     )
                     hand_report_path = hand_result.get("hand_cleaning_report_path")
+                    processing_steps["hands"] = {
+                        "status": "complete",
+                        "detail": f"推理完成（{hand_result.get('model')}）",
+                    }
                     print(f"  手部报告:    {hand_report_path}")
                     print(f"  hands 2D:    {hand_result.get('hands_parquet')}")
                 except (
@@ -939,7 +1024,15 @@ def main():
                     ImportError,
                     RuntimeError,
                 ) as exc:
-                    print(f"  手部分析跳过: {exc}")
+                    if args.hands_fail_mode == "strict":
+                        raise RuntimeError(
+                            f"手部分析失败（--hands-fail-mode=strict）: {exc}"
+                        ) from exc
+                    processing_steps["hands"] = {
+                        "status": "degraded",
+                        "detail": f"Hands 失败降级跳过: {exc}",
+                    }
+                    print(f"  手部分析失败，degraded 模式降级跳过: {exc}")
 
     if args.with_privacy and pv.video_path:
         step_header(17, "隐私脱敏分析（Stage 0 输入）")
@@ -950,6 +1043,10 @@ def main():
                 output_dir=output_dir,
                 session_id=session_id,
             )
+            processing_steps["privacy"] = {
+                "status": "complete",
+                "detail": f"llm_status={privacy_manifest.get('llm_status')}",
+            }
         except (
             FileNotFoundError,
             TypeError,
@@ -958,6 +1055,10 @@ def main():
             ImportError,
             RuntimeError,
         ) as exc:
+            processing_steps["privacy"] = {
+                "status": "degraded",
+                "detail": f"隐私脱敏分析跳过: {exc}",
+            }
             print(f"  隐私脱敏分析跳过: {exc}")
 
     if args.with_scene and pv.video_path:
@@ -975,6 +1076,13 @@ def main():
                 f"VLM 复核: {len(scene_pipeline_run.vlm_results)}，"
                 f"复核队列: {len(scene_pipeline_run.review_queue)}"
             )
+            processing_steps["scene"] = {
+                "status": "complete",
+                "detail": (
+                    f"{len(scene_pipeline_run.scenes)} 场景, "
+                    f"{len(scene_pipeline_run.vlm_results)} VLM 复核"
+                ),
+            }
         except (
             FileNotFoundError,
             TypeError,
@@ -983,6 +1091,10 @@ def main():
             ImportError,
             RuntimeError,
         ) as exc:
+            processing_steps["scene"] = {
+                "status": "degraded",
+                "detail": f"场景分析跳过: {exc}",
+            }
             print(f"  场景分析跳过: {exc}")
 
     # MCAP profile：显示双时间戳信息
@@ -1176,6 +1288,16 @@ def main():
                 "schema_version": "zpds.cascade_report.v1",
                 "session_id": session_id,
                 "overall_pass": cascade_overall_pass,
+                # 数据质量状态（与 Prepared 阶段 package_validation 解耦）
+                "quality_status": (
+                    "fail"
+                    if any(d.severity.value == "error" for d in cascade_decisions)
+                    else (
+                        "warn"
+                        if any(d.severity.value == "warn" for d in cascade_decisions)
+                        else "pass"
+                    )
+                ),
                 "total_decisions": len(cascade_decisions),
                 "distribution": cascade_distribution.to_dict(),
                 "decisions": [
@@ -1406,8 +1528,12 @@ def main():
         output_path=output_dir / "quality_issues.json",
         issues=all_issues,
         source_session_id=session_id,
+        processing_steps=processing_steps,
     )
+    _processing_status, _ = derive_processing_status(processing_steps)
     print(f"  输出: {qi_path.resolve()}")
+    print(f"  quality_status: {derive_quality_status(all_issues)} / "
+          f"processing_status: {_processing_status}")
 
     # ================================================================
     # Step 5.5: 应用平台审核结果（--review）后重新切分
