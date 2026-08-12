@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
@@ -107,11 +108,16 @@ class PrivacyPipeline:
         max_frames: int | None = None,
         # 强制检测帧（场景边界等画面布局剧变点）：检测 + 重置传播缓存
         reset_frames: set[int] | None = None,
+        # 共享帧源（可选）：提供时跳过内部 VideoCapture 解码，从帧源顺序读取
+        frames: Sequence[np.ndarray] | None = None,
+        fps: float | None = None,
     ) -> None:
         self._video_path = Path(video_path)
         if not self._video_path.is_file():
             raise FileNotFoundError(f"视频文件不存在: {self._video_path}")
 
+        self._frames = frames
+        self._fps_override = fps
         self._config = config or PrivacyConfig.defaults()
         self._policy = policy or PrivacyBackendPolicy.from_profile(profile or "guida_ego")
         self._session_id = session_id or self._video_path.stem
@@ -195,17 +201,33 @@ class PrivacyPipeline:
             )
         self._started = True
 
-        cap = cv2.VideoCapture(str(self._video_path))
-        if not cap.isOpened():
-            raise PrivacyPipelineError(
-                f"无法打开视频: {self._video_path}",
-                frame_index=0, timestamp_ns=0,
-            )
+        if self._frames is not None:
+            # 共享帧源模式：不打开 VideoCapture，帧从帧源顺序读取
+            fps = self._fps_override if (self._fps_override or 0) > 0 else 30.0
+            total_frames = len(self._frames)
+            frame_iter = enumerate(self._frames)
+            cap = None
+        else:
+            cap = cv2.VideoCapture(str(self._video_path))
+            if not cap.isOpened():
+                raise PrivacyPipelineError(
+                    f"无法打开视频: {self._video_path}",
+                    frame_index=0, timestamp_ns=0,
+                )
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            fps = 30.0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0:
+                fps = 30.0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            def _read_frames():
+                while True:
+                    ok, frame = cap.read()
+                    if not ok:
+                        return
+                    yield frame
+
+            frame_iter = enumerate(_read_frames())
 
         stat = RedactionRunStatistics(llm_configured=self._llm_configured)
         frames_processed = 0
@@ -216,11 +238,7 @@ class PrivacyPipeline:
         prev_gray: np.ndarray | None = None
 
         try:
-            frame_index = 0
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            for frame_index, frame in frame_iter:
                 if self._max_frames is not None and frames_processed >= self._max_frames:
                     break
 
@@ -358,11 +376,11 @@ class PrivacyPipeline:
                 )
                 stat.add(record)
                 frames_processed += 1
-                frame_index += 1
                 yield record
 
         finally:
-            cap.release()
+            if cap is not None:
+                cap.release()
             elapsed = time.perf_counter() - started_at
             stat.elapsed_seconds = elapsed
 

@@ -18,6 +18,7 @@ D14 模糊检测：
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import cv2
@@ -93,6 +94,39 @@ def _compute_frame_timestamp_ns(
 # ---------------------------------------------------------------------------
 
 
+def _overexposure_stats(
+    frame: np.ndarray,
+    mean_threshold: float,
+    overexposure_ratio: float,
+    saturated_ratio: float,
+    p95_threshold: float,
+    p99_threshold: float,
+) -> tuple[bool, dict]:
+    """单帧过曝判定与指标（VideoCapture / 共享帧源两分支共用）。"""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray_mean = float(np.mean(gray))
+    p95 = float(np.percentile(gray, 95))
+    p99 = float(np.percentile(gray, 99))
+    saturated_px_ratio = float(np.sum(gray >= 250) / gray.size)
+    overexposed_px_ratio = float(np.sum(gray >= mean_threshold) / gray.size)
+
+    is_overexposed = (
+        (gray_mean >= mean_threshold and overexposed_px_ratio >= overexposure_ratio)
+        or saturated_px_ratio >= saturated_ratio
+        or p95 >= p95_threshold
+        or p99 >= p99_threshold
+    )
+    metrics = {
+        "frame_idx": 0,  # 由调用方回填
+        "gray_mean": round(gray_mean, 2),
+        "p95": round(p95, 2),
+        "p99": round(p99, 2),
+        "saturated_ratio": round(saturated_px_ratio, 4),
+        "overexposed_px_ratio": round(overexposed_px_ratio, 4),
+    }
+    return is_overexposed, metrics
+
+
 def detect_overexposure(
     video_path: str,
     *,
@@ -107,6 +141,7 @@ def detect_overexposure(
     start_ns: int = 0,
     sample_interval: int = 1,
     evidence_dir: str | None = None,
+    frames: Sequence[np.ndarray] | None = None,
 ) -> list[Decision]:
     """检测视频中的过曝帧。
 
@@ -136,85 +171,104 @@ def detect_overexposure(
         采样间隔（每隔 N 帧检测）。
     evidence_dir : Optional[str]
         证据帧保存目录。
+    frames : Optional[Sequence[np.ndarray]]
+        共享帧源（BGR，下标 = 帧号）。提供时跳过内部 VideoCapture
+        解码，直接从帧源随机访问——注意 sample_interval 跳过的帧
+        在帧源模式下不再读取（计算与 IO 双省），flags 仍按帧号填充，
+        输出与 VideoCapture 模式等价。
 
     Returns
     -------
     list[Decision]
     """
     decisions: list[Decision] = []
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return [
-            Decision(
-                stage=3,
-                reason=ReasonCode.OVEREXPOSED,
-                severity=Severity.ERROR,
-                message=f"Cannot open video for overexposure check: {video_path}",
-            )
-        ]
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total_frames <= 0:
-        cap.release()
-        return []
-
-    video_fps = cap.get(cv2.CAP_PROP_FPS)
-    if video_fps > 0:
-        fps = video_fps
-
-    overexposed_flags = np.zeros(total_frames, dtype=bool)
     frame_metrics: list[dict] = []
 
-    frame_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if max_frames is not None and frame_idx >= max_frames:
-            break
+    if frames is not None:
+        total_frames = len(frames)
+        if total_frames <= 0:
+            return []
+        overexposed_flags = np.zeros(total_frames, dtype=bool)
 
-        if frame_idx % sample_interval != 0:
-            frame_idx += 1
-            continue
+        for frame_idx in range(total_frames):
+            if max_frames is not None and frame_idx >= max_frames:
+                break
+            if frame_idx % sample_interval != 0:
+                continue
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_mean = float(np.mean(gray))
-        p95 = float(np.percentile(gray, 95))
-        p99 = float(np.percentile(gray, 99))
-        saturated_px_ratio = float(np.sum(gray >= 250) / gray.size)
-        overexposed_px_ratio = float(np.sum(gray >= mean_threshold) / gray.size)
-
-        is_overexposed = (
-            (gray_mean >= mean_threshold and overexposed_px_ratio >= overexposure_ratio)
-            or saturated_px_ratio >= saturated_ratio
-            or p95 >= p95_threshold
-            or p99 >= p99_threshold
-        )
-
-        overexposed_flags[frame_idx] = is_overexposed
-
-        frame_metrics.append(
-            {
-                "frame_idx": frame_idx,
-                "gray_mean": round(gray_mean, 2),
-                "p95": round(p95, 2),
-                "p99": round(p99, 2),
-                "saturated_ratio": round(saturated_px_ratio, 4),
-                "overexposed_px_ratio": round(overexposed_px_ratio, 4),
-            }
-        )
-
-        # 保存证据帧
-        if is_overexposed and evidence_dir:
-            _save_evidence_frame(
-                frame, frame_idx, evidence_dir, prefix="overexposed"
+            frame = frames[frame_idx]
+            is_overexposed, metrics = _overexposure_stats(
+                frame, mean_threshold, overexposure_ratio,
+                saturated_ratio, p95_threshold, p99_threshold,
             )
+            metrics["frame_idx"] = frame_idx
+            overexposed_flags[frame_idx] = is_overexposed
+            frame_metrics.append(metrics)
 
-        frame_idx += 1
+            # 保存证据帧
+            if is_overexposed and evidence_dir:
+                _save_evidence_frame(
+                    frame, frame_idx, evidence_dir, prefix="overexposed"
+                )
 
-    cap.release()
+        # 对齐 cap 分支的 frame_idx 语义：已扫描到的帧号上限
+        frame_idx = (
+            min(total_frames, max_frames) if max_frames is not None else total_frames
+        )
+    else:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return [
+                Decision(
+                    stage=3,
+                    reason=ReasonCode.OVEREXPOSED,
+                    severity=Severity.ERROR,
+                    message=f"Cannot open video for overexposure check: {video_path}",
+                )
+            ]
 
-    if frame_idx == 0:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            cap.release()
+            return []
+
+        video_fps = cap.get(cv2.CAP_PROP_FPS)
+        if video_fps > 0:
+            fps = video_fps
+
+        overexposed_flags = np.zeros(total_frames, dtype=bool)
+
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if max_frames is not None and frame_idx >= max_frames:
+                break
+
+            if frame_idx % sample_interval != 0:
+                frame_idx += 1
+                continue
+
+            is_overexposed, metrics = _overexposure_stats(
+                frame, mean_threshold, overexposure_ratio,
+                saturated_ratio, p95_threshold, p99_threshold,
+            )
+            metrics["frame_idx"] = frame_idx
+            overexposed_flags[frame_idx] = is_overexposed
+            frame_metrics.append(metrics)
+
+            # 保存证据帧
+            if is_overexposed and evidence_dir:
+                _save_evidence_frame(
+                    frame, frame_idx, evidence_dir, prefix="overexposed"
+                )
+
+            frame_idx += 1
+
+        cap.release()
+
+    if not frame_metrics:
         return []
 
     # 聚合连续过曝区间
@@ -304,6 +358,7 @@ def detect_blur(
     profile: str = "",
     quarantine_duration_s: float = DEFAULT_BLUR_QUARANTINE_DURATION_S,
     blur_split_enabled: bool = DEFAULT_BLUR_SPLIT_ENABLED,
+    frames: Sequence[np.ndarray] | None = None,
 ) -> list[Decision]:
     """检测视频中的模糊帧。
 
@@ -344,34 +399,45 @@ def detect_blur(
         模糊段切分时长阈值（秒），仅 blur_split_enabled=True 时生效。
     blur_split_enabled : bool
         是否允许长模糊段切分（默认 False：一律打标保留）。
+    frames : Optional[Sequence[np.ndarray]]
+        共享帧源（BGR，下标 = 帧号）。提供时跳过内部 VideoCapture
+        解码，直接从帧源随机访问；sample_interval 跳过的帧在帧源
+        模式下不再读取，flags 仍按帧号填充，输出与 VideoCapture 模式等价。
 
     Returns
     -------
     list[Decision]
     """
     decisions: list[Decision] = []
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return [
-            Decision(
-                stage=3,
-                reason=ReasonCode.BLUR_DETECTED,
-                severity=Severity.ERROR,
-                message=f"Cannot open video for blur check: {video_path}",
-            )
-        ]
+    if frames is not None:
+        total_frames = len(frames)
+        if total_frames <= 0:
+            return []
+        video_fps = fps
+        video_width = int(frames[0].shape[1])
+        video_height = int(frames[0].shape[0])
+    else:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return [
+                Decision(
+                    stage=3,
+                    reason=ReasonCode.BLUR_DETECTED,
+                    severity=Severity.ERROR,
+                    message=f"Cannot open video for blur check: {video_path}",
+                )
+            ]
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total_frames <= 0:
-        cap.release()
-        return []
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            cap.release()
+            return []
 
-    video_fps = cap.get(cv2.CAP_PROP_FPS)
+        video_fps = cap.get(cv2.CAP_PROP_FPS)
+        video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     if video_fps > 0:
         fps = video_fps
-
-    video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     # 确定阈值
     merged_overrides = dict(BLUR_THRESHOLD_BY_RESOLUTION)
@@ -395,38 +461,67 @@ def detect_blur(
 
     blur_flags = np.zeros(total_frames, dtype=bool)
     frame_variances: list[dict] = []
-    frame_idx = 0
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if max_frames is not None and frame_idx >= max_frames:
-            break
+    if frames is not None:
+        for frame_idx in range(total_frames):
+            if max_frames is not None and frame_idx >= max_frames:
+                break
+            if frame_idx % sample_interval != 0:
+                continue
 
-        if frame_idx % sample_interval != 0:
-            frame_idx += 1
-            continue
+            frame = frames[frame_idx]
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            is_blur = lap_var < threshold
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        is_blur = lap_var < threshold
+            blur_flags[frame_idx] = is_blur
+            frame_variances.append(
+                {
+                    "frame_idx": frame_idx,
+                    "laplacian_variance": round(lap_var, 2),
+                    "threshold": round(threshold, 2),
+                }
+            )
 
-        blur_flags[frame_idx] = is_blur
-        frame_variances.append(
-            {
-                "frame_idx": frame_idx,
-                "laplacian_variance": round(lap_var, 2),
-                "threshold": round(threshold, 2),
-            }
+            if is_blur and evidence_dir:
+                _save_evidence_frame(frame, frame_idx, evidence_dir, prefix="blur")
+
+        # 对齐 cap 分支的 frame_idx 语义：已扫描到的帧号上限
+        frame_idx = (
+            min(total_frames, max_frames) if max_frames is not None else total_frames
         )
+    else:
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if max_frames is not None and frame_idx >= max_frames:
+                break
 
-        if is_blur and evidence_dir:
-            _save_evidence_frame(frame, frame_idx, evidence_dir, prefix="blur")
+            if frame_idx % sample_interval != 0:
+                frame_idx += 1
+                continue
 
-        frame_idx += 1
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            is_blur = lap_var < threshold
 
-    cap.release()
+            blur_flags[frame_idx] = is_blur
+            frame_variances.append(
+                {
+                    "frame_idx": frame_idx,
+                    "laplacian_variance": round(lap_var, 2),
+                    "threshold": round(threshold, 2),
+                }
+            )
+
+            if is_blur and evidence_dir:
+                _save_evidence_frame(frame, frame_idx, evidence_dir, prefix="blur")
+
+            frame_idx += 1
+
+        cap.release()
 
     if frame_idx == 0:
         return []
@@ -545,12 +640,15 @@ def check(
     fps: float = 30.0,
     start_ns: int = 0,
     profile: str = "",
+    frames: Sequence[np.ndarray] | None = None,
 ) -> list[Decision]:
     """Stage 3 统一检查入口：过曝 + 模糊 + 黑屏 + 冻结。
 
     当前已实现 D13（过曝）和 D14（模糊）。
     黑屏（D03）和冻结画面在 zpds_prepare/detectors/ 中已有实现，
     可在后续版本中迁移或桥接到本模块。
+
+    frames: 共享帧源（可选）。提供时两个检测器都不再自行解码。
     """
     cfg = stage_config or {}
     decisions: list[Decision] = []
@@ -583,6 +681,7 @@ def check(
                 start_ns=start_ns,
                 sample_interval=overexp_cfg.get("sample_interval", 1),
                 evidence_dir=evidence_dir,
+                frames=frames,
             )
         )
 
@@ -607,6 +706,7 @@ def check(
                 blur_split_enabled=blur_cfg.get(
                     "blur_split_enabled", DEFAULT_BLUR_SPLIT_ENABLED
                 ),
+                frames=frames,
             )
         )
 
@@ -637,4 +737,5 @@ def _check_stage3(context: dict) -> list[Decision]:
         fps=fps,
         start_ns=start_ns,
         profile=profile,
+        frames=context.get("frames"),
     )

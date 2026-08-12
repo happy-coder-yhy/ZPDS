@@ -21,7 +21,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
@@ -133,7 +133,11 @@ def _load_dotenv(path: str | Path = ".env") -> None:
 
 
 class _RawVideoFrameSource:
-    """把原始视频包装成 PreparedFrameSource，供 HandsPipeline 消费。"""
+    """把原始视频包装成 PreparedFrameSource，供 HandsPipeline 消费。
+
+    frame_source（SharedFrameSource，可选）：提供时不再自行打开
+    VideoCapture，而是从共享帧源顺序读取——避免重复解码。
+    """
 
     def __init__(
         self,
@@ -142,11 +146,13 @@ class _RawVideoFrameSource:
         timestamps_ns: list[int] | tuple[int, ...] | None,
         session_id: str,
         stream_id: str,
+        frame_source: Any | None = None,
     ) -> None:
         self._video_path = Path(video_path)
         self._timestamps = list(timestamps_ns or ())
         self._session_id = session_id
         self._stream_id = stream_id
+        self._frame_source = frame_source
 
     @property
     def segment_id(self) -> str:
@@ -157,15 +163,24 @@ class _RawVideoFrameSource:
         return self._stream_id
 
     def __iter__(self) -> Iterator[PreparedFrame]:
-        capture = cv2.VideoCapture(str(self._video_path))
-        if not capture.isOpened():
-            raise FileNotFoundError(f"无法打开视频: {self._video_path}")
+        capture = None
+        if self._frame_source is not None:
+            frame_iter = enumerate(self._frame_source)
+        else:
+            capture = cv2.VideoCapture(str(self._video_path))
+            if not capture.isOpened():
+                raise FileNotFoundError(f"无法打开视频: {self._video_path}")
+
+            def _read_frames():
+                while True:
+                    ok, frame_bgr = capture.read()
+                    if not ok:
+                        return
+                    yield frame_bgr
+
+            frame_iter = enumerate(_read_frames())
         try:
-            index = 0
-            while True:
-                ok, frame_bgr = capture.read()
-                if not ok:
-                    break
+            for index, frame_bgr in frame_iter:
                 frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 timestamp_ns = (
                     int(self._timestamps[index])
@@ -179,9 +194,9 @@ class _RawVideoFrameSource:
                     source_frame_index=index,
                     source_timestamp_ns=timestamp_ns,
                 )
-                index += 1
         finally:
-            capture.release()
+            if capture is not None:
+                capture.release()
 
 
 def _hands_cache_ok(
@@ -252,6 +267,7 @@ def _run_hand_analysis(
     session_id: str,
     stream_id: str,
     source_kind: str = "ego",
+    frame_source: Any | None = None,
 ) -> dict[str, str]:
     """运行手部检测（WiLoR，按配置路由）与手部清洗，返回报告与 parquet 路径。"""
     from zpds.hands.backend_router import HandsBackendRouter
@@ -284,6 +300,7 @@ def _run_hand_analysis(
         timestamps_ns=timestamps_ns,
         session_id=session_id,
         stream_id=stream_id,
+        frame_source=frame_source,
     )
     pipeline = HandsPipeline(
         source,
@@ -313,6 +330,7 @@ def _run_hand_analysis(
         str(hands_parquet),
         str(hand_dir),
         cleaning_config,
+        frame_source=frame_source,
     )
     return {
         "hands_parquet": str(hands_parquet),
@@ -328,11 +346,15 @@ def _run_privacy_analysis(
     profile: str,
     output_dir: Path,
     session_id: str,
+    frame_source: Any | None = None,
 ) -> dict:
     """运行隐私脱敏分析（人脸模糊 + PII 文本遮挡），返回 Stage 0 消费的 manifest dict。
 
     只做检测与统计（稀疏检测 + KLT 传播），不写脱敏视频——脱敏产物仍由
     scripts/run_privacy_redaction.py 单独产出；这里仅提供 Stage 0 QC 输入。
+
+    frame_source（SharedFrameSource，可选）：提供时从帧源顺序读取帧，
+    不再自行解码视频。
     """
     from zpds.privacy.backend_router import PrivacyBackendPolicy
     from zpds.privacy.config import PrivacyConfig
@@ -362,6 +384,8 @@ def _run_privacy_analysis(
         session_id=session_id,
         face_interval=pcfg.face_interval_frames,
         text_interval=pcfg.text_interval_frames,
+        frames=frame_source,
+        fps=float(frame_source.fps) if frame_source is not None else None,
     )
     records = pipeline.run_to_list()
     manifest = pipeline.build_manifest()
@@ -920,6 +944,19 @@ def main():
         return 0
     pv = session.primary_video
 
+    # ---- 共享帧源（问题 16）：一次解码、各处消费 ----
+    # 懒初始化：首次迭代才解码并写 JPEG 缓存；hands / privacy / scene /
+    # stage3 / black_frame 等消费者共用同一实例，避免同一 MKV 被重复
+    # 全量解码（默认 guida 运行 8 次 → 2 次，另 1 次为 bad_frame 子进程）。
+    shared_frames = None
+    if pv.video_path and Path(pv.video_path).is_file():
+        from zpds_prepare.frame_source import SharedFrameSource
+
+        shared_frames = SharedFrameSource(
+            pv.video_path,
+            cache_dir=output_dir / ".frame_cache",
+        )
+
     meta = session.meta
     print(f"  设备:        {meta['device']}")
     print(f"  标称帧率:    {meta['fps']} fps")
@@ -1008,6 +1045,7 @@ def main():
                         output_dir=output_dir,
                         session_id=session_id,
                         stream_id=next(iter(session.video_streams), "ego_rgb"),
+                        frame_source=shared_frames,
                     )
                     hand_report_path = hand_result.get("hand_cleaning_report_path")
                     processing_steps["hands"] = {
@@ -1042,6 +1080,7 @@ def main():
                 profile=profile,
                 output_dir=output_dir,
                 session_id=session_id,
+                frame_source=shared_frames,
             )
             processing_steps["privacy"] = {
                 "status": "complete",
@@ -1068,6 +1107,7 @@ def main():
                 video_path=pv.video_path,
                 profile=profile,
                 output_dir=output_dir,
+                frame_source=shared_frames,
             )
             scene_pipeline_run = scene_result["scene_pipeline_run"]
             scene_config = scene_result["scene_config"]
@@ -1219,6 +1259,8 @@ def main():
                 # Stage 10 场景分割 + VLM 复核结果（--with-scene 时传入）
                 "scene_pipeline_run": scene_pipeline_run,
                 "scene_config": scene_config,
+                # Stage 3 视觉检测共享帧源（问题 16）：提供时不再重复解码
+                "frames": shared_frames,
             }
             # Stage 12 音频质量：把 Session 音频流转为 QC 可消费格式
             audio_streams_data: list[dict] = []
@@ -1428,6 +1470,7 @@ def main():
             mean_intensity_threshold=black_threshold,
             min_duration_ns=min_black_duration_ns,
             edge_tolerance_ns=edge_tolerance_ns,
+            frames=shared_frames,
         )
         all_issues.extend(black_issues)
         if black_issues:

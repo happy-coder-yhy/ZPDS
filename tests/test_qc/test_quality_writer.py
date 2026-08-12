@@ -45,8 +45,8 @@ def _write(tmp_path: Path, issues: list[QualityIssue]) -> dict:
 
 def test_schema_version_is_020(tmp_path: Path) -> None:
     payload = _write(tmp_path, [_make_issue()])
-    assert payload["schema_version"] == "0.2.0"
-    assert SCHEMA_VERSION == "0.2.0"
+    assert payload["schema_version"] == "0.2.1"
+    assert SCHEMA_VERSION == "0.2.1"
 
 
 def test_issue_id_sequential(tmp_path: Path) -> None:

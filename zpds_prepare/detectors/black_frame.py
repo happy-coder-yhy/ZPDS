@@ -7,6 +7,7 @@
 
 import cv2
 import numpy as np
+from collections.abc import Sequence
 from pathlib import Path
 
 from zpds_prepare.decisions.issue_model import QualityIssue
@@ -111,6 +112,7 @@ def detect_black_frames(
     mean_intensity_threshold: float = 5.0,
     min_duration_ns: int = 500_000_000,
     edge_tolerance_ns: int = 1_000_000_000,
+    frames: Sequence[np.ndarray] | None = None,
 ) -> list[QualityIssue]:
     """检测黑屏帧并合并为区间。
 
@@ -120,23 +122,34 @@ def detect_black_frames(
         mean_intensity_threshold: 灰度均值低于此值视为黑屏 (0-255)
         min_duration_ns: 连续黑屏最短持续时长 (纳秒)，默认 0.5s
         edge_tolerance_ns: 距首尾容差 (纳秒)，默认 1s
+        frames: 共享帧源（BGR，下标 = 帧号）。提供时跳过内部
+            VideoCapture 解码，直接从帧源顺序读取。
 
     Returns:
         QualityIssue 列表
     """
-    if not Path(video_path).exists():
-        return []
+    if frames is not None:
+        black_flags = [
+            bool(
+                cv2.cvtColor(frames[index], cv2.COLOR_BGR2GRAY).mean()
+                < mean_intensity_threshold
+            )
+            for index in range(len(frames))
+        ]
+    else:
+        if not Path(video_path).exists():
+            return []
 
-    cap = cv2.VideoCapture(video_path)
-    black_flags = []
+        cap = cv2.VideoCapture(video_path)
+        black_flags = []
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        black_flags.append(gray.mean() < mean_intensity_threshold)
-    cap.release()
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            black_flags.append(gray.mean() < mean_intensity_threshold)
+        cap.release()
 
     # 截齐长度（防止视频和 index 帧数不一致）
     n = min(len(black_flags), len(timestamps_ns))

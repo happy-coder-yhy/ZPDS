@@ -345,7 +345,14 @@ def analyze_hand_video(
     hands_parquet_path: str | Path,
     config: HandVideoCleaningConfig,
     frame_status_path: str | Path | None = None,
+    frame_source: Any | None = None,
 ) -> HandVideoAnalysis:
+    """逐帧分析视频，返回坏区间、保留区间和四项核心质量指标。
+
+    frame_source: SharedFrameSource 实例（BGR，Sequence 接口）。
+        提供时跳过内部 VideoCapture 解码，从帧源顺序读取；
+        帧率/分辨率/帧数取帧源元数据。
+    """
     """逐帧分析视频，返回坏区间、保留区间和四项核心质量指标。"""
     source = Path(video_path).expanduser().resolve()
     hands_path = Path(hands_parquet_path).expanduser().resolve()
@@ -368,15 +375,31 @@ def analyze_hand_video(
         if status_missing:
             raise ValueError(f"手部全帧状态缺少字段: {sorted(status_missing)}")
 
-    capture = cv2.VideoCapture(str(source))
-    if not capture.isOpened():
-        raise ValueError(f"无法解码视频: {source}")
-    fps = float(capture.get(cv2.CAP_PROP_FPS))
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    advertised_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    if frame_source is not None:
+        fps = float(frame_source.fps)
+        width = int(frame_source.width)
+        height = int(frame_source.height)
+        advertised_count = len(frame_source)
+        frame_iter = enumerate(frame_source)
+        capture = None
+    else:
+        capture = cv2.VideoCapture(str(source))
+        if not capture.isOpened():
+            raise ValueError(f"无法解码视频: {source}")
+        fps = float(capture.get(cv2.CAP_PROP_FPS))
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        advertised_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        def _read_frames():
+            while True:
+                ok, frame = capture.read()
+                if not ok:
+                    return
+                yield frame
+
+        frame_iter = enumerate(_read_frames())
     if fps <= 0 or width <= 0 or height <= 0:
-        capture.release()
         raise ValueError(f"视频元数据无效: fps={fps}, size={width}x{height}")
 
     hand_frames, completeness_by_frame, hand_tracks, boxes_by_frame = (
@@ -388,11 +411,7 @@ def analyze_hand_video(
     flow_magnitudes: list[float] = []
     flow_errors: list[float] = []
     previous_gray: np.ndarray | None = None
-    frame_index = 0
-    while True:
-        ok, frame = capture.read()
-        if not ok:
-            break
+    for frame_index, frame in frame_iter:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         resized, flow_scale = _resize_gray(gray, config.flow_resize_width)
         gray_means.append(float(gray.mean()))
@@ -412,8 +431,8 @@ def analyze_hand_video(
             flow_magnitudes.append(magnitude)
             flow_errors.append(error)
         previous_gray = resized
-        frame_index += 1
-    capture.release()
+    if capture is not None:
+        capture.release()
     frame_count = len(gray_means)
     if frame_count == 0:
         raise ValueError(f"视频没有可解码帧: {source}")
@@ -644,7 +663,13 @@ def _write_cleaned_video(
     fps: float,
     size: tuple[int, int],
     codec: str,
+    frame_source: Any | None = None,
 ) -> pd.DataFrame:
+    """写出清洗后的派生视频与 sample map。
+
+    frame_source: SharedFrameSource 实例（可选）。提供时从帧源顺序读取
+    帧而不重新解码源视频。
+    """
     columns = [
         "cleaned_frame_index",
         "source_output_frame_index",
@@ -654,20 +679,30 @@ def _write_cleaned_video(
     if not kept_spans:
         return pd.DataFrame(columns=columns)
     temporary = destination.with_name(f".{destination.stem}.tmp{destination.suffix}")
-    capture = cv2.VideoCapture(str(source))
+    if frame_source is not None:
+        frame_iter = enumerate(frame_source)
+        capture = None
+    else:
+        capture = cv2.VideoCapture(str(source))
+
+        def _read_frames():
+            while True:
+                ok, frame = capture.read()
+                if not ok:
+                    return
+                yield frame
+
+        frame_iter = enumerate(_read_frames())
     writer = cv2.VideoWriter(str(temporary), cv2.VideoWriter_fourcc(*codec), fps, size)
     if not writer.isOpened():
-        capture.release()
+        if capture is not None:
+            capture.release()
         raise ValueError(f"无法创建派生视频: {destination}")
     rows: list[dict[str, Any]] = []
-    source_index = 0
     cleaned_index = 0
     span_index = 0
     try:
-        while True:
-            ok, frame = capture.read()
-            if not ok:
-                break
+        for source_index, frame in frame_iter:
             while span_index < len(kept_spans) and source_index >= kept_spans[span_index][1]:
                 span_index += 1
             is_kept = (
@@ -685,9 +720,9 @@ def _write_cleaned_video(
                     }
                 )
                 cleaned_index += 1
-            source_index += 1
     finally:
-        capture.release()
+        if capture is not None:
+            capture.release()
         writer.release()
     expected_frames = sum(end - start for start, end in kept_spans)
     if cleaned_index != expected_frames:
@@ -705,12 +740,20 @@ def clean_hand_video(
     output_dir: str | Path,
     config: HandVideoCleaningConfig,
     frame_status_path: str | Path | None = None,
+    frame_source: Any | None = None,
 ) -> HandVideoCleaningResult:
-    """分析并写出清洗视频、帧指标、sample map 和报告。"""
+    """分析并写出清洗视频、帧指标、sample map 和报告。
+
+    frame_source: SharedFrameSource 实例（可选）。提供时分析阶段与
+    派生视频写出阶段都不再重新解码源视频。
+    """
     source = Path(video_path).expanduser().resolve()
     destination = Path(output_dir).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    analysis = analyze_hand_video(source, hands_parquet_path, config, frame_status_path)
+    analysis = analyze_hand_video(
+        source, hands_parquet_path, config, frame_status_path,
+        frame_source=frame_source,
+    )
     frame_metrics_path = destination / "hand_cleaning_frames.parquet"
     sample_map_path = destination / "cleaned_sample_map.parquet"
     report_path = destination / "hand_cleaning_report.json"
@@ -735,6 +778,7 @@ def clean_hand_video(
             float(source_meta["fps"]),
             (int(source_meta["width"]), int(source_meta["height"])),
             config.output_codec,
+            frame_source=frame_source,
         )
     sample_map.to_parquet(sample_map_path, index=False)
     report = dict(analysis.report)

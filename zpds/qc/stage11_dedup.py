@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -124,6 +125,7 @@ def compute_phash(
     video_path: str,
     sample_count: int = DEFAULT_PHASH_SAMPLE_COUNT,
     hash_size: int = 8,
+    frames: Sequence | None = None,
 ) -> np.ndarray | None:
     """计算视频的感知哈希（pHash）。
 
@@ -136,6 +138,10 @@ def compute_phash(
         采样帧数。
     hash_size : int
         pHash 尺寸（8 → 64-bit hash）。
+    frames : Optional[Sequence[np.ndarray]]
+        共享帧源（BGR，下标 = 帧号）。提供时直接随机访问采样帧，
+        不再打开 VideoCapture（mkv 的 POS_FRAMES 跳转是顺序 seek，
+        实际解码量远大于采样数）。
 
     Returns
     -------
@@ -148,14 +154,19 @@ def compute_phash(
         logger.warning("OpenCV not available for pHash computation")
         return None
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return None
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total_frames <= 0:
-        cap.release()
-        return None
+    if frames is not None:
+        total_frames = len(frames)
+        if total_frames <= 0:
+            return None
+        cap = None
+    else:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            cap.release()
+            return None
 
     # 均匀采样帧索引
     if total_frames <= sample_count:
@@ -167,10 +178,13 @@ def compute_phash(
     fingerprints: list[np.ndarray] = []
 
     for target_idx in sample_indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
-        ret, frame = cap.read()
-        if not ret:
-            continue
+        if frames is not None:
+            frame = frames[target_idx]
+        else:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
+            ret, frame = cap.read()
+            if not ret:
+                continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         resized = cv2.resize(gray, (hash_size * 4, hash_size * 4))
@@ -184,7 +198,8 @@ def compute_phash(
         phash = (dct_low > mean_val).astype(np.float32)
         fingerprints.append(phash)
 
-    cap.release()
+    if cap is not None:
+        cap.release()
 
     if not fingerprints:
         return None
@@ -205,6 +220,7 @@ def detect_video_duplicates(
     *,
     hamming_max: int = DEFAULT_PHASH_HAMMING_MAX,
     sample_count: int = DEFAULT_PHASH_SAMPLE_COUNT,
+    frames: Sequence | None = None,
 ) -> list[Decision]:
     """通过视频 pHash 检测候选重复视频。
 
@@ -225,10 +241,16 @@ def detect_video_duplicates(
     """
     decisions: list[Decision] = []
 
-    # 计算所有视频的 pHash
+    # 计算所有视频的 pHash（主视频路径匹配到共享帧源时直接随机访问采样）
+    frame_source_path = None
+    if frames is not None:
+        frame_source_path = str(Path(getattr(frames, "video_path", "")).resolve())
     hashes: dict[str, np.ndarray | None] = {}
     for vp in video_paths:
-        hashes[vp] = compute_phash(vp, sample_count=sample_count)
+        use_frames = None
+        if frame_source_path and str(Path(vp).resolve()) == frame_source_path:
+            use_frames = frames
+        hashes[vp] = compute_phash(vp, sample_count=sample_count, frames=use_frames)
 
     valid = {vp: h for vp, h in hashes.items() if h is not None}
     paths = list(valid.keys())
@@ -413,6 +435,7 @@ def check(
     trajectories: dict[str, np.ndarray] | None = None,
     *,
     stage_config: dict | None = None,
+    frames: Sequence | None = None,
 ) -> list[Decision]:
     """Stage 11 统一检查入口：跨 Session 近重复检测。
 
@@ -433,6 +456,9 @@ def check(
         {session_id: joint_positions} 映射。
     stage_config : Optional[dict]
         阈值覆盖。
+    frames : Optional[Sequence]
+        共享帧源（当前 session 主视频）。提供时对匹配该源视频的
+        路径直接用帧源随机访问采样，不再打开 VideoCapture。
 
     Returns
     -------
@@ -465,6 +491,7 @@ def check(
                     sample_count=phash_cfg.get(
                         "sample_count", DEFAULT_PHASH_SAMPLE_COUNT
                     ),
+                    frames=frames,
                 )
             )
 
@@ -516,4 +543,5 @@ def _check_stage11(context: dict) -> list[Decision]:
         video_paths=context.get("video_paths"),
         trajectories=context.get("trajectories"),
         stage_config=stage_config,
+        frames=context.get("frames"),
     )
