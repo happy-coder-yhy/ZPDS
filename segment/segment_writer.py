@@ -21,14 +21,18 @@ _PROFILE_REGISTRY_NAMES = {
 }
 
 
-def _primary_stream_id(profile: str) -> str | None:
-    """按 profile 声明的主相机 stream_id；无声明（单相机）返回 None。"""
+def _primary_stream_ids(profile: str) -> set[str]:
+    """返回 profile 声明的主摄集合；无声明（单相机）返回空集合。"""
     from zpds.profiles.registry import get
 
     registered = get(_PROFILE_REGISTRY_NAMES.get(profile, profile))
     if registered is None:
-        return None
-    return registered.primary_stream_id
+        return set()
+    if registered.primary_stream_ids:
+        return set(registered.primary_stream_ids)
+    if registered.primary_stream_id is not None:
+        return {registered.primary_stream_id}
+    return set()
 
 
 def sha256_hex(path: str) -> str:
@@ -271,7 +275,7 @@ def build_segment_json(
     streams: list[dict] = []
 
     # RGB 视频流 — 每个 video_result 生成一个 stream entry
-    primary_stream_id = _primary_stream_id(profile)
+    primary_stream_ids = _primary_stream_ids(profile)
     for vr in (video_results or []):
         stream_id = vr["stream_id"]
         entry = {
@@ -306,9 +310,9 @@ def build_segment_json(
                 ),
             },
         }
-        if primary_stream_id is not None:
+        if primary_stream_ids:
             entry["is_primary"] = (
-                "true" if stream_id == primary_stream_id else "false"
+                "true" if stream_id in primary_stream_ids else "false"
             )
         if hands_results and entry["stream_id"] == hands_results.get("video_stream_id"):
             # Hands 辅助产物（main.py 整段 → 按候选区间裁切的 segment 级产物），

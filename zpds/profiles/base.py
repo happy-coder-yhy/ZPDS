@@ -10,8 +10,10 @@ class BaseProfile:
     name: str
     description: str = ""
     modalities: dict[str, str] = field(default_factory=dict)
-    # 多摄像头来源的主相机 stream_id；单相机来源为 None（segment.json 不写 is_primary）
+    # 兼容仅有一个默认主视角的旧配置。
     primary_stream_id: str | None = None
+    # 没有天然主副关系时可以同时声明多个主摄。
+    primary_stream_ids: tuple[str, ...] = ()
 
     def applicability_for(self, modality: str) -> str:
         """Return the declared modality applicability, or ``unavailable``."""

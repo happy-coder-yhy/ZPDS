@@ -12,29 +12,28 @@ A2D Segment 候选生成器。
 
 from __future__ import annotations
 
+import copy
 import logging
 from pathlib import Path
-from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from zpds_prepare.decisions.issue_model import QualityIssue
 from zpds_prepare.decisions.segment_planner import (
     CandidateSegment,
     downgrade_split_issues,
-    plan_segments,
     get_issue_summary,
+    plan_segments,
 )
 from zpds_prepare.detectors.robot import (
-    detect_timeseries_structure,
-    detect_joint_quality,
     detect_action_quality,
     detect_alignment_quality,
-    detect_timeseries_gaps,
     detect_camera_gaps,
+    detect_joint_quality,
+    detect_timeseries_gaps,
+    detect_timeseries_structure,
 )
-from zpds_prepare.readers.session_model import Session, VideoStream, TimeSeriesStream
+from zpds_prepare.readers.session_model import Session, TimeSeriesStream
 from zpds_prepare.writers.candidate_writer import write_segment_candidates
 
 logger = logging.getLogger(__name__)
@@ -165,8 +164,6 @@ def generate_a2d_candidates(
 
     # ---- 1. 公共有效范围 ----
     session_start_ns, session_end_ns = compute_public_valid_range(session)
-    session_id = session.session_id
-
     logger.info(
         "公共有效范围: %.3fs → %.3fs (%.3fs)",
         session_start_ns / 1e9,
@@ -176,18 +173,18 @@ def generate_a2d_candidates(
 
     # ---- 2. 机器人检测器 ----
     # 2a. 时序结构 (robot_state, robot_action, gripper_state, gripper_action)
-    for stream_id, ts_stream in session.time_series_streams.items():
+    for ts_stream in session.time_series_streams.values():
         issues = detect_timeseries_structure(ts_stream, config=robot_cfg)
         all_issues.extend(issues)
 
     # 2b. 关节质量 (robot_state, gripper_state)
-    for stream_id, ts_stream in session.time_series_streams.items():
+    for ts_stream in session.time_series_streams.values():
         if ts_stream.role == "state":
             issues = detect_joint_quality(ts_stream, config=robot_cfg.get("joint", {}))
             all_issues.extend(issues)
 
     # 2c. 动作质量 (robot_action, gripper_action)
-    for stream_id, ts_stream in session.time_series_streams.items():
+    for ts_stream in session.time_series_streams.values():
         if ts_stream.role == "action":
             state_stream = _find_state_stream(session, ts_stream)
             issues = detect_action_quality(
@@ -201,12 +198,12 @@ def generate_a2d_candidates(
     gap_cfg = robot_cfg.get("gap", {})
 
     # 3a. TimeSeries 缺口
-    for stream_id, ts_stream in session.time_series_streams.items():
+    for ts_stream in session.time_series_streams.values():
         issues = detect_timeseries_gaps(ts_stream, config=gap_cfg)
         all_issues.extend(issues)
 
     # 3b. 相机缺失
-    for stream_id, vs in session.video_streams.items():
+    for vs in session.video_streams.values():
         issues = detect_camera_gaps(vs, config=gap_cfg)
         all_issues.extend(issues)
 
@@ -220,14 +217,15 @@ def generate_a2d_candidates(
         all_issues.extend(issues)
 
     # ---- 5. 汇总 ----
+    planning_issues = copy.deepcopy(all_issues)
     if no_split:
-        downgrade_split_issues(all_issues)
+        downgrade_split_issues(planning_issues)
     summary = get_issue_summary(all_issues)
     logger.info("总异常: %d, 按处置: %s", summary["total"], summary["by_decision"])
 
     # ---- 6. 规划候选 Segment ----
     candidates = plan_segments(
-        issues=all_issues,
+        issues=planning_issues,
         session_start_ns=session_start_ns,
         session_end_ns=session_end_ns,
         min_duration_ns=int(min_duration_s * 1_000_000_000),
@@ -315,6 +313,32 @@ def run_and_write(
     )
     logger.info("segment_candidates → %s", sc_path)
 
+    # 平台只接收这一份统一 JSON。候选建议使用原始动作重新计算，不能受
+    # A2D 本地 no_split 兼容选项影响。
+    min_duration_s = float((config or {}).get("min_duration_s", DEFAULT_MIN_DURATION_S))
+    max_duration_s = float((config or {}).get("max_duration_s", DEFAULT_MAX_DURATION_S))
+    review_candidates = plan_segments(
+        issues=all_issues,
+        session_start_ns=session_start_ns,
+        session_end_ns=session_end_ns,
+        min_duration_ns=int(min_duration_s * 1_000_000_000),
+        max_duration_ns=int(max_duration_s * 1_000_000_000),
+        no_split=False,
+    )
+    from zpds_prepare.writers.quality_report_writer import write_quality_report
+    report_path = write_quality_report(
+        output_path=output_dir / "quality_report.json",
+        issues=all_issues,
+        candidates=review_candidates,
+        session=session,
+        dataset_path=session.source_path,
+        profile="a2d",
+        cascade_executed=False,
+        scene_executed=False,
+        config_version="a2d",
+    )
+    logger.info("quality_report → %s", report_path)
+
     # 打印摘要
     _print_summary(candidates, summary, session_start_ns, session_end_ns)
 
@@ -347,9 +371,9 @@ def _print_summary(
 
 
 __all__ = [
+    "A2D_OPTIONAL_STREAMS",
+    "A2D_REQUIRED_STREAMS",
     "compute_public_valid_range",
     "generate_a2d_candidates",
     "run_and_write",
-    "A2D_REQUIRED_STREAMS",
-    "A2D_OPTIONAL_STREAMS",
 ]

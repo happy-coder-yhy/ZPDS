@@ -175,11 +175,11 @@ class TestSegmentJsonIsPrimary:
         segment = self._segment("guida", ["ego_rgb"])
         assert "is_primary" not in segment["streams"][0]
 
-    def test_umi_bimanual_marks_robot0_primary(self) -> None:
+    def test_umi_bimanual_marks_both_cameras_primary(self) -> None:
         segment = self._segment(
             "umi",
             ["robot0_camera0", "robot1_camera0"],
         )
         by_id = {stream["stream_id"]: stream for stream in segment["streams"]}
         assert by_id["robot0_camera0"]["is_primary"] == "true"
-        assert by_id["robot1_camera0"]["is_primary"] == "false"
+        assert by_id["robot1_camera0"]["is_primary"] == "true"

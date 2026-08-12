@@ -1,9 +1,8 @@
 """测试 Stage 0 隐私门 QC 集成。"""
 
-import pytest
-
 from zpds.core.decisions import Disposition, ReasonCode, Severity
 from zpds.qc.stage0_privacy import build_privacy_view, check
+from zpds_prepare.main import _decisions_to_issues
 
 
 class TestStage0Check:
@@ -12,6 +11,23 @@ class TestStage0Check:
         assert len(decisions) == 1
         assert decisions[0].reason == ReasonCode.PRIVACY_COVERAGE_LOW
         assert decisions[0].severity == Severity.WARN
+
+    def test_untimed_decision_covers_real_stream_timeline(self):
+        decisions = check(manifest=None)
+        start_ns = 1_767_657_966_294_821_000
+        end_ns = 1_767_657_966_661_484_000
+
+        issues = _decisions_to_issues(
+            decisions,
+            "robot0_camera0",
+            scope_start_ns=start_ns,
+            scope_end_ns=end_ns,
+        )
+
+        assert len(issues) == 1
+        assert issues[0].start_ns == start_ns
+        assert issues[0].end_ns == end_ns
+        assert issues[0].decision == "quarantine"
 
     def test_llm_unavailable(self):
         manifest = {"llm_available": False, "stats": {"total_frames": 100}}
