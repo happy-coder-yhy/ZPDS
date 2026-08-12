@@ -88,6 +88,13 @@ def main() -> int:
         text_interval=pcfg.text_interval_frames,
         reset_frames=reset_frames,
     )
+    # 真脱敏必须严格：LLM 未配置时文本 PII 无法分类，拒绝执行（pipeline 层已
+    # 降级为 llm_status=not_configured，这里显式把关）
+    if not pipeline.llm_configured:
+        raise SystemExit(
+            "错误: LLM API key 未配置（DASHSCOPE_API_KEY），拒绝执行脱敏"
+            "（文本 PII 将无法分类）"
+        )
 
     print(f"\n脱敏开始: {input_path}")
     print(f"  Profile: {args.profile}")
@@ -104,7 +111,8 @@ def main() -> int:
     print(f"  人脸: {stats.frames_with_faces} 帧, {stats.total_face_regions} 区域")
     print(f"  文本: {stats.frames_with_text} 帧, {stats.total_text_regions} 区域")
     print(f"  PII 脱敏: {stats.total_pii_masked} 区域, 类别: {list(stats.pii_categories_found)}")
-    print(f"  LLM: {'可用' if stats.llm_available else '不可用'}")
+    print(f"  LLM 状态: {stats.llm_status}"
+          f"（调用 {stats.llm_attempts} 次 / 成功 {stats.llm_successes} 次）")
 
     # ---- 写出产物 ----
     from zpds.privacy.writer import write_manifest, write_redacted_video, write_run_summary
@@ -129,6 +137,9 @@ def main() -> int:
         "version": manifest.version,
         "config_hash": manifest.config_hash,
         "llm_available": manifest.llm_available,
+        "llm_status": manifest.llm_status,
+        "llm_attempts": manifest.llm_attempts,
+        "llm_successes": manifest.llm_successes,
         "stats": {
             "total_frames": manifest.total_frames,
             "frames_with_faces": manifest.frames_with_faces,

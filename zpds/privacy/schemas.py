@@ -209,6 +209,11 @@ class PrivacyRunManifest:
     total_text_regions: int = 0
     pii_categories_found: tuple[str, ...] = ()
     llm_available: bool = False
+    # LLM 调用状态: not_configured / configured / succeeded / failed
+    # （平台据此区分「没调用」与「调用失败」）
+    llm_status: str = "configured"
+    llm_attempts: int = 0
+    llm_successes: int = 0
 
     # 运行信息
     elapsed_seconds: float = 0.0

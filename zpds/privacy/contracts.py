@@ -109,6 +109,8 @@ class FrameRedactionRecord:
     text_detector_used: str = ""
     pii_classifier_used: str = ""
     llm_available: bool = False
+    llm_attempted: bool = False
+    llm_succeeded: bool = False
 
     # 耗时
     face_inference_ms: float = 0.0
@@ -155,7 +157,27 @@ class RedactionRunStatistics:
     total_pii_masked: int = 0
     pii_categories_found: set[str] = field(default_factory=set)
     llm_available: bool = False
+    llm_configured: bool = True
+    llm_attempts: int = 0
+    llm_successes: int = 0
     elapsed_seconds: float = 0.0
+
+    @property
+    def llm_status(self) -> str:
+        """LLM 调用状态（平台可区分「没调用」与「调用失败」）。
+
+        - not_configured: 未配置 API key，不可能调用
+        - configured:    已配置但本次运行未触发调用（无待分类文本）
+        - succeeded:     至少一次调用成功
+        - failed:        发起过调用但全部失败
+        """
+        if not self.llm_configured:
+            return "not_configured"
+        if self.llm_attempts == 0:
+            return "configured"
+        if self.llm_successes > 0:
+            return "succeeded"
+        return "failed"
 
     def add(self, record: FrameRedactionRecord) -> None:
         self.frames_processed += 1
@@ -172,6 +194,10 @@ class RedactionRunStatistics:
             if p.decision == "mask":
                 self.pii_categories_found.add(p.category)
         self.llm_available = record.llm_available
+        if record.llm_attempted:
+            self.llm_attempts += 1
+            if record.llm_succeeded:
+                self.llm_successes += 1
 
     @property
     def average_fps(self) -> float:

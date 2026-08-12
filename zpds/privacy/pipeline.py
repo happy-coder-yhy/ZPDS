@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,8 @@ from zpds.privacy.schemas import (
     RedactionRegion,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class PrivacyPipelineError(RuntimeError):
     """脱敏流水线在某个特定帧失败。"""
@@ -57,6 +60,9 @@ class PipelineStats:
     total_pii_masked: int = 0
     pii_categories_found: tuple[str, ...] = ()
     llm_available: bool = False
+    llm_configured: bool = True
+    llm_attempts: int = 0
+    llm_successes: int = 0
     elapsed_seconds: float = 0.0
 
     @property
@@ -64,6 +70,17 @@ class PipelineStats:
         if self.elapsed_seconds <= 0:
             return 0.0
         return self.frames_processed / self.elapsed_seconds
+
+    @property
+    def llm_status(self) -> str:
+        """LLM 调用状态（与 RedactionRunStatistics.llm_status 语义一致）。"""
+        if not self.llm_configured:
+            return "not_configured"
+        if self.llm_attempts == 0:
+            return "configured"
+        if self.llm_successes > 0:
+            return "succeeded"
+        return "failed"
 
 
 class PrivacyPipeline:
@@ -106,7 +123,19 @@ class PrivacyPipeline:
         self._runtime = factory.build_runtime()
         self._face_detector = face_detector if face_detector is not None else factory.create_face_detector()
         self._text_detector = text_detector if text_detector is not None else factory.create_text_detector()
-        self._pii_classifier = pii_classifier if pii_classifier is not None else factory.create_pii_classifier()
+        # LLM 未配置不抛错（Stage 0 分析场景可降级运行），状态记入 manifest 的
+        # llm_status=not_configured；真脱敏（run_privacy_redaction）需显式校验。
+        self._llm_configured = True
+        try:
+            self._pii_classifier = (
+                pii_classifier
+                if pii_classifier is not None
+                else factory.create_pii_classifier()
+            )
+        except PrivacyEstimatorError as exc:
+            self._pii_classifier = None
+            self._llm_configured = False
+            logger.warning("LLM PII 分类器不可用（llm_status=not_configured）: %s", exc)
 
         # 遮挡器
         self._redactor = FrameRedactor(
@@ -136,6 +165,11 @@ class PrivacyPipeline:
     @property
     def stats(self) -> PipelineStats:
         return self._stats
+
+    @property
+    def llm_configured(self) -> bool:
+        """LLM 是否已配置（构造期判定；run 之前即可查询）。"""
+        return self._llm_configured
 
     @property
     def runtime(self) -> EstimatorRuntime:
@@ -173,7 +207,7 @@ class PrivacyPipeline:
             fps = 30.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        stat = RedactionRunStatistics()
+        stat = RedactionRunStatistics(llm_configured=self._llm_configured)
         frames_processed = 0
         started_at = time.perf_counter()
 
@@ -228,6 +262,8 @@ class PrivacyPipeline:
                 pii_ms = 0.0
                 pii_results: list[PIIClassification] = []
                 llm_available = False
+                llm_attempted = False
+                llm_succeeded = False
                 if self._text_detector is not None and (
                     frame_index % self._text_interval == 0 or is_force
                 ):
@@ -238,11 +274,20 @@ class PrivacyPipeline:
                     # ---- PII 分类（LLM，按 text hash 缓存；仅检测帧） ----
                     if texts and self._pii_classifier is not None:
                         t_pii = time.perf_counter()
+                        llm_attempted = True
                         try:
                             pii_results = self._pii_classifier.classify(list(texts))
                             llm_available = True
-                        except Exception:
+                            llm_succeeded = True
+                        except Exception as exc:
                             llm_available = False
+                            llm_succeeded = False
+                            logger.warning(
+                                "LLM PII 分类失败（frame %d, ts=%d）: %s",
+                                frame_index,
+                                timestamp_ns,
+                                exc,
+                            )
                         pii_ms = (time.perf_counter() - t_pii) * 1000
 
                     # 仅 mask 的文本进入传播（keep 的不遮挡）
@@ -304,6 +349,8 @@ class PrivacyPipeline:
                     text_detector_used=self._runtime.text_backend if self._text_detector else "",
                     pii_classifier_used=self._runtime.pii_backend,
                     llm_available=llm_available,
+                    llm_attempted=llm_attempted,
+                    llm_succeeded=llm_succeeded,
                     face_inference_ms=face_ms,
                     text_inference_ms=text_ms,
                     pii_classification_ms=pii_ms,
@@ -328,6 +375,9 @@ class PrivacyPipeline:
             total_pii_masked=stat.total_pii_masked,
             pii_categories_found=tuple(sorted(stat.pii_categories_found)),
             llm_available=stat.llm_available,
+            llm_configured=stat.llm_configured,
+            llm_attempts=stat.llm_attempts,
+            llm_successes=stat.llm_successes,
             elapsed_seconds=elapsed,
         )
 
@@ -353,6 +403,9 @@ class PrivacyPipeline:
             total_text_regions=self._stats.total_text_regions,
             pii_categories_found=self._stats.pii_categories_found,
             llm_available=self._stats.llm_available,
+            llm_status=self._stats.llm_status,
+            llm_attempts=self._stats.llm_attempts,
+            llm_successes=self._stats.llm_successes,
             elapsed_seconds=self._stats.elapsed_seconds,
         )
 
