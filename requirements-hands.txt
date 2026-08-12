@@ -1,0 +1,7 @@
+mediapipe==0.10.35
+numpy
+opencv-python
+PyYAML
+
+pytest
+pytest-cov
