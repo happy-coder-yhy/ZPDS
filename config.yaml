@@ -72,7 +72,10 @@ hands:
       model_complexity: 1             # 0=轻量, 1=完整
       input_mirrored: false           # 非自拍画面设为 false
 
-  # WiLoR 由独立环境加载；模型仓库 revision、权重名称和哈希已冻结。
+  # WiLoR 在主进程内加载（wilor_backend 将源码目录插入 sys.path 并 chdir 到
+  # WiLoR 源码目录以解析 ./mano_data/ 相对路径，加载后恢复 cwd）；
+  # torch/ultralytics 等依赖由独立 Python 环境 wilor_env 提供。
+  # 模型仓库 revision、权重名称和哈希已冻结。
   wilor:
     enabled: true
     # 抽帧：false 时每 bbox_fps 时间窗推理一次，中间帧复用上一推理帧结果
