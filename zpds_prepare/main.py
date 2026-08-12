@@ -513,11 +513,12 @@ def _try_reuse_scene_run(
     scene_config,
     profile: str,
     output_dir: Path,
-    frames: list,
+    frame_count: int,
     fps: float,
 ) -> dict[str, object] | None:
     """复用已有场景产物：frame_count + config_hash 一致则跳过分割与 VLM。
 
+    复用判定只依赖元数据（frame_count / config_hash），不读取视频帧——
     与手部复用同模式。返回与 _run_scene_analysis 同形的 dict；
     不可复用（产物缺失/校验失败/不一致）时返回 None。
     """
@@ -532,7 +533,7 @@ def _try_reuse_scene_run(
         import pandas as _pd
 
         summary = json.loads(summary_file.read_text(encoding="utf-8"))
-        if int(summary.get("frame_count", -1)) != len(frames):
+        if int(summary.get("frame_count", -1)) != frame_count:
             return None
         if str(summary.get("config_hash", "")) != scene_config.config_hash:
             return None
@@ -553,7 +554,7 @@ def _try_reuse_scene_run(
     run = ScenePipelineRun(
         skipped=False,
         skip_reason=None,
-        frame_count=len(frames),
+        frame_count=frame_count,
         fps=fps,
         start_ns=int(summary.get("start_ns", 0)),
         end_ns=int(summary.get("end_ns", 0)),
@@ -562,7 +563,7 @@ def _try_reuse_scene_run(
         scenes=scenes,
         vlm_results=vlm_results,
     )
-    print(f"  场景产物已复用（帧数 {len(frames)}、config 一致）: {scene_dir}")
+    print(f"  场景产物已复用（帧数 {frame_count}、config 一致）: {scene_dir}")
     print(f"  场景数: {len(scenes)}，VLM 复核: {len(vlm_results)}")
     return {"scene_pipeline_run": run, "scene_config": scene_config}
 
@@ -572,12 +573,17 @@ def _run_scene_analysis(
     video_path: str | Path,
     profile: str,
     output_dir: Path,
+    frame_source: Any | None = None,
 ) -> dict[str, object]:
     """运行场景分割 + VLM 复核，返回 ScenePipelineRun 与 SceneConfig。
 
     运行结果落盘到 ``{output_dir}/analysis/scene/``（source-level staging：
     scene_proposals.parquet、vlm_review.parquet、run_summary.json），
     与 hands / privacy 目录同层；batch 端按候选区间消费。
+
+    frame_source（SharedFrameSource，可选）：提供时直接把帧源作为
+    Sequence 传给场景管线（随机访问由 JPEG 缓存服务，内存有界），
+    不再把全视频帧读入内存；复用判定也只用帧数元数据、不读视频。
     """
     from zpds.scene.config import SceneConfig
     from zpds.scene.pipeline import run_scene_pipeline
@@ -607,14 +613,21 @@ def _run_scene_analysis(
         scene_config = SceneConfig.load(scene_config_path)
     if not scene_config.enabled:
         return {"scene_pipeline_run": None, "scene_config": scene_config}
-    frames, fps = _read_video_frames(video_path)
+
+    if frame_source is not None:
+        frames = frame_source
+        fps = float(frame_source.fps)
+        frame_count = len(frames)
+    else:
+        frames, fps = _read_video_frames(video_path)
+        frame_count = len(frames)
 
     # ---- 场景产物复用（帧数 + config_hash 一致则跳过分割与 VLM） ----
     reused = _try_reuse_scene_run(
         scene_config=scene_config,
         profile=profile,
         output_dir=output_dir,
-        frames=frames,
+        frame_count=frame_count,
         fps=fps,
     )
     if reused is not None:
