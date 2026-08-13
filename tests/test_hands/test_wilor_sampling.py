@@ -20,7 +20,6 @@ from zpds.hands.wilor_estimator import (
 )
 from zpds.hands.wilor_schema import (
     WiLoRDetection,
-    WiLoRFallbackPolicy,
     WiLoRImageTransform,
     WiLoRModelInfo,
 )
@@ -99,14 +98,7 @@ def _make_estimator(
     return WiLoRHandEstimator(
         adapter=adapter,
         model_info=_make_model_info(),
-        fallback_estimator=None,
         config=WiLoREstimatorConfig(
-            fallback_policy=WiLoRFallbackPolicy(
-                on_wilor_init_failure=False,
-                on_wilor_frame_failure=False,
-                on_wilor_no_hand=False,
-                on_invalid_input=False,
-            ),
             ego_bbox_every_frame=ego_bbox_every_frame,
             bbox_fps=bbox_fps,
         ),

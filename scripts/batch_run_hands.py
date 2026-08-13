@@ -21,9 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import run_hands as single_cli
-from zpds.hands.backend_router import HandsBackendRouter
 from zpds.hands.config import HandsPipelineConfig
-from zpds.hands.validator import validate_hands_parquet
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,12 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-kind",
         choices=["ego", "non_ego"],
         default="non_ego",
-        help="所有输入 Segment 的来源类型",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=["auto", "tasks_hand_landmarker", "solutions_hands", "wilor"],
-        help="覆盖配置文件中的模型后端",
+        help="所有输入 Segment 的来源类型（单后端恒 WiLoR，仅作 manifest 记录）",
     )
     parser.add_argument(
         "--output-root",
@@ -139,27 +132,12 @@ def _segment_identity(
 
 def _expected_provenance(
     config_path: Path,
-    backend: str | None,
-    source_kind: str,
-) -> tuple[str, str, str, str]:
-    runtime_config = HandsPipelineConfig.load(
-        config_path,
-        backend_override=backend,
-    )
-    primary_model = HandsBackendRouter(
-        runtime_config.backend_policy
-    ).select_backend(is_ego=source_kind == "ego")
-    if primary_model == "wilor":
-        checkpoint_sha256 = runtime_config.wilor.checkpoint_sha256
-        upstream_git_commit = runtime_config.wilor.upstream_commit
-    else:
-        checkpoint_sha256 = runtime_config.checkpoint_sha256
-        upstream_git_commit = ""
+) -> tuple[str, str, str]:
+    runtime_config = HandsPipelineConfig.load(config_path)
     return (
         runtime_config.config_sha256,
-        checkpoint_sha256,
-        primary_model,
-        upstream_git_commit,
+        runtime_config.wilor.checkpoint_sha256,
+        runtime_config.wilor.upstream_commit,
     )
 
 
@@ -195,27 +173,15 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _existing_output_can_be_skipped(
     *,
     segment_dir: Path,
-    segment: dict[str, Any],
     segment_id: str,
     stream_id: str,
     paths: dict[str, Path],
     expected_config_sha256: str,
     expected_checkpoint_sha256: str,
     max_frames: int | None,
-    report_required: bool,
-    preview_required: bool,
-    primary_model: str = "mediapipe",
     expected_upstream_git_commit: str = "",
 ) -> tuple[bool, str]:
-    required = [paths["manifest"]]
-    if primary_model == "wilor":
-        required.extend([paths["frame_status"], paths["bbox"]])
-    else:
-        required.append(paths["parquet"])
-    if report_required and primary_model == "mediapipe":
-        required.append(paths["report"])
-    if preview_required and primary_model == "mediapipe":
-        required.append(paths["preview"])
+    required = [paths["manifest"], paths["frame_status"], paths["bbox"]]
     missing = [path.name for path in required if not path.is_file()]
     if missing:
         return False, f"缺少产物: {missing}"
@@ -240,52 +206,32 @@ def _existing_output_can_be_skipped(
     if manifest.get("checkpoint_sha256") != expected_checkpoint_sha256:
         return False, "模型哈希已变化"
     manifest_primary_model = manifest.get("primary_model", "mediapipe")
-    if manifest_primary_model != primary_model:
+    if manifest_primary_model != "wilor":
         return False, "主模型已变化"
-    if (
-        primary_model == "wilor"
-        and manifest.get("upstream_git_commit")
-        != expected_upstream_git_commit
-    ):
+    if manifest.get("upstream_git_commit") != expected_upstream_git_commit:
         return False, "WiLoR upstream commit 已变化"
-    if primary_model == "wilor":
-        if not manifest.get("wilor_requirement_satisfied"):
-            return False, "WiLoR 全帧要求未满足"
-        statistics = manifest.get("statistics", {})
-        if not isinstance(statistics, dict):
-            return False, "WiLoR statistics 格式错误"
-        frame_status = statistics.get("frame_status", {})
-        if not isinstance(frame_status, dict):
-            return False, "WiLoR frame-status 统计格式错误"
-        expected_frames = statistics.get("expected_frame_count")
-        requested = frame_status.get("requested")
-        accounted = sum(
-            int(frame_status.get(name, 0))
-            for name in (
-                "detected",
-                "no_hand",
-                "failed",
-                "skipped_invalid_input",
-            )
+    if not manifest.get("wilor_requirement_satisfied"):
+        return False, "WiLoR 全帧要求未满足"
+    statistics = manifest.get("statistics", {})
+    if not isinstance(statistics, dict):
+        return False, "WiLoR statistics 格式错误"
+    frame_status = statistics.get("frame_status", {})
+    if not isinstance(frame_status, dict):
+        return False, "WiLoR frame-status 统计格式错误"
+    expected_frames = statistics.get("expected_frame_count")
+    requested = frame_status.get("requested")
+    accounted = sum(
+        int(frame_status.get(name, 0))
+        for name in (
+            "detected",
+            "no_hand",
+            "failed",
+            "skipped_invalid_input",
         )
-        if requested != expected_frames or requested != accounted:
-            return False, "WiLoR frame-status 统计不完整"
-        return True, "已有 WiLoR 全帧产物校验通过"
-
-    image_width, image_height = single_cli._image_dimensions(
-        segment,
-        stream_id,
-        segment_dir,
     )
-    report = validate_hands_parquet(
-        str(paths["parquet"]),
-        segment_json_path=str(segment_dir / "segment.json"),
-        image_width=image_width,
-        image_height=image_height,
-    )
-    if report["status"] == "fail":
-        return False, "已有 Parquet 校验失败"
-    return True, f"已有产物校验为 {report['status']}"
+    if requested != expected_frames or requested != accounted:
+        return False, "WiLoR frame-status 统计不完整"
+    return True, "已有 WiLoR 全帧产物校验通过"
 
 
 def _collect_output_statistics(
@@ -370,13 +316,8 @@ def run(args: argparse.Namespace) -> int:
     (
         expected_config_sha256,
         expected_checkpoint_sha256,
-        primary_model,
         expected_upstream_git_commit,
-    ) = _expected_provenance(
-        config_path,
-        args.backend,
-        args.source_kind,
-    )
+    ) = _expected_provenance(config_path)
     summary: dict[str, Any] = {
         "schema_version": 1,
         "started_at": started_at,
@@ -385,12 +326,11 @@ def run(args: argparse.Namespace) -> int:
         "config": str(config_path),
         "config_sha256": expected_config_sha256,
         "checkpoint_sha256": expected_checkpoint_sha256,
-        "primary_model": primary_model,
+        "primary_model": "wilor",
         "upstream_git_commit": expected_upstream_git_commit,
         "options": {
             "pattern": args.pattern,
             "stream_id": args.stream_id,
-            "backend": args.backend,
             "source_kind": args.source_kind,
             "max_frames": args.max_frames,
             "validate": args.validate,
@@ -433,16 +373,12 @@ def run(args: argparse.Namespace) -> int:
 
             can_skip, skip_reason = _existing_output_can_be_skipped(
                 segment_dir=segment_dir,
-                segment=segment,
                 segment_id=segment_id,
                 stream_id=stream_id,
                 paths=paths,
                 expected_config_sha256=expected_config_sha256,
                 expected_checkpoint_sha256=expected_checkpoint_sha256,
                 max_frames=args.max_frames,
-                report_required=args.validate,
-                preview_required=args.preview,
-                primary_model=primary_model,
                 expected_upstream_git_commit=expected_upstream_git_commit,
             )
             if can_skip and not args.force:
@@ -458,7 +394,6 @@ def run(args: argparse.Namespace) -> int:
                         stream_id=stream_id,
                         config=str(config_path),
                         source_kind=args.source_kind,
-                        backend=args.backend,
                         output=str(paths["parquet"]),
                         frame_status_output=str(paths["frame_status"]),
                         bbox_output=str(paths["bbox"]),

@@ -1,7 +1,6 @@
 """test_writer — 验证 Writer 输出 Parquet 结构和数据往返。"""
 
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -11,7 +10,6 @@ from zpds.hands.schemas import HandObservation
 from zpds.hands.validator import validate_hands_parquet
 from zpds.hands.writer import (
     compute_config_sha256,
-    estimator_provenance,
     write_hand_observations,
     write_hands_parquet,
     write_hands_run_report,
@@ -53,7 +51,7 @@ class TestWriter:
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "hands.parquet"
             path = write_hands_parquet(obs, str(out), model_meta={
-                "model_name": "mediapipe", "model_version": "0.10.14",
+                "model_name": "wilor", "model_version": "wilor_cvpr2025",
                 "checkpoint_sha256": "abc123", "config_sha256": "def456",
             })
             df = pd.read_parquet(path)
@@ -66,7 +64,7 @@ class TestWriter:
             assert len(row["keypoints_2d"]) == 21
             assert len(row["keypoints_2d"][0]) == 2
             assert len(row["keypoints_z_relative"]) == 21
-            assert row["model_name"] == "mediapipe"
+            assert row["model_name"] == "wilor"
             assert row["checkpoint_sha256"] == "abc123"
             assert not row["keypoints_any_clipped"]
             assert row["keypoints_clipped_count"] == 0
@@ -108,10 +106,10 @@ class TestWriter:
             assert df["output_frame_index"].tolist() == [0, 3, 6, 9]
 
     def test_config_sha256_deterministic(self):
-        cfg = {"hands": {"model": "mediapipe", "num_hands": 2}}
+        cfg = {"hands": {"wilor": {"enabled": True, "bbox_fps": 10.0}}}
         h1 = compute_config_sha256(cfg)
         h2 = compute_config_sha256(cfg)
-        h3 = compute_config_sha256({"hands": {"num_hands": 2, "model": "mediapipe"}})
+        h3 = compute_config_sha256({"hands": {"wilor": {"bbox_fps": 10.0, "enabled": True}}})
         assert h1 == h2
         assert h1 == h3  # sort_keys 保证顺序无关
 
@@ -132,8 +130,8 @@ class TestWriter:
                 for index in range(21)
             ],
             keypoints_z_relative=[-index / 100.0 for index in range(21)],
-            model_name="mediapipe",
-            model_version="0.10.14",
+            model_name="wilor",
+            model_version="wilor_cvpr2025",
         )
 
         with tempfile.TemporaryDirectory() as td:
@@ -144,10 +142,10 @@ class TestWriter:
                 checkpoint_sha256="model-hash",
                 config_sha256="config-hash",
                 run_meta={
-                    "backend_requested": "auto",
-                    "backend_active": "tasks_hand_landmarker",
+                    "backend_requested": "wilor",
+                    "backend_active": "wilor",
                     "backend_fallback_used": False,
-                    "backend_delegate": "cpu",
+                    "backend_delegate": "cuda:0",
                 },
             )
             row = pd.read_parquet(path).iloc[0]
@@ -157,7 +155,7 @@ class TestWriter:
             assert pd.isna(row["source_frame_index"])
             assert row["checkpoint_sha256"] == "model-hash"
             assert row["config_sha256"] == "config-hash"
-            assert row["backend_active"] == "tasks_hand_landmarker"
+            assert row["backend_active"] == "wilor"
             assert len(row["keypoints_2d"]) == 21
 
     def test_write_empty_pipeline_observations(self):
@@ -200,33 +198,15 @@ class TestWriter:
                 "backend_delegate",
             ]
 
-    def test_estimator_provenance_and_run_report(self):
-        @dataclass
-        class _ModelInfo:
-            sha256: str = "model-sha"
-
-        @dataclass
-        class _BackendInfo:
-            requested_backend: str = "auto"
-            active_backend: str = "solutions_hands"
-            fallback_used: bool = True
-            fallback_reason: str = "Tasks unavailable"
-            delegate: str = ""
-
-        @dataclass
-        class _Stats:
-            total_frames: int = 2
-
-        class _Estimator:
-            model_info = _ModelInfo()
-            backend_info = _BackendInfo()
-            session_stats = _Stats()
-
-        metadata, report = estimator_provenance(_Estimator(), {"hands": {"backend": "auto"}})
-        assert metadata["model_name"] == "mediapipe_solutions_hands"
-        assert metadata["backend_fallback_used"]
-        assert report["model"]["sha256"] == "model-sha"
-
+    def test_write_run_report_wilor(self):
+        report = {
+            "model": {
+                "name": "wilor",
+                "version": "wilor_cvpr2025",
+                "sha256": "model-sha",
+            },
+            "statistics": {"requested": 2, "detected": 1, "no_hand": 1, "failed": 0},
+        }
         with tempfile.TemporaryDirectory() as td:
             path = write_hands_run_report(report, str(Path(td) / "run.json"))
-            assert "solutions_hands" in Path(path).read_text(encoding="utf-8")
+            assert "wilor" in Path(path).read_text(encoding="utf-8")

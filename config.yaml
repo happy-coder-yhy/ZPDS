@@ -46,32 +46,8 @@ dunjia:
     preserve_source_rate: true # 保留源约 25 Hz，不插帧到 RGB 目标帧率
     coverage_tolerance_s: 0.08 # 超过约 2 个源帧周期才视为边界缺失
 
-# ---- 手部检测 ----
+# ---- 手部检测（单后端：恒 WiLoR） ----
 hands:
-  # 阶段一已冻结路由配置；现有 run_hands CLI 将在后续编排阶段接入该路由。
-  ego_bbox_backend: wilor
-  non_ego_bbox_backend: mediapipe
-  fallback_2d_backend: mediapipe
-
-  mediapipe:
-    backend: tasks_hand_landmarker      # auto / tasks_hand_landmarker / solutions_hands
-    fallback_backend: solutions_hands
-    num_hands: 2
-    min_hand_detection_confidence: 0.5
-    min_hand_presence_confidence: 0.5
-    min_tracking_confidence: 0.5
-    bbox_padding_ratio: 0.10
-
-    # Tasks API 后端（新版，需 .task 模型文件）
-    tasks:
-      model_path: models/mediapipe/hand_landmarker.task
-      delegate: cpu                   # cpu / gpu
-
-    # Solutions 经典后端（兼容性好，不需额外模型文件）
-    solutions:
-      model_complexity: 1             # 0=轻量, 1=完整
-      input_mirrored: false           # 非自拍画面设为 false
-
   # WiLoR 在主进程内加载（wilor_backend 将源码目录插入 sys.path 并 chdir 到
   # WiLoR 源码目录以解析 ./mano_data/ 相对路径，加载后恢复 cwd）；
   # torch/ultralytics 等依赖由独立 Python 环境 wilor_env 提供。

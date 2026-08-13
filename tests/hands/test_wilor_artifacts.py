@@ -99,9 +99,9 @@ def test_wilor_provenance_serializes_model_stats_and_fallback_reason() -> None:
     assert report["session_statistics"]["fallback_used"] == 1
 
 
-def test_wilor_validator_accepts_pixel_provenance_and_fallback_attribution(tmp_path: Path) -> None:
+def test_wilor_validator_accepts_pixel_provenance_attribution(tmp_path: Path) -> None:
     parquet_path = write_hand_observations(
-        [_observation(), _observation(fallback=True)],
+        [_observation(), _observation()],
         tmp_path / "hands_2d.parquet",
         checkpoint_sha256="checkpoint-sha",
         config_sha256="config-sha",

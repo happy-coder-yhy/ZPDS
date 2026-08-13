@@ -271,40 +271,6 @@ def test_from_components_rejects_bad_score() -> None:
         )
 
 
-def test_from_mediapipe_delegates_to_from_components() -> None:
-    """确保 from_mediapipe 内部复用了 from_components 的像素坐标与裁剪逻辑。"""
-
-    class _FakeLandmark:
-        def __init__(self, x: float, y: float, z: float) -> None:
-            self.x = x
-            self.y = y
-            self.z = z
-            self.visibility = 0.99
-
-    class _FakeHandedness:
-        def __init__(self) -> None:
-            self.category_name = "Left"
-            self.score = 0.88
-
-    landmarks = [_FakeLandmark(0.1 + i * 0.02, 0.3 + i * 0.02, 0.0) for i in range(21)]
-    handedness = _FakeHandedness()
-
-    result = RawHandResult.from_mediapipe(
-        hand_landmarks=landmarks,
-        handedness=handedness,
-        image_width=800,
-        image_height=600,
-        bbox_padding_ratio=0.10,
-        hand_index=1,
-    )
-
-    assert result.handedness == "Left"
-    assert result.handedness_score == 0.88
-    assert result.label == "hand_1"
-    assert result.keypoints.has_visibility
-    assert result.bbox.is_valid
-
-
 # ════════════════════════════════════════════════════════════════════
 # ModelAttemptResult
 # ════════════════════════════════════════════════════════════════════

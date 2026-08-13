@@ -160,8 +160,8 @@ def _pipeline(
     pipeline = HandsPipeline(
         reader=FakeReader(frames),
         estimator=estimator,
-        model_name="mediapipe",
-        model_version="hand_landmarker_v1",
+        model_name="wilor",
+        model_version="wilor_cvpr2025",
     )
     return pipeline, estimator
 
@@ -254,8 +254,8 @@ def test_pipeline_converts_raw_result_and_preserves_provenance() -> None:
     assert observation.keypoints_z_relative[0] == -0.02
     assert len(observation.keypoints_2d) == HAND_KEYPOINT_COUNT
     assert len(observation.keypoints_z_relative) == HAND_KEYPOINT_COUNT
-    assert observation.model_name == "mediapipe"
-    assert observation.model_version == "hand_landmarker_v1"
+    assert observation.model_name == "wilor"
+    assert observation.model_version == "wilor_cvpr2025"
 
 
 def test_pipeline_detection_ids_restart_for_each_frame() -> None:

@@ -18,7 +18,6 @@ import hashlib
 import json
 from collections.abc import Iterable
 from dataclasses import asdict, is_dataclass
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -262,46 +261,13 @@ def compute_config_sha256(config: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def estimator_provenance(estimator: Any, config: dict | None = None) -> tuple[dict, dict]:
-    """Build Parquet and run-report provenance from a MediaPipe estimator.
-
-    The estimator deliberately remains duck-typed here so Writer does not depend on
-    a particular backend implementation.  This permits an alternative estimator to
-    provide the same public ``model_info`` and ``backend_info`` properties.
-    """
-    model_info = _as_plain_dict(getattr(estimator, "model_info", None))
-    backend_info = _as_plain_dict(getattr(estimator, "backend_info", None))
-    session_stats = _as_plain_dict(getattr(estimator, "session_stats", None))
-
-    model_meta = {
-        "model_name": _model_name(backend_info.get("active_backend", "")),
-        "model_version": _mediapipe_version(),
-        "checkpoint_sha256": model_info.get("sha256", ""),
-        "config_sha256": compute_config_sha256(config) if config is not None else "",
-    }
-    run_meta = {
-        "backend_requested": backend_info.get("requested_backend", ""),
-        "backend_active": backend_info.get("active_backend", ""),
-        "backend_fallback_used": backend_info.get("fallback_used", False),
-        "backend_fallback_reason": backend_info.get("fallback_reason", ""),
-        "backend_delegate": backend_info.get("delegate", ""),
-    }
-    report = {
-        "model": model_info,
-        "backend": backend_info,
-        "session_statistics": session_stats,
-        "config_sha256": model_meta["config_sha256"],
-    }
-    return {**model_meta, **run_meta}, report
-
-
 def wilor_provenance(estimator: Any, config: dict | None = None) -> tuple[dict, dict]:
-    """Build WiLoR-specific parquet provenance and a serializable run summary.
+    """Build WiLoR parquet provenance and a serializable run summary.
 
     The estimator remains duck-typed so this module does not import optional WiLoR
-    dependencies.  A caller that records MediaPipe fallback frames should use the
-    frame-level fields on ``HandObservation``; ``run_meta`` is retained for the
-    legacy writer interface and for frames without observations.
+    dependencies.  Frame-level fields on ``HandObservation`` carry per-frame
+    provenance; ``run_meta`` is retained for the legacy writer interface and for
+    frames without observations.
     """
     model_info = _as_plain_dict(getattr(estimator, "model_info", None))
     frame_stats = _as_plain_dict(getattr(estimator, "frame_stats", None))
@@ -314,8 +280,6 @@ def wilor_provenance(estimator: Any, config: dict | None = None) -> tuple[dict, 
 
     fallback_used = int(frame_stats.get("fallback_used", 0)) > 0
     fallback_reason = _first_wilor_failure_reason(report_document)
-    if fallback_used and not fallback_reason:
-        fallback_reason = "WiLoR frame failure triggered MediaPipe fallback; see hands_run.json"
 
     model_meta = {
         "model_name": "wilor",
@@ -366,14 +330,3 @@ def _as_plain_dict(value: Any) -> dict:
     if isinstance(value, dict):
         return dict(value)
     raise TypeError(f"Expected a dataclass or dict, got {type(value).__name__}")
-
-
-def _model_name(active_backend: str) -> str:
-    return f"mediapipe_{active_backend}" if active_backend else "mediapipe"
-
-
-def _mediapipe_version() -> str:
-    try:
-        return version("mediapipe")
-    except PackageNotFoundError:
-        return ""

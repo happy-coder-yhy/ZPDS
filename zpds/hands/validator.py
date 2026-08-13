@@ -332,8 +332,8 @@ def validate_wilor_hands(
     """Validate the additional contracts required for a WiLoR Hands V1 run.
 
     This intentionally layers WiLoR checks on top of the model-agnostic validator.
-    It accepts MediaPipe rows only when they are explicitly attributed to a WiLoR
-    frame fallback, so a mixed output cannot silently hide a different model.
+    Single-backend runs must be attributed entirely to WiLoR; any other backend
+    attribution fails the check.
     """
     if image_width <= 0 or image_height <= 0:
         raise ValueError("image_width 和 image_height 必须为正数")
@@ -547,12 +547,10 @@ def _validate_wilor_backend_attribution(
     requested = frame["backend_requested"].astype(str)
     active = frame["backend_active"].astype(str)
     fallback_used = frame["backend_fallback_used"].astype(bool)
-    reason = frame["backend_fallback_reason"].fillna("").astype(str)
     valid = (
         requested.eq("wilor")
-        & active.isin(["wilor", "mediapipe"])
-        & (~fallback_used | reason.ne(""))
-        & ((active != "mediapipe") | fallback_used)
+        & active.eq("wilor")
+        & ~fallback_used
     )
     checks["backend_attribution"] = "pass" if valid.all() else "fail"
     if not valid.all():

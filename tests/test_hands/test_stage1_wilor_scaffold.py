@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 import yaml
 
-from zpds.hands.backend_router import HandsBackendRouter
 from zpds.hands.config import HandsPipelineConfig
 from zpds.hands.contracts import (
     FrameInferenceRecord,
@@ -50,31 +49,19 @@ def _hand() -> RawHandResult:
     )
 
 
-def _parallel_config() -> dict:
+def _wilor_config(tmp_path: Path) -> dict:
+    """单后端 WiLoR 配置（checkpoint 文件落盘以通过 load 校验）。"""
+    checkpoint = tmp_path / "models" / "wilor" / "model.pt"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"fake checkpoint")
     return {
         "hands": {
-            "ego_bbox_backend": "wilor",
-            "non_ego_bbox_backend": "mediapipe",
-            "fallback_2d_backend": "mediapipe",
-            "mediapipe": {
-                "backend": "solutions_hands",
-                "fallback_backend": "solutions_hands",
-                "num_hands": 2,
-                "tasks": {
-                    "model_path": "models/hand_landmarker.task",
-                    "delegate": "cpu",
-                },
-                "solutions": {
-                    "model_complexity": 1,
-                    "input_mirrored": False,
-                },
-            },
             "wilor": {
                 "enabled": True,
                 "ego_bbox_every_frame": True,
                 "bbox_fps": 30.0,
                 "write_frame_status": True,
-                "checkpoint_path": "models/wilor/model.pt",
+                "checkpoint_path": str(checkpoint),
                 "device": "cuda:0",
                 "precision": "fp16",
             },
@@ -88,34 +75,16 @@ def _write_config(tmp_path: Path, document: dict) -> Path:
     return path
 
 
-def test_parallel_config_routes_ego_and_non_ego(tmp_path: Path) -> None:
+def test_single_backend_config_loads_wilor(tmp_path: Path) -> None:
+    """单后端模式：Hands 恒走 WiLoR，checkpoint 路径相对配置目录解析。"""
     config = HandsPipelineConfig.load(
-        _write_config(tmp_path, _parallel_config())
+        _write_config(tmp_path, _wilor_config(tmp_path))
     )
-    router = HandsBackendRouter(config.backend_policy)
 
-    assert router.select_backend(is_ego=True) == "wilor"
-    assert router.select_backend(is_ego=False) == "mediapipe"
-    assert router.fallback_2d_backend == "mediapipe"
-    assert config.estimator.backend == "solutions_hands"
     assert config.wilor.checkpoint_path == str(
         (tmp_path / "models" / "wilor" / "model.pt").resolve()
     )
-
-
-def test_backend_override_updates_nested_mediapipe_config_hash(
-    tmp_path: Path,
-) -> None:
-    document = _parallel_config()
-    config = HandsPipelineConfig.load(
-        _write_config(tmp_path, document),
-        backend_override="tasks_hand_landmarker",
-    )
-    expected = copy.deepcopy(document)
-    expected["hands"]["mediapipe"]["backend"] = "tasks_hand_landmarker"
-
-    assert config.estimator.backend == "tasks_hand_landmarker"
-    assert config.document == expected
+    assert config.checkpoint_sha256  # 从 checkpoint 文件计算
 
 
 @pytest.mark.parametrize(
@@ -130,7 +99,7 @@ def test_wilor_production_guards(
     value: object,
     message: str,
 ) -> None:
-    document = _parallel_config()
+    document = _wilor_config(tmp_path)
     document["hands"]["wilor"][field] = value
 
     with pytest.raises(ValueError, match=message):
@@ -143,7 +112,7 @@ def test_wilor_sampling_config_accepted(tmp_path: Path) -> None:
     抽帧语义：False 时 estimator 按 bbox_fps 时间窗推理，中间帧复用
     上一推理帧结果（WiLoREstimatorConfig 承接），不再拒绝配置。
     """
-    document = _parallel_config()
+    document = _wilor_config(tmp_path)
     document["hands"]["wilor"]["ego_bbox_every_frame"] = False
     document["hands"]["wilor"]["bbox_fps"] = 10.0
 

@@ -122,7 +122,6 @@ def test_wilor_runtime_metadata_must_match_frozen_config(
 
     with pytest.raises(ValueError, match="checkpoint_sha256"):
         validate_estimator_runtime(
-            "wilor",
             runtime,
             SimpleNamespace(wilor=config),  # type: ignore[arg-type]
         )
@@ -183,7 +182,6 @@ def test_person_a_accepts_person_b_runtime_contract(
     )
 
     runtime = create_hand_estimator(
-        "wilor",
         SimpleNamespace(wilor=wilor),  # type: ignore[arg-type]
     )
 

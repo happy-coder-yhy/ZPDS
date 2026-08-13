@@ -144,7 +144,7 @@ class WiLoRAdapter:
 
 
 def _validate_input(frame_rgb: np.ndarray, timestamp_ms: int) -> None:
-    """校验单帧输入。与 MediaPipe adapter 保持一致。"""
+    """校验单帧输入。"""
     if not isinstance(frame_rgb, np.ndarray):
         raise TypeError("frame_rgb 必须是 np.ndarray")
 

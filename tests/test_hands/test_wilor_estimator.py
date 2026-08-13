@@ -2,10 +2,9 @@
 
 验证：
 - 四种帧状态：detected / no_hand / failed / skipped_invalid_input
-- 回退策略：failed 回退、no_hand 不回退、invalid_input 不回退
-- HandFrameResult 组装：primary/fallback 独立记录
+- HandFrameResult 组装：primary 单记录（单后端恒 WiLoR，无回退）
 - 帧统计恒等式对齐
-- 对照模式 vs 回退模式分离
+- 运行级错误 / 阈值 / Run Report
 """
 
 from __future__ import annotations
@@ -25,7 +24,6 @@ from zpds.hands.wilor_estimator import (
 )
 from zpds.hands.wilor_schema import (
     WiLoRDetection,
-    WiLoRFallbackPolicy,
     WiLoRImageTransform,
     WiLoRInferenceError,
     WiLoRModelInfo,
@@ -82,38 +80,6 @@ class _MockAdapter:
         if self.exc is not None:
             raise self.exc
         return list(self.detections)
-
-    def close(self) -> None:
-        self.close_called = True
-
-
-class _MockFallback:
-    """模拟 MediaPipeHandEstimator 回退。"""
-
-    def __init__(
-        self,
-        results: list[RawHandResult] | None = None,
-        exc: Exception | None = None,
-    ) -> None:
-        self.results: list[RawHandResult] = results if results is not None else []
-        self.exc = exc
-        self.close_called = False
-        self.call_count = 0
-        self._config = object()
-
-    @property
-    def config(self) -> object:
-        return self._config
-
-    def estimate(
-        self,
-        frame_rgb: np.ndarray,
-        timestamp_ms: int,
-    ) -> list[RawHandResult]:
-        self.call_count += 1
-        if self.exc is not None:
-            raise self.exc
-        return list(self.results)
 
     def close(self) -> None:
         self.close_called = True
@@ -294,159 +260,6 @@ def test_timestamp_strictly_increasing() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 回退策略 — failed 触发回退
-# ════════════════════════════════════════════════════════════════════
-
-
-def test_fallback_triggered_on_failed() -> None:
-    adapter = _MockAdapter(exc=WiLoRInferenceError("推理失败"))
-    fallback = _MockFallback(results=[])  # MediaPipe 也无手
-    config = WiLoREstimatorConfig(
-        fallback_policy=WiLoRFallbackPolicy(on_wilor_frame_failure=True),
-    )
-    estimator = WiLoRHandEstimator(
-        adapter=adapter,
-        model_info=_make_model_info(),
-        fallback_estimator=fallback,
-        config=config,
-    )
-    result = estimator.estimate_frame(_make_frame(), 0)
-
-    assert result.primary.status == "failed"
-    assert result.fallback_attempted
-    assert result.fallback_used  # fallback 成功跑了（哪怕没检测到手）
-    assert result.fallback is not None
-    assert result.fallback.status == "no_hand"
-    assert estimator.frame_stats.fallback_attempted == 1
-    assert estimator.frame_stats.fallback_used == 1
-    estimator.close()
-
-
-def test_fallback_not_triggered_on_no_hand() -> None:
-    """no_hand 默认不回退。"""
-    adapter = _MockAdapter(detections=[])
-    fallback = _MockFallback(results=[])
-    estimator = WiLoRHandEstimator(
-        adapter=adapter,
-        model_info=_make_model_info(),
-        fallback_estimator=fallback,
-    )
-    result = estimator.estimate_frame(_make_frame(), 0)
-
-    assert result.primary.status == "no_hand"
-    assert not result.fallback_attempted
-    assert result.fallback is None
-    assert estimator.frame_stats.fallback_attempted == 0
-    estimator.close()
-
-
-def test_fallback_not_triggered_on_detected() -> None:
-    adapter = _MockAdapter(detections=[_make_detection()])
-    fallback = _MockFallback(results=[])
-    estimator = WiLoRHandEstimator(
-        adapter=adapter,
-        model_info=_make_model_info(),
-        fallback_estimator=fallback,
-    )
-    result = estimator.estimate_frame(_make_frame(), 0)
-
-    assert result.primary.status == "detected"
-    assert not result.fallback_attempted
-    estimator.close()
-
-
-def test_fallback_not_triggered_on_invalid_input() -> None:
-    """skipped_invalid_input 默认不回退。"""
-    adapter = _MockAdapter()
-    fallback = _MockFallback(results=[])
-    estimator = WiLoRHandEstimator(
-        adapter=adapter,
-        model_info=_make_model_info(),
-        fallback_estimator=fallback,
-    )
-    result = estimator.estimate_frame(None, 0)  # type: ignore[arg-type]
-
-    assert result.primary.status == "skipped_invalid_input"
-    assert not result.fallback_attempted
-    estimator.close()
-
-
-# ════════════════════════════════════════════════════════════════════
-# 回退 — 异常保留不覆盖
-# ════════════════════════════════════════════════════════════════════
-
-
-def test_primary_failure_not_overwritten_by_fallback() -> None:
-    """回退成功不能把 WiLoR 的 failed 改成 detected。"""
-    adapter = _MockAdapter(exc=WiLoRInferenceError("CUDA OOM"))
-    fallback = _MockFallback(results=[])  # 无手
-    config = WiLoREstimatorConfig(
-        fallback_policy=WiLoRFallbackPolicy(on_wilor_frame_failure=True),
-    )
-    estimator = WiLoRHandEstimator(
-        adapter=adapter,
-        model_info=_make_model_info(),
-        fallback_estimator=fallback,
-        config=config,
-    )
-    result = estimator.estimate_frame(_make_frame(), 0)
-
-    # primary 仍然记录失败
-    assert result.primary.status == "failed"
-    assert result.primary.failure_reason is not None
-    # effective 来自 fallback
-    assert result.fallback_used
-    assert result.effective_model == "mediapipe"
-    estimator.close()
-
-
-def test_fallback_itself_fails() -> None:
-    """MediaPipe 回退也失败时，双记录保留。"""
-    adapter = _MockAdapter(exc=WiLoRInferenceError("WiLoR 错误"))
-    fallback = _MockFallback(exc=WiLoRInferenceError("MP 错误"))
-    config = WiLoREstimatorConfig(
-        fallback_policy=WiLoRFallbackPolicy(on_wilor_frame_failure=True),
-    )
-    estimator = WiLoRHandEstimator(
-        adapter=adapter,
-        model_info=_make_model_info(),
-        fallback_estimator=fallback,
-        config=config,
-    )
-    result = estimator.estimate_frame(_make_frame(), 0)
-
-    assert result.primary.status == "failed"
-    assert result.fallback is not None
-    assert result.fallback.status == "failed"
-    assert not result.fallback_used  # fallback 没成功
-    assert result.effective_model is None
-    estimator.close()
-
-
-# ════════════════════════════════════════════════════════════════════
-# 无 fallback estimator 时
-# ════════════════════════════════════════════════════════════════════
-
-
-def test_no_fallback_configured() -> None:
-    adapter = _MockAdapter(exc=WiLoRInferenceError("错误"))
-    config = WiLoREstimatorConfig(
-        fallback_policy=WiLoRFallbackPolicy(on_wilor_frame_failure=True),
-    )
-    estimator = WiLoRHandEstimator(
-        adapter=adapter,
-        model_info=_make_model_info(),
-        fallback_estimator=None,  # 未配置
-        config=config,
-    )
-    result = estimator.estimate_frame(_make_frame(), 0)
-
-    assert result.primary.status == "failed"
-    assert not result.fallback_attempted  # 想回退但没配置
-    estimator.close()
-
-
-# ════════════════════════════════════════════════════════════════════
 # 帧统计恒等式
 # ════════════════════════════════════════════════════════════════════
 
@@ -501,42 +314,6 @@ def test_frame_stats_invariant() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 对照模式
-# ════════════════════════════════════════════════════════════════════
-
-
-def test_compare_mode_runs_both_models() -> None:
-    """对照模式：WiLoR 成功时也运行 MediaPipe。"""
-    adapter = _MockAdapter(detections=[_make_detection()])
-    fallback = _MockFallback(results=[])
-    config = WiLoREstimatorConfig(
-        fallback_policy=WiLoRFallbackPolicy(
-            compare_with_mediapipe=True,
-            on_wilor_frame_failure=False,
-            on_wilor_no_hand=False,
-            on_invalid_input=False,
-        ),
-    )
-    estimator = WiLoRHandEstimator(
-        adapter=adapter,
-        model_info=_make_model_info(),
-        fallback_estimator=fallback,
-        config=config,
-    )
-    result = estimator.estimate_frame(_make_frame(), 0)
-
-    # 对照模式不影响 primary
-    assert result.primary.status == "detected"
-    assert result.effective_model == "wilor"
-    assert not result.fallback_used  # 不是回退
-    # 对照结果在内部记录
-    assert len(estimator._comparison_runs) == 1
-    assert estimator._comparison_runs[0].model_name == "mediapipe"
-    assert fallback.call_count == 1
-    estimator.close()
-
-
-# ════════════════════════════════════════════════════════════════════
 # 前后一致
 # ════════════════════════════════════════════════════════════════════
 
@@ -556,39 +333,15 @@ def test_estimate_method_compat() -> None:
     estimator.close()
 
 
-def test_close_calls_adapter_and_fallback() -> None:
+def test_close_calls_adapter() -> None:
     adapter = _MockAdapter()
-    fallback = _MockFallback()
     estimator = WiLoRHandEstimator(
         adapter=adapter,
         model_info=_make_model_info(),
-        fallback_estimator=fallback,
     )
     estimator.close()
 
     assert adapter.close_called
-    assert fallback.close_called
-
-
-# ════════════════════════════════════════════════════════════════════
-# WiLoRFallbackPolicy 互斥校验
-# ════════════════════════════════════════════════════════════════════
-
-
-def test_policy_compare_and_fallback_mutually_exclusive() -> None:
-    with pytest.raises(ValueError, match="互斥"):
-        WiLoRFallbackPolicy(
-            compare_with_mediapipe=True,
-            on_wilor_frame_failure=True,
-        )
-
-
-def test_policy_defaults() -> None:
-    policy = WiLoRFallbackPolicy()
-    assert policy.on_wilor_frame_failure
-    assert not policy.on_wilor_no_hand
-    assert not policy.on_invalid_input
-    assert not policy.compare_with_mediapipe
 
 
 # ════════════════════════════════════════════════════════════════════

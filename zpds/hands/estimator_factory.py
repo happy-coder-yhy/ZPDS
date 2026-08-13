@@ -1,18 +1,12 @@
-"""Hands 模型工厂和运行时元数据。
-
-阶段三只提供稳定的工厂边界。MediaPipe 可直接创建；WiLoR 的真实创建逻辑
-由后续 ``wilor_adapter.py`` 接入，未接入时必须明确失败。
-"""
+"""Hands 模型工厂和运行时元数据（单后端：恒 WiLoR）。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from zpds.hands.config import HandsPipelineConfig
 from zpds.hands.contracts import HandEstimator
-from zpds.hands.mediapipe_adapter import MediaPipeHandEstimator
 
 
 class EstimatorUnavailableError(RuntimeError):
@@ -42,19 +36,15 @@ class EstimatorRuntime:
 
 
 def validate_estimator_runtime(
-    primary_model: str,
     runtime: EstimatorRuntime,
     config: HandsPipelineConfig,
 ) -> None:
-    """在 Pipeline 接管前验证人员 B 返回的运行时元数据。"""
+    """在 Pipeline 接管前验证运行时元数据（单后端恒为 WiLoR）。"""
 
-    if runtime.model_name != primary_model:
+    if runtime.model_name != "wilor":
         raise ValueError(
-            "EstimatorRuntime.model_name 与路由选择不一致: "
-            f"expected={primary_model!r}, actual={runtime.model_name!r}"
+            f"EstimatorRuntime.model_name 必须为 'wilor'，实际为 {runtime.model_name!r}"
         )
-    if primary_model != "wilor":
-        return
 
     expected_sha256 = config.wilor.checkpoint_sha256.lower()
     if not expected_sha256:
@@ -71,50 +61,9 @@ def validate_estimator_runtime(
         raise ValueError("WiLoR runtime active_backend 必须为 'wilor'")
 
 
-def create_hand_estimator(
-    primary_model: str,
-    config: HandsPipelineConfig,
-) -> EstimatorRuntime:
-    """根据 Router 结果创建模型；禁止跨模型静默回退。"""
-    if primary_model == "wilor":
-        return _create_wilor_estimator(config)
-        raise EstimatorUnavailableError(
-            "WiLoR 已被选为主模型，但真实 wilor_adapter.py 尚未接入；"
-            "不能静默改用 MediaPipe"
-        )
-    if primary_model != "mediapipe":
-        raise ValueError(f"未知 Hands 主模型: {primary_model!r}")
-
-    estimator = MediaPipeHandEstimator.from_config(config.estimator)
-    backend_info = estimator.backend_info
-    active_backend = (
-        backend_info.active_backend if backend_info is not None else "unknown"
-    )
-    run_meta: dict[str, object] = {
-        "backend_requested": (
-            backend_info.requested_backend if backend_info else ""
-        ),
-        "backend_active": active_backend,
-        "backend_fallback_used": (
-            backend_info.fallback_used if backend_info else False
-        ),
-        "backend_fallback_reason": (
-            backend_info.fallback_reason if backend_info else ""
-        ),
-        "backend_delegate": backend_info.delegate if backend_info else "",
-    }
-    try:
-        model_version = version("mediapipe")
-    except PackageNotFoundError:
-        model_version = ""
-    return EstimatorRuntime(
-        estimator=estimator,
-        model_name="mediapipe",
-        model_version=model_version,
-        checkpoint_sha256=estimator.model_info.sha256,
-        active_backend=active_backend,
-        run_meta=run_meta,
-    )
+def create_hand_estimator(config: HandsPipelineConfig) -> EstimatorRuntime:
+    """创建 Hands 检测器（单后端：恒 WiLoR，无跨模型回退）。"""
+    return _create_wilor_estimator(config)
 
 
 def _read_source_commit(source_path: Path) -> str:
@@ -181,7 +130,7 @@ def _create_wilor_estimator(config: HandsPipelineConfig) -> EstimatorRuntime:
         raise EstimatorUnavailableError(
             "WiLoR source package is unavailable: "
             f"{source_path if wilor.source_path else '<not configured>'}; "
-            "不能静默改用 MediaPipe"
+            "单后端模式下 WiLoR 不可用即 Hands 检测不可用"
         )
     if not wilor.upstream_commit:
         raise EstimatorUnavailableError(
@@ -210,9 +159,6 @@ def _create_wilor_estimator(config: HandsPipelineConfig) -> EstimatorRuntime:
     )
     from zpds.hands.wilor_schema import (
         WiLoRConfig as BackendWiLoRConfig,
-    )
-    from zpds.hands.wilor_schema import (
-        WiLoRFallbackPolicy,
     )
 
     _validate_wilor_joint_mapping_contract(
@@ -247,14 +193,7 @@ def _create_wilor_estimator(config: HandsPipelineConfig) -> EstimatorRuntime:
     estimator = WiLoRHandEstimator(
         adapter=adapter,
         model_info=backend.model_info,
-        fallback_estimator=None,
         config=WiLoREstimatorConfig(
-            fallback_policy=WiLoRFallbackPolicy(
-                on_wilor_init_failure=False,
-                on_wilor_frame_failure=False,
-                on_wilor_no_hand=False,
-                on_invalid_input=False,
-            ),
             model_name="wilor",
             model_version=wilor.model_version,
             # 抽帧：ego_bbox_every_frame=False 时按 bbox_fps 时间窗推理，

@@ -294,8 +294,7 @@ def _run_hand_analysis(
     source_kind: str = "ego",
     frame_source: Any | None = None,
 ) -> dict[str, str]:
-    """运行手部检测（WiLoR，按配置路由）与手部清洗，返回报告与 parquet 路径。"""
-    from zpds.hands.backend_router import HandsBackendRouter
+    """运行手部检测（WiLoR 单后端）与手部清洗，返回报告与 parquet 路径。"""
     from zpds.hands.cleaning import HandVideoCleaningConfig, clean_hand_video
     from zpds.hands.config import HandsPipelineConfig
     from zpds.hands.estimator_factory import (
@@ -309,17 +308,14 @@ def _run_hand_analysis(
     runtime_config = HandsPipelineConfig.load(
         str(Path(CONFIG_PATH).expanduser().resolve()),
     )
-    router = HandsBackendRouter(runtime_config.backend_policy)
-    primary_model = router.select_backend(is_ego=source_kind == "ego")
-    if primary_model == "wilor":
-        preflight = check_wilor_assets(runtime_config.wilor)
-        if not preflight.ready:
-            raise RuntimeError(
-                "WiLoR 资产预检失败（请在有 WiLoR 权重的工作机运行）: "
-                + ("; ".join(preflight.errors) or "未知资产错误")
-            )
-    runtime = create_hand_estimator(primary_model, runtime_config)
-    validate_estimator_runtime(primary_model, runtime, runtime_config)
+    preflight = check_wilor_assets(runtime_config.wilor)
+    if not preflight.ready:
+        raise RuntimeError(
+            "WiLoR 资产预检失败（请在有 WiLoR 权重的工作机运行）: "
+            + ("; ".join(preflight.errors) or "未知资产错误")
+        )
+    runtime = create_hand_estimator(runtime_config)
+    validate_estimator_runtime(runtime, runtime_config)
     source = _RawVideoFrameSource(
         video_path,
         timestamps_ns=timestamps_ns,

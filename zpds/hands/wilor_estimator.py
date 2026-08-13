@@ -1,16 +1,13 @@
-"""WiLoR 手部估计器（阶段 3：帧状态、失败记录和回退）。
+"""WiLoR 手部估计器（单后端：帧状态与失败记录）。
 
 本模块是 WiLoR 面向 Pipeline 的统一入口，负责：
 - 每帧产生明确的 :class:`HandFrameResult`（不通过空列表掩盖失败）
-- 按 :class:`WiLoRFallbackPolicy` 决定是否调用 MediaPipe 回退
-- 支持对照模式（compare_with_mediapipe）
 - 记录完整帧统计，对齐 sample map
 
 职责边界：
     - Backend：模型加载 + 原始推理
     - Adapter：坐标逆变换 + BBox 校验
-    - **Estimator（本模块）：帧状态、失败记录、回退调度**
-    - Router（后续）：primary/fallback 对外统一入口
+    - **Estimator（本模块）：帧状态与失败记录**
 """
 
 from __future__ import annotations
@@ -18,7 +15,7 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Protocol
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -35,35 +32,10 @@ from zpds.hands.wilor_schema import (
     FRAME_LEVEL_ERRORS,
     RUN_LEVEL_ERRORS,
     WiLoRError,
-    WiLoRFallbackPolicy,
     WiLoRModelInfo,
     WiLoRRunReport,
     WiLoRRunThresholds,
 )
-
-
-# ════════════════════════════════════════════════════════════════════
-# Fallback estimator 最小接口（鸭子类型）
-# ════════════════════════════════════════════════════════════════════
-
-
-class FallbackEstimator(Protocol):
-    """回退估计器所需的接口。
-
-    MediaPipeHandEstimator 天然满足此协议。
-    """
-
-    def estimate(
-        self,
-        frame_rgb: np.ndarray,
-        timestamp_ms: int,
-    ) -> list[RawHandResult]:
-        ...
-
-    @property
-    def config(self) -> object: ...
-
-    def close(self) -> None: ...
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -75,9 +47,6 @@ class FallbackEstimator(Protocol):
 class WiLoREstimatorConfig:
     """WiLoRHandEstimator 的初始化配置。"""
 
-    fallback_policy: WiLoRFallbackPolicy = field(
-        default_factory=WiLoRFallbackPolicy,
-    )
     model_name: str = "wilor"
     model_version: str = ""
     # ---- 抽帧 ----
@@ -142,14 +111,13 @@ class WiLoRFrameStats:
 class WiLoRHandEstimator:
     """WiLoR 手部估计器。
 
-    封装 WiLoRAdapter → 帧状态管理 → 回退调度 → HandFrameResult。
+    封装 WiLoRAdapter → 帧状态管理 → HandFrameResult。
 
     用法::
 
         estimator = WiLoRHandEstimator(
             adapter=wilor_adapter,
             model_info=backend.model_info,
-            fallback_estimator=mediapipe_estimator,
         )
         frame_result = estimator.estimate_frame(frame_rgb, timestamp_ms=0)
         print(frame_result.primary.status)  # detected / no_hand / failed / ...
@@ -160,7 +128,6 @@ class WiLoRHandEstimator:
         *,
         adapter: object,  # WiLoRAdapter（避免顶层导入）
         model_info: WiLoRModelInfo,
-        fallback_estimator: FallbackEstimator | None = None,
         config: WiLoREstimatorConfig | None = None,
         thresholds: WiLoRRunThresholds | None = None,
     ) -> None:
@@ -169,13 +136,11 @@ class WiLoRHandEstimator:
         Args:
             adapter: WiLoRAdapter 实例（有 detect() 方法）。
             model_info: 从 WiLoRBackend 采集的运行时元信息。
-            fallback_estimator: MediaPipe 回退估计器（可选，None 时不回退）。
-            config: 回退策略等配置。
+            config: 抽帧等运行配置。
             thresholds: 运行级失败阈值。为 None 时使用默认值。
         """
         self._adapter = adapter
         self._model_info = model_info
-        self._fallback = fallback_estimator
         self._config = config or WiLoREstimatorConfig()
         self._thresholds = thresholds or WiLoRRunThresholds()
         self._stats = WiLoRFrameStats()
@@ -191,9 +156,6 @@ class WiLoRHandEstimator:
         # 抽帧状态：最近一次真实推理的结果与其时间戳（传播帧不更新）
         self._last_wilor_result: ModelAttemptResult | None = None
         self._last_wilor_ms: int = -1
-
-        # 对照模式累计（与回退独立）
-        self._comparison_runs: list[ModelAttemptResult] = []
 
         # 初始化计时器列表
         self._init_time_ms = 0.0
@@ -266,19 +228,8 @@ class WiLoRHandEstimator:
         # ---- 运行级终止检查 ----
         self.should_abort()
 
-        # ---- 对照模式（可选） ----
-        if (
-            self._config.fallback_policy.compare_with_mediapipe
-            and self._fallback is not None
-        ):
-            self._run_comparison(frame_rgb, timestamp_ms)
-
-        # ---- 回退策略 ----
-        return self._apply_fallback_policy(
-            frame_rgb=frame_rgb,
-            timestamp_ms=timestamp_ms,
-            primary=primary,
-        )
+        # ---- 组装帧结果（无跨模型回退） ----
+        return self._to_frame_result(timestamp_ms=timestamp_ms, primary=primary)
 
     def estimate(
         self,
@@ -413,16 +364,10 @@ class WiLoRHandEstimator:
                 if i not in infer_idx:
                     results[i] = self._propagated_result(timestamps_ms[i])
 
-        # ---- 3. 运行级检查 + 对照/回退（仅有效帧，与 estimate_frame 对齐） ----
+        # ---- 3. 运行级检查 + 组装帧结果（仅有效帧，与 estimate_frame 对齐） ----
         for i in valid:
             self.should_abort()
-            if (
-                self._config.fallback_policy.compare_with_mediapipe
-                and self._fallback is not None
-            ):
-                self._run_comparison(frames_rgb[i], timestamps_ms[i])
-            results[i] = self._apply_fallback_policy(
-                frame_rgb=frames_rgb[i],
+            results[i] = self._to_frame_result(
                 timestamp_ms=timestamps_ms[i],
                 primary=results[i],
             )
@@ -434,12 +379,7 @@ class WiLoRHandEstimator:
 
     @property
     def supports_batch(self) -> bool:
-        """是否支持跨帧批量推理（pipeline 据此选择 buffered 循环）。
-
-        对照模式（WiLoR + MediaPipe 并行）不支持批量，保持逐帧。
-        """
-        if self._config.fallback_policy.compare_with_mediapipe:
-            return False
+        """是否支持跨帧批量推理（pipeline 据此选择 buffered 循环）。"""
         return callable(getattr(self._adapter, "detect_batch", None))
 
     # ---- 内部 ----
@@ -626,136 +566,30 @@ class WiLoRHandEstimator:
             device=self._model_info.device,
         )
 
-    def _run_mediapipe_fallback(
+    def _to_frame_result(
         self,
-        frame_rgb: np.ndarray,
-        timestamp_ms: int,
-    ) -> ModelAttemptResult:
-        """调用 MediaPipe 回退估计器。"""
-        if self._fallback is None:
-            return ModelAttemptResult(
-                model_name="mediapipe",
-                backend_name="none",
-                status="not_run",
-                hands=[],
-                inference_ms=0.0,
-                failure_reason="未配置 fallback estimator",
-                model_version="",
-                checkpoint_sha256=None,
-                device="",
-            )
-
-        t_start = time.perf_counter()
-
-        try:
-            results = self._fallback.estimate(frame_rgb, timestamp_ms)
-            inference_ms = (time.perf_counter() - t_start) * 1000
-
-            status = "detected" if results else "no_hand"
-            return ModelAttemptResult(
-                model_name="mediapipe",
-                backend_name="mediapipe",
-                status=status,  # type: ignore[arg-type]
-                hands=list(results),
-                inference_ms=inference_ms,
-                failure_reason=None,
-                model_version="hand_landmarker_v1",
-                checkpoint_sha256=None,
-                device="cpu",
-            )
-
-        except Exception as exc:
-            inference_ms = (time.perf_counter() - t_start) * 1000
-            return ModelAttemptResult(
-                model_name="mediapipe",
-                backend_name="mediapipe",
-                status="failed",
-                hands=[],
-                inference_ms=inference_ms,
-                failure_reason=f"{type(exc).__name__}: {exc}",
-                model_version="hand_landmarker_v1",
-                checkpoint_sha256=None,
-                device="cpu",
-            )
-
-    def _should_fallback(self, primary: ModelAttemptResult) -> bool:
-        """判断是否需要对当前主模型结果触发回退。"""
-        policy = self._config.fallback_policy
-
-        if self._fallback is None:
-            return False  # 未配置回退
-
-        if policy.compare_with_mediapipe:
-            return False  # 对照模式，不回退
-
-        if primary.status == "failed":
-            return policy.on_wilor_frame_failure
-
-        if primary.status == "no_hand":
-            return policy.on_wilor_no_hand
-
-        if primary.status == "skipped_invalid_input":
-            return policy.on_invalid_input
-
-        return False
-
-    def _apply_fallback_policy(
-        self,
-        frame_rgb: np.ndarray,
         timestamp_ms: int,
         primary: ModelAttemptResult,
     ) -> HandFrameResult:
-        """应用回退策略，组装 HandFrameResult。"""
-        if not self._should_fallback(primary):
-            return HandFrameResult(
-                timestamp_ms=timestamp_ms,
-                requested_model="wilor",
-                primary=primary,
-                fallback=None,
-                fallback_attempted=False,
-                fallback_used=False,
-                fallback_reason=None,
-                effective_model=(
-                    "wilor"
-                    if primary.status in {"detected", "no_hand"}
-                    else None
-                ),
-                effective_hands=list(primary.hands),
-            )
+        """组装单帧 HandFrameResult（单后端，无跨模型回退）。
 
-        # ---- 执行回退 ----
-        fallback = self._run_mediapipe_fallback(frame_rgb, timestamp_ms)
-        self._stats.fallback_attempted += 1
-
-        fallback_succeeded = fallback.status in {"detected", "no_hand"}
-
-        if fallback_succeeded:
-            self._stats.fallback_used += 1
-
+        输出契约保留 fallback 字段（恒为未尝试），与 parquet/验证链路兼容。
+        """
         return HandFrameResult(
             timestamp_ms=timestamp_ms,
             requested_model="wilor",
             primary=primary,
-            fallback=fallback,
-            fallback_attempted=True,
-            fallback_used=fallback_succeeded,
-            fallback_reason=primary.failure_reason,
+            fallback=None,
+            fallback_attempted=False,
+            fallback_used=False,
+            fallback_reason=None,
             effective_model=(
-                "mediapipe" if fallback_succeeded else None
+                "wilor"
+                if primary.status in {"detected", "no_hand"}
+                else None
             ),
-            effective_hands=(
-                list(fallback.hands) if fallback_succeeded else []
-            ),
+            effective_hands=list(primary.hands),
         )
-
-    def _run_comparison(
-        self,
-        frame_rgb: np.ndarray,
-        timestamp_ms: int,
-    ) -> None:
-        """对照模式：无论 WiLoR 结果如何，同时运行 MediaPipe。"""
-        comparison = self._run_mediapipe_fallback(frame_rgb, timestamp_ms)
-        self._comparison_runs.append(comparison)
 
     def _aborted_result(self, timestamp_ms: int) -> HandFrameResult:
         """构造运行级终止（not_run）的 HandFrameResult。"""
@@ -878,8 +712,8 @@ class WiLoRHandEstimator:
                 "invalid_input_frames": self._stats.skipped_invalid_input,
             },
             fallback={
-                "configured": self._fallback is not None,
-                "model": "mediapipe" if self._fallback is not None else "none",
+                "configured": False,
+                "model": "none",
                 "attempted_frames": self._stats.fallback_attempted,
                 "successful_frames": self._stats.fallback_used,
                 "failed_frames": self._stats.fallback_attempted - self._stats.fallback_used,
@@ -931,8 +765,6 @@ class WiLoRHandEstimator:
 
     def close(self) -> None:
         self._adapter.close()
-        if self._fallback is not None:
-            self._fallback.close()
 
 
 # ════════════════════════════════════════════════════════════════════

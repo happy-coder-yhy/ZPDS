@@ -347,39 +347,6 @@ class WiLoRDetection:
     transform: WiLoRImageTransform | None = None
 
 
-# ════════════════════════════════════════════════════════════════════
-# 回退策略配置
-# ════════════════════════════════════════════════════════════════════
-
-
-@dataclass(slots=True)
-class WiLoRFallbackPolicy:
-    """WiLoR → MediaPipe 的回退和对照策略。
-
-    每项独立控制，不会互相覆盖。
-    """
-
-    on_wilor_init_failure: bool = True
-    on_wilor_frame_failure: bool = True
-    on_wilor_no_hand: bool = False
-    on_invalid_input: bool = False
-
-    compare_with_mediapipe: bool = False
-
-    def __post_init__(self) -> None:
-        if self.compare_with_mediapipe and (
-            self.on_wilor_frame_failure
-            or self.on_wilor_no_hand
-            or self.on_invalid_input
-        ):
-            raise ValueError(
-                "compare_with_mediapipe=True 时不应同时启用回退开关。"
-                "对照模式是同时运行两个模型以比较结果，"
-                "回退模式是 WiLoR 失败后才调用 MediaPipe。"
-                "两者语义互斥。"
-            )
-
-
 @dataclass(slots=True)
 class WiLoRRunThresholds:
     """运行级失败阈值。
@@ -452,7 +419,6 @@ __all__ = [
     "WiLoRConfig",
     "WiLoRDetection",
     "WiLoRError",
-    "WiLoRFallbackPolicy",
     "WiLoRImageTransform",
     "WiLoRInitializationError",
     "WiLoRInferenceError",

@@ -91,26 +91,17 @@ def _hand() -> RawHandResult:
 
 
 def _write_config(tmp_path: Path) -> Path:
+    checkpoint = tmp_path / "models" / "wilor" / "model.pt"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"fake checkpoint")
     document = {
         "hands": {
-            "ego_bbox_backend": "wilor",
-            "non_ego_bbox_backend": "mediapipe",
-            "fallback_2d_backend": "mediapipe",
-            "mediapipe": {
-                "backend": "solutions_hands",
-                "fallback_backend": "solutions_hands",
-                "tasks": {
-                    "model_path": "models/hand_landmarker.task",
-                    "delegate": "cpu",
-                },
-                "solutions": {"model_complexity": 1},
-            },
             "wilor": {
                 "enabled": True,
                 "ego_bbox_every_frame": True,
                 "write_frame_status": True,
                 "upstream_commit": "test-commit",
-                "checkpoint_path": "models/wilor/model.pt",
+                "checkpoint_path": str(checkpoint),
                 "checkpoint_sha256": "test-wilor-sha",
             },
         }
@@ -147,11 +138,8 @@ def test_wilor_cli_orchestration_writes_full_frame_manifest(
         [[_hand()], [], [_hand()]]
     )
 
-    def estimator_factory(
-        primary_model: str,
-        _config,
-    ) -> EstimatorRuntime:
-        assert primary_model == "wilor"
+    def estimator_factory(config) -> EstimatorRuntime:
+        assert config.wilor.enabled
         return EstimatorRuntime(
             estimator=estimator,
             model_name="wilor",
@@ -215,7 +203,7 @@ def test_max_frames_is_recorded_as_incomplete_smoke_run(
     args = _args(tmp_path, max_frames=2)
     estimator = FakeHandEstimator([[], [], []])
 
-    def estimator_factory(_primary_model: str, _config) -> EstimatorRuntime:
+    def estimator_factory(_config) -> EstimatorRuntime:
         return EstimatorRuntime(
             estimator=estimator,
             model_name="wilor",
@@ -261,7 +249,7 @@ def test_wilor_runtime_contract_failure_closes_estimator(
     args = _args(tmp_path, max_frames=1)
     estimator = FakeHandEstimator([[]])
 
-    def estimator_factory(_primary_model: str, _config) -> EstimatorRuntime:
+    def estimator_factory(_config) -> EstimatorRuntime:
         return EstimatorRuntime(
             estimator=estimator,
             model_name="wilor",
@@ -334,16 +322,12 @@ def test_batch_rejects_incomplete_wilor_frame_statistics(
 
     can_skip, reason = batch_run_hands._existing_output_can_be_skipped(
         segment_dir=segment_dir,
-        segment={},
         segment_id="seg_000001",
         stream_id="ego_rgb",
         paths=paths,
         expected_config_sha256="config-hash",
         expected_checkpoint_sha256="model-hash",
         max_frames=None,
-        report_required=False,
-        preview_required=False,
-        primary_model="wilor",
         expected_upstream_git_commit="commit",
     )
 
@@ -356,10 +340,9 @@ def test_default_wilor_factories_create_formal_parquet_writers(
 ) -> None:
     config = HandsPipelineConfig.load(_write_config(tmp_path))
 
-    with pytest.raises(EstimatorUnavailableError, match="不能静默"):
-        create_hand_estimator("wilor", config)
+    with pytest.raises(EstimatorUnavailableError, match="不可用即 Hands 检测不可用"):
+        create_hand_estimator(config)
     bundle = create_inference_writers(
-        "wilor",
         frame_status_path=str(tmp_path / "status.parquet"),
         bbox_path=str(tmp_path / "bbox.parquet"),
         context=InferenceArtifactContext(

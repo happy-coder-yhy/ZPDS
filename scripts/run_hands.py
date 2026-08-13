@@ -11,7 +11,6 @@ from typing import Any
 
 import cv2
 
-from zpds.hands.backend_router import HandsBackendRouter
 from zpds.hands.config import HandsOutputPaths, HandsPipelineConfig
 from zpds.hands.estimator_factory import (
     EstimatorRuntime,
@@ -34,7 +33,7 @@ from zpds.hands.validator import validate_hands_parquet, validate_wilor_hands
 from zpds.hands.wilor_preflight import check_wilor_assets
 from zpds.hands.writer import write_hand_observations
 
-EstimatorFactory = Callable[[str, HandsPipelineConfig], EstimatorRuntime]
+EstimatorFactory = Callable[[HandsPipelineConfig], EstimatorRuntime]
 InferenceWriterFactory = Callable[..., InferenceWriterBundle]
 
 
@@ -49,12 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-kind",
         choices=["ego", "non_ego"],
         default="non_ego",
-        help="数据源类型；必须显式设为 ego 才会选择 ego 主后端",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=["auto", "tasks_hand_landmarker", "solutions_hands"],
-        help="覆盖配置文件中的模型后端",
+        help="数据源类型（单后端恒 WiLoR，仅作 manifest 记录）",
     )
     parser.add_argument("--output", help="hands_2d.parquet 输出路径")
     parser.add_argument(
@@ -206,13 +200,9 @@ def run(
 ) -> int:
     segment_dir = Path(args.segment).expanduser().resolve()
     config_path = Path(args.config).expanduser().resolve()
-    runtime_config = HandsPipelineConfig.load(
-        config_path,
-        backend_override=args.backend,
-    )
+    runtime_config = HandsPipelineConfig.load(config_path)
     source_kind = getattr(args, "source_kind", "non_ego")
-    router = HandsBackendRouter(runtime_config.backend_policy)
-    primary_model = router.select_backend(is_ego=source_kind == "ego")
+    primary_model = "wilor"
 
     reader = PreparedSegmentReader(
         segment_dir,
@@ -280,27 +270,26 @@ def run(
     output_path = output_paths.parquet
     config_sha256 = runtime_config.config_sha256
 
-    if primary_model == "wilor" and verify_wilor_assets:
+    if verify_wilor_assets:
         preflight = check_wilor_assets(runtime_config.wilor)
         if not preflight.ready:
             details = "; ".join(preflight.errors) or "未知资产错误"
             raise RuntimeError(f"WiLoR 资产预检失败: {details}")
 
-    runtime = estimator_factory(primary_model, runtime_config)
+    runtime = estimator_factory(runtime_config)
     try:
-        validate_estimator_runtime(primary_model, runtime, runtime_config)
+        validate_estimator_runtime(runtime, runtime_config)
     except Exception:
         runtime.estimator.close()
         raise
     frame_status_path = (
         str(output_paths.frame_status)
-        if primary_model == "wilor"
-        and output_paths.frame_status is not None
+        if output_paths.frame_status is not None
         else None
     )
     bbox_path = (
         str(output_paths.bbox)
-        if primary_model == "wilor" and output_paths.bbox is not None
+        if output_paths.bbox is not None
         else None
     )
     try:
@@ -319,7 +308,6 @@ def run(
             ),
         )
         writers = inference_writer_factory(
-            primary_model,
             frame_status_path=frame_status_path,
             bbox_path=bbox_path,
             context=writer_context,
@@ -344,7 +332,7 @@ def run(
                 writers.bbox.write(record)
                 yield from pipeline.observations_for_record(
                     record,
-                    fail_on_error=primary_model == "mediapipe",
+                    fail_on_error=False,
                 )
 
         parquet_path = write_hand_observations(
@@ -415,18 +403,14 @@ def run(
         and output_paths.bbox.is_file()
     )
     artifact_report: dict[str, Any] | None = None
-    if primary_model == "wilor":
-        if (
-            output_paths.frame_status is None
-            or output_paths.bbox is None
-        ):
-            raise RuntimeError("WiLoR 全帧资产输出路径缺失")
-        artifact_report = validate_wilor_frame_artifacts(
-            output_paths.frame_status,
-            output_paths.bbox,
-            reader.sample_map_path,
-            expected_frame_count=frame_status_counts.requested,
-        )
+    if output_paths.frame_status is None or output_paths.bbox is None:
+        raise RuntimeError("WiLoR 全帧资产输出路径缺失")
+    artifact_report = validate_wilor_frame_artifacts(
+        output_paths.frame_status,
+        output_paths.bbox,
+        reader.sample_map_path,
+        expected_frame_count=frame_status_counts.requested,
+    )
 
     model_device = str(
         runtime.run_meta.get("device")
@@ -488,26 +472,18 @@ def run(
         image_width, image_height = actual_image_dimensions
         if image_width is None or image_height is None:
             raise ValueError("Hands Validator 无法确定实际视频分辨率")
-        if primary_model == "wilor":
-            hands_report = validate_wilor_hands(
-                parquet_path,
-                hands_run_path=str(manifest_path),
-                segment_json_path=str(segment_dir / "segment.json"),
-                image_width=image_width,
-                image_height=image_height,
-                expected_model_version=runtime.model_version,
-            )
-            report = _combine_validation_reports(
-                frame_artifacts=artifact_report or {},
-                hands_v1=hands_report,
-            )
-        else:
-            report = validate_hands_parquet(
-                parquet_path,
-                segment_json_path=str(segment_dir / "segment.json"),
-                image_width=image_width,
-                image_height=image_height,
-            )
+        hands_report = validate_wilor_hands(
+            parquet_path,
+            hands_run_path=str(manifest_path),
+            segment_json_path=str(segment_dir / "segment.json"),
+            image_width=image_width,
+            image_height=image_height,
+            expected_model_version=runtime.model_version,
+        )
+        report = _combine_validation_reports(
+            frame_artifacts=artifact_report or {},
+            hands_v1=hands_report,
+        )
         report_path = (
             Path(args.report_output).expanduser()
             if args.report_output
@@ -541,24 +517,18 @@ def run(
     )
     exit_code = (
         2
-        if validation_status == "fail"
-        or (primary_model == "wilor" and artifact_status == "fail")
+        if validation_status == "fail" or artifact_status == "fail"
         else 0
     )
     wilor_requirement_satisfied = (
         full_frame_coverage
         and wilor_artifacts_present
         and artifact_status == "pass"
-        if primary_model == "wilor"
-        else None
     )
     completed = (
         exit_code == 0
         and run_mode == "production"
-        and (
-            primary_model != "wilor"
-            or bool(wilor_requirement_satisfied)
-        )
+        and bool(wilor_requirement_satisfied)
     )
     manifest_document["completed"] = completed
     manifest_document["wilor_requirement_satisfied"] = (

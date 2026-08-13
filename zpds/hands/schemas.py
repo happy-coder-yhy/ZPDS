@@ -16,10 +16,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -239,110 +237,6 @@ class RawHandResult:
             label=label,
         )
 
-    # ---- MediaPipe 专属工厂（保留向后兼容） ----
-
-    @classmethod
-    def from_mediapipe(
-        cls,
-        hand_landmarks,
-        handedness,
-        image_width: int,
-        image_height: int,
-        bbox_padding_ratio: float = 0.10,
-        hand_index: int = 0,
-    ) -> "RawHandResult":
-        """从 MediaPipe HandLandmarker 单帧输出构造统一原始结果。
-
-        内部委托给 :meth:`from_components`，保持向后兼容。
-        """
-        landmarks = np.zeros((HAND_KEYPOINT_COUNT, 3), dtype=np.float64)
-        has_visibility = False
-        visibility: list[float] | None = []
-
-        for i, lm in enumerate(hand_landmarks):
-            if i >= HAND_KEYPOINT_COUNT:
-                break
-            landmarks[i, 0] = float(lm.x)
-            landmarks[i, 1] = float(lm.y)
-            landmarks[i, 2] = float(lm.z)
-
-            if hasattr(lm, "visibility") and lm.visibility is not None:
-                has_visibility = True
-                visibility.append(float(lm.visibility))
-            elif hasattr(lm, "visibility"):
-                visibility.append(0.0)
-            else:
-                visibility.append(1.0)
-
-        hand_score = float(handedness.score) if handedness.score else 0.0
-        hand_label = handedness.category_name if handedness.category_name else "Unknown"
-
-        return cls.from_components(
-            handedness=hand_label,
-            handedness_score=hand_score,
-            detection_score=hand_score,
-            normalized_landmarks=landmarks,
-            image_width=image_width,
-            image_height=image_height,
-            bbox_xyxy=None,
-            bbox_padding_ratio=bbox_padding_ratio,
-            label=f"hand_{hand_index}",
-            visibility=visibility if has_visibility else None,
-        )
-
-
-@dataclass
-class BackendInfo:
-    """实际启用的 MediaPipe 后端及 fallback 信息。"""
-
-    requested_backend: str = ""
-    active_backend: str = ""
-    fallback_used: bool = False
-    fallback_reason: str = ""
-    delegate: str = ""
-
-
-@dataclass
-class ModelInfo:
-    """Tasks 模型文件的路径、哈希和大小信息。"""
-
-    path: str = ""
-    sha256: str = ""
-    size_bytes: int = 0
-    download_url: str = (
-        "https://storage.googleapis.com/mediapipe-models/"
-        "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
-    )
-    exists: bool = False
-
-    @classmethod
-    def from_file(cls, model_path: str | Path) -> ModelInfo:
-        path = Path(model_path)
-        if not path.is_file():
-            return cls(path=str(path.resolve()), exists=False)
-        return cls(
-            path=str(path.resolve()),
-            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-            size_bytes=path.stat().st_size,
-            exists=True,
-        )
-
-
-@dataclass
-class SessionStats:
-    """单次 MediaPipe 推理会话统计。"""
-
-    total_frames: int = 0
-    empty_frames: int = 0
-    no_hand_frames: int = 0
-    hand_frames: int = 0
-    exception_frames: int = 0
-    init_time_ms: float = 0.0
-    total_inference_ms: float = 0.0
-    avg_inference_ms: float = 0.0
-    model_info: ModelInfo | None = None
-    backend_info: BackendInfo | None = None
-
 
 @dataclass(frozen=True)
 class PreparedFrame:
@@ -401,7 +295,7 @@ class HandObservation:
     keypoints_any_clipped: bool = False
     keypoints_clipped_count: int = 0
     # 逐帧模型归因。普通 HandEstimator 没有帧级结果时保留空值，Writer 会
-    # 回退到本次运行的 run_meta，兼容既有 MediaPipe 调用方。
+    # 回退到本次运行的 run_meta。
     backend_requested: str = ""
     backend_active: str = ""
     backend_fallback_used: bool = False
@@ -544,15 +438,12 @@ class HandFrameResult:
 __all__ = [
     "HAND_KEYPOINT_COUNT",
     "VALID_HANDEDNESS",
-    "BackendInfo",
     "HandBBox",
     "HandFrameResult",
     "HandKeypoints",
     "HandObservation",
     "Handedness",
     "ModelAttemptResult",
-    "ModelInfo",
     "PreparedFrame",
     "RawHandResult",
-    "SessionStats",
 ]

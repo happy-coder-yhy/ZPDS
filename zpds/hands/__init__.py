@@ -1,6 +1,5 @@
 """手部与操作检测。"""
 
-from zpds.hands.backend_router import HandsBackendPolicy, HandsBackendRouter
 from zpds.hands.config import HandsOutputPaths, HandsPipelineConfig, WilorConfig
 from zpds.hands.contracts import (
     BBoxWriter,
@@ -22,10 +21,6 @@ from zpds.hands.frame_artifacts import (
     ParquetBBoxWriter,
     ParquetFrameStatusWriter,
     validate_wilor_frame_artifacts,
-)
-from zpds.hands.model_router import (
-    HandModelRouter,
-    create_hand_model_router,
 )
 from zpds.hands.pipeline import (
     HandsPipeline,
@@ -69,11 +64,8 @@ __all__ = [
     "HandEstimator",
     "HandFrameResult",
     "HandKeypoints",
-    "HandModelRouter",
     "HandObservation",
     "Handedness",
-    "HandsBackendPolicy",
-    "HandsBackendRouter",
     "HandsOutputPaths",
     "HandsPipeline",
     "HandsPipelineConfig",
@@ -98,7 +90,6 @@ __all__ = [
     "WilorPreflightReport",
     "check_wilor_assets",
     "create_hand_estimator",
-    "create_hand_model_router",
     "validate_estimator_runtime",
     "validate_wilor_frame_artifacts",
 ]

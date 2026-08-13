@@ -14,23 +14,19 @@ from zpds.hands.writer import compute_config_sha256, write_hand_observations
 
 
 def _config_document() -> dict:
+    """单后端 WiLoR 配置（checkpoint 路径相对配置目录解析）。"""
     return {
         "hands": {
-            "backend": "tasks_hand_landmarker",
-            "fallback_backend": "solutions_hands",
-            "num_hands": 2,
-            "min_hand_detection_confidence": 0.5,
-            "min_hand_presence_confidence": 0.5,
-            "min_tracking_confidence": 0.5,
-            "bbox_padding_ratio": 0.1,
-            "tasks": {
-                "model_path": "models/hand_landmarker.task",
-                "delegate": "cpu",
-            },
-            "solutions": {
-                "model_complexity": 1,
-                "input_mirrored": False,
-            },
+            "wilor": {
+                "enabled": True,
+                "ego_bbox_every_frame": True,
+                "bbox_fps": 30.0,
+                "write_frame_status": True,
+                "checkpoint_path": "models/wilor.ckpt",
+                "device": "cpu",
+                "precision": "fp32",
+                "model_version": "wilor_cvpr2025",
+            }
         }
     }
 
@@ -43,6 +39,13 @@ def _write_config(root: Path, document: dict | None = None) -> Path:
         encoding="utf-8",
     )
     return config_path
+
+
+def _write_checkpoint(root: Path) -> Path:
+    checkpoint = root / "models" / "wilor.ckpt"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"wilor-checkpoint")
+    return checkpoint
 
 
 def _observation() -> HandObservation:
@@ -59,69 +62,57 @@ def _observation() -> HandObservation:
         bbox_xyxy=(1.0, 1.0, 20.0, 20.0),
         keypoints_2d=[(2.0 + index / 2, 2.0 + index / 2) for index in range(21)],
         keypoints_z_relative=[0.0] * 21,
-        model_name="mediapipe",
+        model_name="wilor",
         model_version="test",
     )
 
 
-def test_config_resolves_model_relative_to_yaml(tmp_path: Path) -> None:
-    model_path = tmp_path / "models" / "hand_landmarker.task"
-    model_path.parent.mkdir()
-    model_path.write_bytes(b"model-bytes")
+def test_config_resolves_checkpoint_relative_to_yaml(tmp_path: Path) -> None:
+    checkpoint = _write_checkpoint(tmp_path)
     config_path = _write_config(tmp_path)
 
     config = HandsPipelineConfig.load(config_path)
 
-    assert Path(config.estimator.tasks.model_path) == model_path.resolve()
-    assert config.checkpoint_sha256 == hashlib.sha256(b"model-bytes").hexdigest()
+    assert config.wilor.checkpoint_path == str(checkpoint.resolve())
+    assert config.checkpoint_sha256 == hashlib.sha256(b"wilor-checkpoint").hexdigest()
     assert config.config_sha256 == compute_config_sha256(_config_document())
 
 
-def test_config_backend_override_is_part_of_hash(tmp_path: Path) -> None:
-    config_path = _write_config(tmp_path)
-
-    config = HandsPipelineConfig.load(
-        config_path,
-        backend_override="solutions_hands",
-    )
-    expected = _config_document()
-    expected["hands"]["backend"] = "solutions_hands"
-
-    assert config.estimator.backend == "solutions_hands"
-    assert config.config_sha256 == compute_config_sha256(expected)
-
-
-def test_wilor_config_resolves_checkpoint_and_hashes_it(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "models" / "wilor.ckpt"
-    checkpoint.parent.mkdir()
-    checkpoint.write_bytes(b"wilor-checkpoint")
+def test_config_requires_wilor_enabled(tmp_path: Path) -> None:
     document = _config_document()
-    document["hands"]["backend"] = "wilor"
-    document["hands"]["wilor"] = {
-        "checkpoint_path": "models/wilor.ckpt",
-        "model_version": "wilor_cvpr2025",
-        "device": "cpu",
-    }
-    config_path = _write_config(tmp_path, document)
-
-    config = HandsPipelineConfig.load(config_path)
-
-    assert config.wilor is not None
-    assert config.wilor.checkpoint_path == str(checkpoint.resolve())
-    assert config.checkpoint_sha256 == hashlib.sha256(b"wilor-checkpoint").hexdigest()
-
-
-def test_config_rejects_invalid_confidence(tmp_path: Path) -> None:
-    document = _config_document()
-    document["hands"]["min_tracking_confidence"] = 1.5
+    document["hands"]["wilor"]["enabled"] = False
     config_path = _write_config(tmp_path, document)
 
     try:
         HandsPipelineConfig.load(config_path)
     except ValueError as error:
-        assert "min_tracking_confidence" in str(error)
+        assert "enabled" in str(error)
     else:
-        raise AssertionError("非法置信度必须被拒绝")
+        raise AssertionError("单后端模式必须要求 wilor.enabled=true")
+
+
+def test_config_rejects_missing_checkpoint(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+
+    try:
+        HandsPipelineConfig.load(config_path)
+    except FileNotFoundError as error:
+        assert "checkpoint" in str(error).lower() or "不存在" in str(error)
+    else:
+        raise AssertionError("缺失 checkpoint 必须报错")
+
+
+def test_wilor_sampling_config_accepted(tmp_path: Path) -> None:
+    _write_checkpoint(tmp_path)
+    document = _config_document()
+    document["hands"]["wilor"]["ego_bbox_every_frame"] = False
+    document["hands"]["wilor"]["bbox_fps"] = 10.0
+    config_path = _write_config(tmp_path, document)
+
+    config = HandsPipelineConfig.load(config_path)
+
+    assert config.wilor.ego_bbox_every_frame is False
+    assert config.wilor.bbox_fps == 10.0
 
 
 def test_output_paths_follow_experience_layout(tmp_path: Path) -> None:
@@ -198,7 +189,7 @@ def test_experience_manifest_registers_hands_assets(tmp_path: Path) -> None:
     hands = manifest["annotations"]["hands_v1"]
 
     assert hands["rows"] == 1
-    assert hands["model_name"] == "mediapipe"
+    assert hands["model_name"] == "wilor"
     assert hands["annotated_frames"] == 1
     assert hands["validation_status"] == "pass"
     assert hands["files"]["hands_2d"]["uri"] == "assets/poses/hands_2d.parquet"

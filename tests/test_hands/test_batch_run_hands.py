@@ -43,7 +43,7 @@ def _observation(segment_id: str) -> HandObservation:
         bbox_xyxy=(1.0, 1.0, 20.0, 20.0),
         keypoints_2d=[(2.0 + index / 2, 2.0 + index / 2) for index in range(21)],
         keypoints_z_relative=[0.0] * 21,
-        model_name="mediapipe",
+        model_name="wilor",
         model_version="test",
     )
 
@@ -96,6 +96,9 @@ def test_existing_complete_output_can_be_skipped(tmp_path: Path) -> None:
         checkpoint_sha256="model-hash",
         config_sha256="config-hash",
     )
+    paths["directory"].mkdir(parents=True, exist_ok=True)
+    paths["frame_status"].touch()
+    paths["bbox"].touch()
     batch_run_hands._write_json_atomic(
         paths["manifest"],
         {
@@ -105,26 +108,36 @@ def test_existing_complete_output_can_be_skipped(tmp_path: Path) -> None:
             "max_frames": None,
             "config_sha256": "config-hash",
             "checkpoint_sha256": "model-hash",
-            "statistics": {"frames_processed": 1},
+            "primary_model": "wilor",
+            "upstream_git_commit": "commit",
+            "wilor_requirement_satisfied": True,
+            "statistics": {
+                "expected_frame_count": 1,
+                "frame_status": {
+                    "requested": 1,
+                    "detected": 1,
+                    "no_hand": 0,
+                    "failed": 0,
+                    "skipped_invalid_input": 0,
+                },
+            },
             "validation_status": "pass",
         },
     )
 
     can_skip, reason = batch_run_hands._existing_output_can_be_skipped(
         segment_dir=segment_dir,
-        segment=segment,
         segment_id=segment_id,
         stream_id=stream_id,
         paths=paths,
         expected_config_sha256="config-hash",
         expected_checkpoint_sha256="model-hash",
         max_frames=None,
-        report_required=False,
-        preview_required=False,
+        expected_upstream_git_commit="commit",
     )
 
     assert can_skip is True
-    assert "warn" in reason
+    assert "校验通过" in reason
 
 
 def test_changed_max_frames_prevents_skip(tmp_path: Path) -> None:
@@ -142,6 +155,8 @@ def test_changed_max_frames_prevents_skip(tmp_path: Path) -> None:
     )
     paths["directory"].mkdir(parents=True)
     paths["parquet"].touch()
+    paths["frame_status"].touch()
+    paths["bbox"].touch()
     batch_run_hands._write_json_atomic(
         paths["manifest"],
         {
@@ -156,15 +171,12 @@ def test_changed_max_frames_prevents_skip(tmp_path: Path) -> None:
 
     can_skip, reason = batch_run_hands._existing_output_can_be_skipped(
         segment_dir=segment_dir,
-        segment=segment,
         segment_id=segment_id,
         stream_id=stream_id,
         paths=paths,
         expected_config_sha256="config-hash",
         expected_checkpoint_sha256="model-hash",
         max_frames=None,
-        report_required=False,
-        preview_required=False,
     )
 
     assert can_skip is False
@@ -188,11 +200,10 @@ def test_batch_continues_after_one_segment_fails(
     monkeypatch.setattr(
         batch_run_hands,
         "_expected_provenance",
-        lambda config_path, backend, source_kind: (
+        lambda config_path: (
             "config-hash",
             "model-hash",
-            "mediapipe",
-            "",
+            "commit",
         ),
     )
     monkeypatch.setattr(
@@ -258,11 +269,10 @@ def test_batch_skips_existing_valid_output(
     monkeypatch.setattr(
         batch_run_hands,
         "_expected_provenance",
-        lambda config_path, backend, source_kind: (
+        lambda config_path: (
             "config-hash",
             "model-hash",
-            "mediapipe",
-            "",
+            "commit",
         ),
     )
     monkeypatch.setattr(
